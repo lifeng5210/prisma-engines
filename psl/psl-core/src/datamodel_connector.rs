@@ -319,6 +319,7 @@ pub trait Connector: Send + Sync {
 pub enum Flavour {
     Cockroach,
     Mongo,
+    KingbaseMysql,
     Sqlserver,
     Mysql,
     Postgres,

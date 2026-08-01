@@ -4,6 +4,8 @@ pub mod completions;
 
 #[cfg(feature = "cockroachdb")]
 pub use cockroach_datamodel_connector::CockroachType;
+#[cfg(feature = "kingbase-mysql")]
+pub use kingbase_mysql_datamodel_connector::KingbaseMySqlType;
 #[cfg(feature = "mongodb")]
 pub use mongodb::MongoDbType;
 #[cfg(feature = "mssql")]
@@ -14,6 +16,8 @@ pub use mysql_datamodel_connector::MySqlType;
 pub use postgres_datamodel_connector::{KnownPostgresType, PostgresDatasourceProperties, PostgresType};
 
 mod capabilities_support;
+#[cfg(feature = "kingbase-mysql")]
+mod kingbase_mysql_datamodel_connector;
 #[cfg(feature = "mongodb")]
 mod mongodb;
 #[cfg(feature = "mssql")]
@@ -39,6 +43,9 @@ pub const COCKROACH: &'static dyn crate::datamodel_connector::Connector =
 #[cfg(feature = "mysql")]
 pub const MYSQL: &'static dyn crate::datamodel_connector::Connector =
     &mysql_datamodel_connector::MySqlDatamodelConnector;
+#[cfg(feature = "kingbase-mysql")]
+pub const KINGBASE_MYSQL: &'static dyn crate::datamodel_connector::Connector =
+    &kingbase_mysql_datamodel_connector::KingbaseMysqlDatamodelConnector;
 #[cfg(feature = "sqlite")]
 pub const SQLITE: &'static dyn crate::datamodel_connector::Connector =
     &sqlite_datamodel_connector::SqliteDatamodelConnector;
@@ -53,6 +60,8 @@ pub static BUILTIN_CONNECTORS: ConnectorRegistry<'static> = &[
     POSTGRES,
     #[cfg(feature = "mysql")]
     MYSQL,
+    #[cfg(feature = "kingbase-mysql")]
+    KINGBASE_MYSQL,
     #[cfg(feature = "sqlite")]
     SQLITE,
     #[cfg(feature = "mssql")]
