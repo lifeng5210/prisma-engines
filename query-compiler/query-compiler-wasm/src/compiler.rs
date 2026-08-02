@@ -19,6 +19,8 @@ const CONNECTOR_REGISTRY: ConnectorRegistry<'_> = &[
     psl::builtin_connectors::POSTGRES,
     #[cfg(feature = "mysql")]
     psl::builtin_connectors::MYSQL,
+    #[cfg(feature = "kingbase-mysql")]
+    psl::builtin_connectors::KINGBASE_MYSQL,
     #[cfg(feature = "sqlite")]
     psl::builtin_connectors::SQLITE,
     #[cfg(feature = "mssql")]

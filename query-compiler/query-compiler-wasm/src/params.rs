@@ -33,6 +33,8 @@ impl JsConnectionInfo {
         match provider {
             #[cfg(feature = "mysql")]
             AdapterProvider::Mysql => None,
+            #[cfg(feature = "kingbase-mysql")]
+            AdapterProvider::KingbaseMysql => None,
             #[cfg(feature = "postgresql")]
             AdapterProvider::Postgres => Some(quaint::connector::DEFAULT_POSTGRES_SCHEMA),
             #[cfg(feature = "sqlite")]
@@ -48,6 +50,9 @@ impl JsConnectionInfo {
 pub enum AdapterProvider {
     #[cfg(feature = "mysql")]
     Mysql,
+    #[cfg(feature = "kingbase-mysql")]
+    #[serde(rename = "kingbase-mysql")]
+    KingbaseMysql,
     #[cfg(feature = "postgresql")]
     Postgres,
     #[cfg(feature = "sqlite")]
@@ -62,6 +67,8 @@ impl From<AdapterProvider> for SqlFamily {
         match f {
             #[cfg(feature = "mysql")]
             AdapterProvider::Mysql => SqlFamily::Mysql,
+            #[cfg(feature = "kingbase-mysql")]
+            AdapterProvider::KingbaseMysql => SqlFamily::Mysql,
             #[cfg(feature = "postgresql")]
             AdapterProvider::Postgres => SqlFamily::Postgres,
             #[cfg(feature = "sqlite")]
