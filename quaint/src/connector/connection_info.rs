@@ -4,6 +4,7 @@
 #[cfg(any(
     feature = "sqlite-native",
     feature = "mysql-native",
+    feature = "kingbase-mysql-native",
     feature = "postgresql-native",
     feature = "mssql-native"
 ))]
@@ -12,11 +13,14 @@ use std::{borrow::Cow, fmt};
 #[cfg(any(
     feature = "sqlite-native",
     feature = "mysql-native",
+    feature = "kingbase-mysql-native",
     feature = "postgresql-native",
     feature = "mssql-native"
 ))]
 use url::Url;
 
+#[cfg(feature = "kingbase-mysql-native")]
+use crate::connector::KingbaseMysqlUrl;
 #[cfg(feature = "mssql-native")]
 use crate::connector::MssqlUrl;
 #[cfg(feature = "mysql-native")]
@@ -37,6 +41,7 @@ pub enum ConnectionInfo {
     #[cfg(any(
         feature = "sqlite-native",
         feature = "mysql-native",
+        feature = "kingbase-mysql-native",
         feature = "postgresql-native",
         feature = "mssql-native"
     ))]
@@ -52,6 +57,7 @@ impl ConnectionInfo {
     #[cfg(any(
         feature = "sqlite-native",
         feature = "mysql-native",
+        feature = "kingbase-mysql-native",
         feature = "postgresql-native",
         feature = "mssql-native"
     ))]
@@ -89,6 +95,13 @@ impl ConnectionInfo {
             Error::builder(kind).build()
         })?;
 
+        #[cfg(feature = "kingbase-mysql-native")]
+        if matches!(url.scheme(), "kingbase" | "kingbase-mysql") {
+            return Ok(ConnectionInfo::Native(NativeConnectionInfo::KingbaseMysql(
+                KingbaseMysqlUrl::new(url)?,
+            )));
+        }
+
         match sql_family {
             #[cfg(feature = "mysql-native")]
             SqlFamily::Mysql => Ok(ConnectionInfo::Native(NativeConnectionInfo::Mysql(MysqlUrl::new(url)?))),
@@ -116,6 +129,7 @@ impl ConnectionInfo {
             #[cfg(any(
                 feature = "sqlite-native",
                 feature = "mysql-native",
+                feature = "kingbase-mysql-native",
                 feature = "postgresql-native",
                 feature = "mssql-native"
             ))]
@@ -124,6 +138,8 @@ impl ConnectionInfo {
                 NativeConnectionInfo::Postgres(url) => Some(url.dbname()),
                 #[cfg(feature = "mysql-native")]
                 NativeConnectionInfo::Mysql(url) => url.dbname().map(Cow::Borrowed),
+                #[cfg(feature = "kingbase-mysql-native")]
+                NativeConnectionInfo::KingbaseMysql(url) => url.dbname().map(Cow::Borrowed),
                 #[cfg(feature = "mssql-native")]
                 NativeConnectionInfo::Mssql(url) => Some(Cow::Borrowed(url.dbname())),
                 #[cfg(feature = "sqlite-native")]
@@ -143,6 +159,7 @@ impl ConnectionInfo {
             #[cfg(any(
                 feature = "sqlite-native",
                 feature = "mysql-native",
+                feature = "kingbase-mysql-native",
                 feature = "postgresql-native",
                 feature = "mssql-native"
             ))]
@@ -151,6 +168,8 @@ impl ConnectionInfo {
                 NativeConnectionInfo::Postgres(url) => Some(url.schema()),
                 #[cfg(feature = "mysql-native")]
                 NativeConnectionInfo::Mysql(url) => url.dbname(),
+                #[cfg(feature = "kingbase-mysql-native")]
+                NativeConnectionInfo::KingbaseMysql(url) => url.dbname(),
                 #[cfg(feature = "mssql-native")]
                 NativeConnectionInfo::Mssql(url) => Some(url.schema()),
                 #[cfg(feature = "sqlite-native")]
@@ -168,6 +187,7 @@ impl ConnectionInfo {
             #[cfg(any(
                 feature = "sqlite-native",
                 feature = "mysql-native",
+                feature = "kingbase-mysql-native",
                 feature = "postgresql-native",
                 feature = "mssql-native"
             ))]
@@ -176,6 +196,8 @@ impl ConnectionInfo {
                 NativeConnectionInfo::Postgres(url) => url.host(),
                 #[cfg(feature = "mysql-native")]
                 NativeConnectionInfo::Mysql(url) => url.host(),
+                #[cfg(feature = "kingbase-mysql-native")]
+                NativeConnectionInfo::KingbaseMysql(url) => url.host(),
                 #[cfg(feature = "mssql-native")]
                 NativeConnectionInfo::Mssql(url) => url.host(),
                 #[cfg(feature = "sqlite-native")]
@@ -192,6 +214,7 @@ impl ConnectionInfo {
             #[cfg(any(
                 feature = "sqlite-native",
                 feature = "mysql-native",
+                feature = "kingbase-mysql-native",
                 feature = "postgresql-native",
                 feature = "mssql-native"
             ))]
@@ -200,6 +223,8 @@ impl ConnectionInfo {
                 NativeConnectionInfo::Postgres(url) => Some(url.username()),
                 #[cfg(feature = "mysql-native")]
                 NativeConnectionInfo::Mysql(url) => Some(url.username()),
+                #[cfg(feature = "kingbase-mysql-native")]
+                NativeConnectionInfo::KingbaseMysql(url) => Some(Cow::Borrowed(url.username())),
                 #[cfg(feature = "mssql-native")]
                 NativeConnectionInfo::Mssql(url) => url.username().map(Cow::from),
                 #[cfg(feature = "sqlite-native")]
@@ -215,6 +240,7 @@ impl ConnectionInfo {
             #[cfg(any(
                 feature = "sqlite-native",
                 feature = "mysql-native",
+                feature = "kingbase-mysql-native",
                 feature = "postgresql-native",
                 feature = "mssql-native"
             ))]
@@ -223,6 +249,8 @@ impl ConnectionInfo {
                 NativeConnectionInfo::Postgres(_) => None,
                 #[cfg(feature = "mysql-native")]
                 NativeConnectionInfo::Mysql(_) => None,
+                #[cfg(feature = "kingbase-mysql-native")]
+                NativeConnectionInfo::KingbaseMysql(_) => None,
                 #[cfg(feature = "mssql-native")]
                 NativeConnectionInfo::Mssql(_) => None,
                 #[cfg(feature = "sqlite-native")]
@@ -243,6 +271,7 @@ impl ConnectionInfo {
             #[cfg(any(
                 feature = "sqlite-native",
                 feature = "mysql-native",
+                feature = "kingbase-mysql-native",
                 feature = "postgresql-native",
                 feature = "mssql-native"
             ))]
@@ -258,6 +287,7 @@ impl ConnectionInfo {
             #[cfg(any(
                 feature = "sqlite-native",
                 feature = "mysql-native",
+                feature = "kingbase-mysql-native",
                 feature = "postgresql-native",
                 feature = "mssql-native"
             ))]
@@ -266,6 +296,8 @@ impl ConnectionInfo {
                 NativeConnectionInfo::Postgres(_) => SqlFamily::Postgres,
                 #[cfg(feature = "mysql-native")]
                 NativeConnectionInfo::Mysql(_) => SqlFamily::Mysql,
+                #[cfg(feature = "kingbase-mysql-native")]
+                NativeConnectionInfo::KingbaseMysql(_) => SqlFamily::Mysql,
                 #[cfg(feature = "mssql-native")]
                 NativeConnectionInfo::Mssql(_) => SqlFamily::Mssql,
                 #[cfg(feature = "sqlite-native")]
@@ -281,6 +313,7 @@ impl ConnectionInfo {
             #[cfg(any(
                 feature = "sqlite-native",
                 feature = "mysql-native",
+                feature = "kingbase-mysql-native",
                 feature = "postgresql-native",
                 feature = "mssql-native"
             ))]
@@ -289,6 +322,8 @@ impl ConnectionInfo {
                 NativeConnectionInfo::Postgres(url) => Some(url.port()),
                 #[cfg(feature = "mysql-native")]
                 NativeConnectionInfo::Mysql(url) => Some(url.port()),
+                #[cfg(feature = "kingbase-mysql-native")]
+                NativeConnectionInfo::KingbaseMysql(url) => Some(url.port()),
                 #[cfg(feature = "mssql-native")]
                 NativeConnectionInfo::Mssql(url) => Some(url.port()),
                 #[cfg(feature = "sqlite-native")]
@@ -303,6 +338,8 @@ impl ConnectionInfo {
         match self {
             #[cfg(all(not(target_arch = "wasm32"), feature = "postgresql-native"))]
             ConnectionInfo::Native(NativeConnectionInfo::Postgres(PostgresUrl::Native(url))) => url.pg_bouncer(),
+            #[cfg(all(not(target_arch = "wasm32"), feature = "kingbase-mysql-native"))]
+            ConnectionInfo::Native(NativeConnectionInfo::KingbaseMysql(url)) => url.pg_bouncer(),
             _ => false,
         }
     }
@@ -314,6 +351,7 @@ impl ConnectionInfo {
             #[cfg(any(
                 feature = "sqlite-native",
                 feature = "mysql-native",
+                feature = "kingbase-mysql-native",
                 feature = "postgresql-native",
                 feature = "mssql-native"
             ))]
@@ -322,6 +360,8 @@ impl ConnectionInfo {
                 NativeConnectionInfo::Postgres(url) => format!("{}:{}", url.host(), url.port()),
                 #[cfg(feature = "mysql-native")]
                 NativeConnectionInfo::Mysql(url) => format!("{}:{}", url.host(), url.port()),
+                #[cfg(feature = "kingbase-mysql-native")]
+                NativeConnectionInfo::KingbaseMysql(url) => format!("{}:{}", url.host(), url.port()),
                 #[cfg(feature = "mssql-native")]
                 NativeConnectionInfo::Mssql(url) => format!("{}:{}", url.host(), url.port()),
                 #[cfg(feature = "sqlite-native")]
@@ -339,6 +379,7 @@ impl ConnectionInfo {
             #[cfg(any(
                 feature = "sqlite-native",
                 feature = "mysql-native",
+                feature = "kingbase-mysql-native",
                 feature = "postgresql-native",
                 feature = "mssql-native"
             ))]
@@ -360,6 +401,7 @@ impl ConnectionInfo {
             #[cfg(any(
                 feature = "sqlite-native",
                 feature = "mysql-native",
+                feature = "kingbase-mysql-native",
                 feature = "postgresql-native",
                 feature = "mssql-native"
             ))]
@@ -378,6 +420,9 @@ pub enum NativeConnectionInfo {
     /// A MySQL connection URL.
     #[cfg(feature = "mysql-native")]
     Mysql(MysqlUrl),
+    /// A KingbaseES connection URL in MySQL-compatible mode.
+    #[cfg(feature = "kingbase-mysql-native")]
+    KingbaseMysql(KingbaseMysqlUrl),
     /// A SQL Server connection URL.
     #[cfg(feature = "mssql-native")]
     Mssql(MssqlUrl),
@@ -440,6 +485,8 @@ impl SqlFamily {
             "postgres" | "postgresql" => Some(SqlFamily::Postgres),
             #[cfg(feature = "mysql")]
             "mysql" => Some(SqlFamily::Mysql),
+            #[cfg(feature = "kingbase-mysql-native")]
+            "kingbase" | "kingbase-mysql" => Some(SqlFamily::Mysql),
             _ => None,
         }
     }

@@ -24,7 +24,8 @@ pub trait Transaction: Queryable {
     feature = "sqlite-native",
     feature = "mssql-native",
     feature = "postgresql-native",
-    feature = "mysql-native"
+    feature = "mysql-native",
+    feature = "kingbase-mysql-native"
 ))]
 pub(crate) struct TransactionOptions {
     /// The isolation level to use.
@@ -38,7 +39,8 @@ pub(crate) struct TransactionOptions {
     feature = "sqlite-native",
     feature = "mssql-native",
     feature = "postgresql-native",
-    feature = "mysql-native"
+    feature = "mysql-native",
+    feature = "kingbase-mysql-native"
 ))]
 impl TransactionOptions {
     pub fn new(isolation_level: Option<IsolationLevel>, isolation_first: bool) -> Self {
@@ -63,7 +65,8 @@ pub struct DefaultTransaction<'a> {
         feature = "sqlite-native",
         feature = "mssql-native",
         feature = "postgresql-native",
-        feature = "mysql-native"
+        feature = "mysql-native",
+        feature = "kingbase-mysql-native"
     )),
     allow(clippy::needless_lifetimes)
 )]
@@ -72,7 +75,8 @@ impl<'a> DefaultTransaction<'a> {
         feature = "sqlite-native",
         feature = "mssql-native",
         feature = "postgresql-native",
-        feature = "mysql-native"
+        feature = "mysql-native",
+        feature = "kingbase-mysql-native"
     ))]
     pub(crate) async fn new(
         inner: &'a dyn Queryable,

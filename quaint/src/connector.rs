@@ -16,7 +16,12 @@ mod describe;
 pub mod external;
 mod queryable;
 mod result_set;
-#[cfg(any(feature = "mssql-native", feature = "postgresql-native", feature = "mysql-native"))]
+#[cfg(any(
+    feature = "mssql-native",
+    feature = "postgresql-native",
+    feature = "kingbase-mysql-native",
+    feature = "mysql-native"
+))]
 mod timeout;
 pub mod trace;
 mod transaction;
@@ -51,6 +56,11 @@ pub(crate) mod mysql;
 pub use mysql::native::*;
 #[cfg(feature = "mysql")]
 pub use mysql::*;
+
+#[cfg(feature = "kingbase-mysql-native")]
+pub(crate) mod kingbase_mysql;
+#[cfg(feature = "kingbase-mysql-native")]
+pub use kingbase_mysql::*;
 
 #[cfg(feature = "sqlite")]
 pub(crate) mod sqlite;

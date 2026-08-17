@@ -421,6 +421,35 @@ impl Quaint {
 
                 Ok(builder)
             }
+            #[cfg(feature = "kingbase-mysql-native")]
+            s if s.starts_with("kingbase") => {
+                let url = crate::connector::KingbaseMysqlUrl::new(url::Url::parse(s)?)?;
+                let connection_limit = url.connection_limit();
+                let pool_timeout = url.pool_timeout();
+                let max_connection_lifetime = url.max_connection_lifetime();
+                let max_idle_connection_lifetime = url.max_idle_connection_lifetime();
+
+                let manager = QuaintManager::KingbaseMysql { url };
+                let mut builder = Builder::new(s, manager)?;
+
+                if let Some(limit) = connection_limit {
+                    builder.connection_limit(limit);
+                }
+
+                if let Some(timeout) = pool_timeout {
+                    builder.pool_timeout(timeout);
+                }
+
+                if let Some(max_lifetime) = max_connection_lifetime {
+                    builder.max_lifetime(max_lifetime);
+                }
+
+                if let Some(max_idle_lifetime) = max_idle_connection_lifetime {
+                    builder.max_idle_lifetime(max_idle_lifetime);
+                }
+
+                Ok(builder)
+            }
             #[cfg(feature = "postgresql")]
             s if s.starts_with("postgres") || s.starts_with("postgresql") => {
                 let url = crate::connector::PostgresNativeUrl::new(url::Url::parse(s)?)?;

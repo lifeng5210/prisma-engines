@@ -1337,7 +1337,9 @@ async fn deletes(api: &mut dyn TestApi) -> crate::Result<()> {
 
 // TODO: Figure out why it doesn't work on MariaDB
 // Error { kind: QueryError(Server(ServerError { code: 1115, message: "Unknown character set: 'gb18030'", state: "42000" })), original_code: Some("1115"), original_message: Some("Unknown character set: 'gb18030'") }
-#[test_each_connector(tags("mysql"), ignore("mysql_mariadb"))]
+// KingbaseES has one database-wide encoding, so it cannot represent MySQL's
+// per-column `CHARACTER SET gb18030` definition.
+#[test_each_connector(tags("mysql"), ignore("mysql_mariadb", "kingbase-mysql"))]
 async fn text_columns_with_non_utf8_encodings_can_be_queried(api: &mut dyn TestApi) -> crate::Result<()> {
     let table = api
         .create_temp_table("id integer auto_increment primary key, value varchar(100) character set gb18030")
@@ -1379,7 +1381,11 @@ async fn filtering_by_json_values_does_not_work_but_does_not_crash(api: &mut dyn
     let select = Select::from_table(&table).so_that("nested".equals("{\"isTrue\": false}"));
     let result = api.conn().query(select.into()).await?;
 
-    assert!(result.is_empty());
+    if api.connector_tag().intersects(Tags::KINGBASE_MYSQL) {
+        assert_eq!(result.len(), 1);
+    } else {
+        assert!(result.is_empty());
+    }
 
     Ok(())
 }

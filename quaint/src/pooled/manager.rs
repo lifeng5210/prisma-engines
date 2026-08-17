@@ -4,6 +4,8 @@ use async_trait::async_trait;
 use mobc::{Connection as MobcPooled, Manager};
 use tracing_futures::WithSubscriber;
 
+#[cfg(feature = "kingbase-mysql-native")]
+use crate::connector::KingbaseMysqlUrl;
 #[cfg(feature = "mssql-native")]
 use crate::connector::MssqlUrl;
 #[cfg(feature = "mysql-native")]
@@ -96,6 +98,9 @@ pub enum QuaintManager {
     #[cfg(feature = "mysql")]
     Mysql { url: MysqlUrl },
 
+    #[cfg(feature = "kingbase-mysql-native")]
+    KingbaseMysql { url: KingbaseMysqlUrl },
+
     #[cfg(feature = "postgresql")]
     Postgres {
         url: PostgresNativeUrl,
@@ -130,6 +135,12 @@ impl Manager for QuaintManager {
             QuaintManager::Mysql { url } => {
                 use crate::connector::Mysql;
                 Ok(Box::new(Mysql::new(url.clone()).await?) as Self::Connection)
+            }
+
+            #[cfg(feature = "kingbase-mysql-native")]
+            QuaintManager::KingbaseMysql { url } => {
+                use crate::connector::KingbaseMysql;
+                Ok(Box::new(KingbaseMysql::new(url.clone()).await?) as Self::Connection)
             }
 
             #[cfg(feature = "postgresql-native")]

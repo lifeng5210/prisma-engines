@@ -6,6 +6,7 @@ fn main() {
             any(
                 feature = "mssql-native",
                 feature = "mysql-native",
+                feature = "kingbase-mysql-native",
                 feature = "postgresql-native",
                 feature = "sqlite-native"
             )

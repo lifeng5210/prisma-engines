@@ -165,7 +165,7 @@ impl TypeIdentifier for &my::Column {
 
         let is_defined_text = matches!(
             self.column_type(),
-            MYSQL_TYPE_VARCHAR | MYSQL_TYPE_VAR_STRING | MYSQL_TYPE_STRING
+            MYSQL_TYPE_VARCHAR | MYSQL_TYPE_VAR_STRING | MYSQL_TYPE_STRING | MYSQL_TYPE_SET
         );
 
         let is_bytes_but_text = matches!(

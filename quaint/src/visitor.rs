@@ -6,6 +6,8 @@
 //! [ast](../ast/index.html) module.
 //!
 //! For prelude, all important imports are in `quaint::visitor::*`;
+#[cfg(feature = "kingbase-mysql-native")]
+mod kingbase_mysql;
 #[cfg(feature = "mssql")]
 mod mssql;
 #[cfg(feature = "mysql")]
@@ -18,6 +20,8 @@ mod sqlite;
 // Generic query writer, used for all SQL flavors
 mod query_writer;
 
+#[cfg(feature = "kingbase-mysql-native")]
+pub use self::kingbase_mysql::KingbaseMysql;
 #[cfg(feature = "mssql")]
 pub use self::mssql::Mssql;
 #[cfg(feature = "mysql")]

@@ -154,6 +154,13 @@ impl Quaint {
 
                 Arc::new(mysql) as Arc<dyn TransactionCapable>
             }
+            #[cfg(feature = "kingbase-mysql-native")]
+            s if s.starts_with("kingbase") => {
+                let url = connector::KingbaseMysqlUrl::new(url::Url::parse(s)?)?;
+                let kingbase = connector::KingbaseMysql::new(url).await?;
+
+                Arc::new(kingbase) as Arc<dyn TransactionCapable>
+            }
             #[cfg(feature = "postgresql-native")]
             s if s.starts_with("postgres") || s.starts_with("postgresql") => {
                 let url = connector::PostgresNativeUrl::new(url::Url::parse(s)?)?;

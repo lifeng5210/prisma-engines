@@ -147,6 +147,10 @@ async fn expression_based_unique_index(api: &mut dyn TestApi) -> crate::Result<(
 
 #[test_each_connector]
 async fn null_constraint_violation(api: &mut dyn TestApi) -> crate::Result<()> {
+    if api.connector_tag().intersects(Tags::KINGBASE_MYSQL) {
+        api.conn().raw_cmd("SET SQL_MODE = 'STRICT_ALL_TABLES'").await?;
+    }
+
     let table = api.create_temp_table("id1 int not null, id2 int not null").await?;
 
     let res = api.conn().insert(Insert::single_into(&table).into()).await;
@@ -181,6 +185,10 @@ async fn null_constraint_violation(api: &mut dyn TestApi) -> crate::Result<()> {
 
 #[test_each_connector(tags("mysql"))]
 async fn int_unsigned_negative_value_out_of_range(api: &mut dyn TestApi) -> crate::Result<()> {
+    if api.connector_tag().intersects(Tags::KINGBASE_MYSQL) {
+        api.conn().raw_cmd("SET SQL_MODE = 'STRICT_ALL_TABLES'").await?;
+    }
+
     let table = api
         .create_temp_table("id int4 auto_increment primary key, big int4 unsigned")
         .await?;
@@ -223,6 +231,10 @@ async fn bigint_unsigned_positive_value_out_of_range(api: &mut dyn TestApi) -> c
 
 #[test_each_connector(tags("mysql", "mssql", "postgresql"))]
 async fn length_mismatch(api: &mut dyn TestApi) -> crate::Result<()> {
+    if api.connector_tag().intersects(Tags::KINGBASE_MYSQL) {
+        api.conn().raw_cmd("SET SQL_MODE = 'STRICT_ALL_TABLES'").await?;
+    }
+
     let table = api.create_temp_table("value varchar(3)").await?;
     let insert = Insert::single_into(&table).value("value", "fooo");
 
@@ -289,7 +301,9 @@ async fn ms_my_foreign_key_constraint_violation(api: &mut dyn TestApi) -> crate:
     Ok(())
 }
 
-#[test_each_connector(tags("mysql"))]
+// KingbaseES rejects zero datetimes at DDL time, so it cannot reach the
+// MySQL result-decoding behavior tested below.
+#[test_each_connector(tags("mysql"), ignore("kingbase-mysql"))]
 async fn garbage_datetime_values(api: &mut dyn TestApi) -> crate::Result<()> {
     api.conn()
         .raw_cmd("set @OLD_SQL_MODE=@@SQL_MODE, SQL_MODE='NO_AUTO_VALUE_ON_ZERO'")
