@@ -1,7 +1,9 @@
 use crate::{
     ast::{NativeColumnType, Query, Value, ValueType},
+    error::{Error, ErrorKind},
     visitor::{Mysql, Visitor},
 };
+use query_template::{Fragment, PlaceholderFormat, QueryTemplate};
 use std::borrow::Cow;
 
 /// A MySQL-compatible SQL visitor for KingbaseES.
@@ -11,18 +13,24 @@ use std::borrow::Cow;
 pub struct KingbaseMysql;
 
 impl KingbaseMysql {
-    pub fn build<'a, Q>(query: Q) -> crate::Result<(String, Vec<Value<'a>>)>
+    pub fn build_template<'a, Q>(query: Q) -> crate::Result<QueryTemplate<Value<'a>>>
     where
         Q: Into<Query<'a>>,
     {
-        let (sql, mut params) = Mysql::build(query)?;
+        let template = Mysql::build_template(query)?;
+        let QueryTemplate {
+            fragments,
+            mut parameters,
+            placeholder_format,
+        } = template;
+        let (sql, parameter_fragments) = template_sql(fragments);
 
-        let sql = cast_sum_parameters(sql, &params);
-        promote_json_numeric_comparison_params(&sql, &mut params);
+        let sql = cast_sum_parameters(sql, &parameters);
+        promote_json_numeric_comparison_params(&sql, &mut parameters);
         let sql = cast_json_comparison_expressions(sql);
 
         for index in json_extract_path_parameter_indexes(&sql) {
-            if let Some(param) = params.get_mut(index) {
+            if let Some(param) = parameters.get_mut(index) {
                 param.native_column_type = Some(NativeColumnType {
                     name: Cow::Borrowed("JSONPATH"),
                     length: None,
@@ -35,8 +43,85 @@ impl KingbaseMysql {
         let sql = unquote_json_values(sql);
         let sql = native_uuid_as_text(sql);
 
+        rebuild_template(sql, parameter_fragments, parameters, placeholder_format)
+    }
+
+    pub fn build<'a, Q>(query: Q) -> crate::Result<(String, Vec<Value<'a>>)>
+    where
+        Q: Into<Query<'a>>,
+    {
+        let template = Self::build_template(query)?;
+        let sql = template.to_sql().map_err(|_| {
+            Error::builder(ErrorKind::conversion(
+                "Kingbase MySQL query contains dynamic parameter fragments",
+            ))
+            .build()
+        })?;
+        let params = template.parameters;
         Ok((sql, params))
     }
+}
+
+fn template_sql(fragments: Vec<Fragment>) -> (String, Vec<Fragment>) {
+    let mut sql = String::new();
+    let mut parameter_fragments = Vec::new();
+
+    for fragment in fragments {
+        match fragment {
+            Fragment::StringChunk { chunk } => sql.push_str(&chunk),
+            fragment => {
+                sql.push('?');
+                parameter_fragments.push(fragment);
+            }
+        }
+    }
+
+    (sql, parameter_fragments)
+}
+
+fn rebuild_template<'a>(
+    sql: String,
+    parameter_fragments: Vec<Fragment>,
+    parameters: Vec<Value<'a>>,
+    placeholder_format: PlaceholderFormat,
+) -> crate::Result<QueryTemplate<Value<'a>>> {
+    let positions = parameter_positions(&sql);
+
+    if positions.len() != parameter_fragments.len() {
+        let message = format!(
+            "Kingbase MySQL SQL rewrite changed the parameter count from {} to {}",
+            parameter_fragments.len(),
+            positions.len()
+        );
+        let mut builder = Error::builder(ErrorKind::conversion(message.clone()));
+        builder.set_original_message(message);
+        return Err(builder.build());
+    }
+
+    let mut fragments = Vec::with_capacity(parameter_fragments.len() * 2 + 1);
+    let mut cursor = 0;
+
+    for (position, fragment) in positions.into_iter().zip(parameter_fragments) {
+        if cursor < position {
+            fragments.push(Fragment::StringChunk {
+                chunk: sql[cursor..position].to_owned(),
+            });
+        }
+        fragments.push(fragment);
+        cursor = position + 1;
+    }
+
+    if cursor < sql.len() {
+        fragments.push(Fragment::StringChunk {
+            chunk: sql[cursor..].to_owned(),
+        });
+    }
+
+    Ok(QueryTemplate {
+        fragments,
+        parameters,
+        placeholder_format,
+    })
 }
 
 fn cast_sum_parameters(sql: String, params: &[Value<'_>]) -> String {
@@ -448,7 +533,7 @@ fn native_uuid_as_text(sql: String) -> String {
 #[cfg(test)]
 mod tests {
     use super::KingbaseMysql;
-    use crate::ast::{Column, Expression, Select, json_unquote, native_uuid};
+    use crate::ast::{Column, Expression, JsonPath, Select, ValueType, json_extract, json_unquote, native_uuid};
 
     #[test]
     fn json_unquote_uses_the_unambiguous_jsonpath_operator() {
@@ -465,6 +550,23 @@ mod tests {
 
         assert_eq!("SELECT CAST(sys_guid() AS text)", sql);
         assert!(params.is_empty());
+    }
+
+    #[test]
+    fn build_template_preserves_jsonpath_parameter_metadata() {
+        let query = Select::default().value(json_extract(Column::from("json"), JsonPath::string("$.a"), false));
+        let template = KingbaseMysql::build_template(query).unwrap();
+
+        assert_eq!("SELECT JSON_EXTRACT(`json`, ?)", template.to_sql().unwrap());
+        assert_eq!(template.parameters.len(), 1);
+        assert!(matches!(
+            template.parameters[0]
+                .native_column_type
+                .as_ref()
+                .map(|t| t.name.as_ref()),
+            Some("JSONPATH")
+        ));
+        assert!(matches!(template.parameters[0].typed, ValueType::Text(Some(_))));
     }
 }
 

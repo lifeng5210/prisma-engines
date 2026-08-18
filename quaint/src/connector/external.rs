@@ -117,6 +117,7 @@ pub struct ExternalConnectionInfo {
     pub schema_name: Option<String>,
     pub max_bind_values: Option<usize>,
     pub supports_relation_joins: bool,
+    kingbase_mysql: bool,
 }
 
 impl ExternalConnectionInfo {
@@ -131,7 +132,17 @@ impl ExternalConnectionInfo {
             schema_name,
             max_bind_values,
             supports_relation_joins,
+            kingbase_mysql: false,
         }
+    }
+
+    pub fn with_kingbase_mysql(mut self) -> Self {
+        self.kingbase_mysql = true;
+        self
+    }
+
+    pub(crate) fn is_kingbase_mysql(&self) -> bool {
+        self.kingbase_mysql
     }
 }
 

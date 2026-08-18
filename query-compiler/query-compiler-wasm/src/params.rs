@@ -15,12 +15,19 @@ pub struct JsConnectionInfo {
 
 impl JsConnectionInfo {
     pub fn into_external_connection_info(self, provider: AdapterProvider) -> ExternalConnectionInfo {
-        ExternalConnectionInfo::new(
+        let info = ExternalConnectionInfo::new(
             SqlFamily::from(provider),
             self.schema_name(provider).map(ToOwned::to_owned),
             self.max_bind_values.map(|v| v as usize),
             self.supports_relation_joins,
-        )
+        );
+
+        #[cfg(feature = "kingbase-mysql")]
+        if matches!(provider, AdapterProvider::KingbaseMysql) {
+            return info.with_kingbase_mysql();
+        }
+
+        info
     }
 
     fn schema_name(&self, provider: AdapterProvider) -> Option<&str> {

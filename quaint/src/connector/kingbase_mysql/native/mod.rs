@@ -35,7 +35,7 @@ use kingbase_tokio_postgres::{Client, types::Type};
 
 const DB_SYSTEM_NAME: &str = "kingbase";
 
-/// A native Kingbase connection using the existing MySQL SQL visitor.
+/// A native Kingbase connection using the Kingbase MySQL SQL visitor.
 pub struct KingbaseMysql {
     client: Client,
     handle: JoinHandle<()>,

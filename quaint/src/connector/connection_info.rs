@@ -307,6 +307,22 @@ impl ConnectionInfo {
         }
     }
 
+    /// Whether this connection uses KingbaseES in MySQL-compatible mode.
+    pub fn is_kingbase_mysql(&self) -> bool {
+        match self {
+            #[cfg(feature = "kingbase-mysql-native")]
+            ConnectionInfo::Native(NativeConnectionInfo::KingbaseMysql(_)) => true,
+            ConnectionInfo::External(info) => info.is_kingbase_mysql(),
+            #[cfg(any(
+                feature = "sqlite-native",
+                feature = "mysql-native",
+                feature = "postgresql-native",
+                feature = "mssql-native"
+            ))]
+            ConnectionInfo::Native(_) => false,
+        }
+    }
+
     /// The provided database port, if applicable.
     pub fn port(&self) -> Option<u16> {
         match self {

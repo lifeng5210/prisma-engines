@@ -22,3 +22,4 @@ quaint = { workspace = true, features = ["mysql", "mssql", "postgresql", "sqlite
 
 [features]
 relation_joins = ["query-builder/relation_joins"]
+kingbase-mysql = ["quaint/kingbase-mysql"]

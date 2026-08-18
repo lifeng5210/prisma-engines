@@ -57,8 +57,9 @@ postgresql-native = [
 ]
 postgresql = []
 
+kingbase-mysql = ["mysql"]
 kingbase-mysql-native = [
-  "mysql",
+  "kingbase-mysql",
   "dep:native-tls",
   "dep:bytes",
   "dep:kingbase-tokio-postgres",
