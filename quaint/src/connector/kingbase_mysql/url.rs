@@ -15,7 +15,7 @@ pub struct KingbaseMysqlUrl {
 }
 
 impl KingbaseMysqlUrl {
-    pub(crate) fn new(url: Url) -> crate::Result<Self> {
+    pub fn new(url: Url) -> crate::Result<Self> {
         if !matches!(url.scheme(), "kingbase-mysql" | "kingbase") {
             let kind = ErrorKind::DatabaseUrlIsInvalid(format!(
                 "{} is not a supported Kingbase database URL scheme.",
@@ -57,10 +57,14 @@ impl KingbaseMysqlUrl {
 
         config.pgbouncer_mode(self.query_params.pg_bouncer);
 
-        if let Some(schema) = &self.query_params.schema {
-            // The startup parameter takes a SQL search_path expression.
-            config.search_path(format!("\"{}\"", schema.replace('"', "\"\"")));
-        }
+        // Keep unqualified DDL and information_schema introspection on the same
+        // schema. The URL may override this with `?schema=...`.
+        let schema = self
+            .query_params
+            .schema
+            .as_deref()
+            .unwrap_or(super::DEFAULT_KINGBASE_MYSQL_SCHEMA);
+        config.search_path(format!("\"{}\"", schema.replace('"', "\"\"")));
 
         Ok(config)
     }
@@ -69,11 +73,15 @@ impl KingbaseMysqlUrl {
         self.query_params.connect_timeout
     }
 
-    pub(crate) fn dbname(&self) -> Option<&str> {
+    pub fn dbname(&self) -> Option<&str> {
         self.url.path().strip_prefix('/').filter(|name| !name.is_empty())
     }
 
-    pub(crate) fn host(&self) -> &str {
+    pub fn schema(&self) -> Option<&str> {
+        self.query_params.schema.as_deref()
+    }
+
+    pub fn host(&self) -> &str {
         self.url.host_str().unwrap_or("localhost")
     }
 
@@ -81,7 +89,7 @@ impl KingbaseMysqlUrl {
         self.url.username()
     }
 
-    pub(crate) fn port(&self) -> u16 {
+    pub fn port(&self) -> u16 {
         self.url.port().unwrap_or(5432)
     }
 

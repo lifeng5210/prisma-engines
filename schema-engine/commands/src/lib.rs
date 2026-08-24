@@ -59,6 +59,9 @@ pub fn dialect_for_provider(provider: &str) -> CoreResult<Box<dyn schema_connect
             #[cfg(feature = "mysql")]
             Flavour::Mysql => Ok(Box::new(SqlSchemaDialect::mysql())),
 
+            #[cfg(feature = "kingbase-mysql")]
+            Flavour::KingbaseMysql => Ok(Box::new(SqlSchemaDialect::kingbase_mysql())),
+
             #[allow(unreachable_patterns)]
             _ => error(),
         }

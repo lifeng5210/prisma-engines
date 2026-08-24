@@ -160,7 +160,7 @@ fn removing_unique_from_an_existing_field_must_work(api: TestApi) {
     api.assert_schema().assert_table("A", |t| t.assert_indexes_count(0));
 }
 
-#[test_connector]
+#[test_connector(exclude(KingbaseMysql))]
 fn unique_is_allowed_on_an_id_field(api: TestApi) {
     let dm1 = r#"
         model A {

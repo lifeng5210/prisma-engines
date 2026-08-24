@@ -69,6 +69,16 @@ impl TestApi {
                 connection_string.to_owned(),
                 me,
             )
+        } else if tags.contains(Tags::KingbaseMysql) {
+            let (_, cs) = args.create_kingbase_mysql_database().await;
+            let params = ConnectorParams {
+                connection_string: cs.to_owned(),
+                preview_features,
+                shadow_database_connection_string: None,
+            };
+            let me = SqlSchemaConnector::new_kingbase_mysql(params).unwrap();
+
+            (Quaint::new(&cs).await.unwrap(), cs, me)
         } else if tags.contains(Tags::Mysql) {
             let (_, cs) = args.create_mysql_database().await;
             let params = ConnectorParams {

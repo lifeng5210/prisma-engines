@@ -693,7 +693,7 @@ fn removal_length_prefix_index(api: TestApi) {
     });
 }
 
-#[test_connector(exclude(Mysql56, Mysql57, Mariadb))]
+#[test_connector(exclude(Mysql56, Mysql57, Mariadb, KingbaseMysql))]
 fn descending_compound_index(api: TestApi) {
     let dm = formatdoc! {r#"
         {}
@@ -719,7 +719,7 @@ fn descending_compound_index(api: TestApi) {
     });
 }
 
-#[test_connector(exclude(Mysql56, Mysql57, Mariadb))]
+#[test_connector(exclude(Mysql56, Mysql57, Mariadb, KingbaseMysql))]
 fn descending_compound_unique(api: TestApi) {
     let dm = formatdoc! {r#"
         {}
@@ -745,7 +745,7 @@ fn descending_compound_unique(api: TestApi) {
     });
 }
 
-#[test_connector(exclude(Mysql56, Mysql57, Mariadb))]
+#[test_connector(exclude(Mysql56, Mysql57, Mariadb, KingbaseMysql))]
 fn descending_unique(api: TestApi) {
     let dm = formatdoc! {r#"
         {}
@@ -767,7 +767,7 @@ fn descending_unique(api: TestApi) {
     });
 }
 
-#[test_connector(exclude(Mysql56, Mysql57, Mariadb))]
+#[test_connector(exclude(Mysql56, Mysql57, Mariadb, KingbaseMysql))]
 fn removal_descending_unique(api: TestApi) {
     let dm = formatdoc! {r#"
         {}

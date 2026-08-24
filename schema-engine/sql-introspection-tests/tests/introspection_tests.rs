@@ -1,6 +1,7 @@
 mod cockroachdb;
 mod commenting_out;
 mod enums;
+mod kingbase_mysql;
 mod lists;
 mod model_renames;
 mod mssql;

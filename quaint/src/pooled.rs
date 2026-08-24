@@ -388,7 +388,7 @@ impl Quaint {
 
                 Ok(builder)
             }
-            #[cfg(feature = "mysql")]
+            #[cfg(feature = "mysql-native")]
             s if s.starts_with("mysql") => {
                 let mut url = crate::connector::MysqlUrl::new(url::Url::parse(s)?)?;
                 let connection_limit = url.connection_limit();

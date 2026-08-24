@@ -21,6 +21,7 @@ fn basic_create_migration_works(mut api: TestApi) {
     let is_sqlite = api.is_sqlite();
     let is_cockroach = api.is_cockroach();
     let is_mssql = api.is_mssql();
+    let is_kingbase_mysql = api.tags().contains(Tags::KingbaseMysql);
 
     api.create_migration("create-cats", &dm, &dir)
         .send_sync()
@@ -56,6 +57,16 @@ fn basic_create_migration_works(mut api: TestApi) {
                             PRIMARY KEY (`id`)
                         ) DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
                         "#]]
+            } else if is_kingbase_mysql {
+                expect![[r#"
+                    -- CreateTable
+                    CREATE TABLE `Cat` (
+                        `id` INTEGER NOT NULL,
+                        `name` VARCHAR(191) NOT NULL,
+
+                        PRIMARY KEY (`id`)
+                    );
+                "#]]
             } else if is_sqlite {
                 expect![[r#"
                         -- CreateTable
@@ -123,6 +134,7 @@ fn basic_create_migration_multi_file_works(api: TestApi) {
     let is_sqlite = api.is_sqlite();
     let is_cockroach = api.is_cockroach();
     let is_mssql = api.is_mssql();
+    let is_kingbase_mysql = api.tags().contains(Tags::KingbaseMysql);
 
     api.create_migration_multi_file("create-cats", &[("a.prisma", &schema_a), ("b.prisma", schema_b)], &dir)
         .send_sync()
@@ -181,6 +193,24 @@ fn basic_create_migration_multi_file_works(api: TestApi) {
 
                         PRIMARY KEY (`id`)
                     ) DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+                "#]]
+            } else if is_kingbase_mysql {
+                expect![[r#"
+                    -- CreateTable
+                    CREATE TABLE `Cat` (
+                        `id` INTEGER NOT NULL,
+                        `name` VARCHAR(191) NOT NULL,
+
+                        PRIMARY KEY (`id`)
+                    );
+
+                    -- CreateTable
+                    CREATE TABLE `Dog` (
+                        `id` INTEGER NOT NULL,
+                        `name` VARCHAR(191) NOT NULL,
+
+                        PRIMARY KEY (`id`)
+                    );
                 "#]]
             } else if is_sqlite {
                 expect![[r#"
@@ -273,6 +303,7 @@ fn creating_a_second_migration_should_have_the_previous_sql_schema_as_baseline(a
     let is_mysql = api.is_mysql();
     let is_sqlite = api.is_sqlite();
     let is_mssql = api.is_mssql();
+    let is_kingbase_mysql = api.tags().contains(Tags::KingbaseMysql);
     api.create_migration("create-dogs", &dm2, &dir)
         .send_sync()
         .assert_migration_directories_count(2)
@@ -307,6 +338,16 @@ fn creating_a_second_migration_should_have_the_previous_sql_schema_as_baseline(a
                             PRIMARY KEY (`id`)
                         ) DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
                         "#]]
+            } else if is_kingbase_mysql {
+                expect![[r#"
+                    -- CreateTable
+                    CREATE TABLE `Dog` (
+                        `id` INTEGER NOT NULL,
+                        `name` VARCHAR(191) NOT NULL,
+
+                        PRIMARY KEY (`id`)
+                    );
+                "#]]
             } else if is_sqlite {
                 expect![[r#"
                         -- CreateTable
@@ -373,7 +414,8 @@ fn bad_migrations_should_make_the_command_fail_with_a_good_error(api: TestApi) {
 
     let error = api.create_migration("create-cats", &dm, &dir).send_unwrap_err();
 
-    assert!(error.to_string().contains("syntax"), "{}", error);
+    let error = error.to_string();
+    assert!(error.contains("syntax") || error.contains("语法"), "{error}");
 }
 
 #[test_connector]
@@ -673,7 +715,7 @@ fn no_additional_unique_created(api: TestApi) {
         });
 }
 
-#[test_connector(exclude(Vitess))]
+#[test_connector(exclude(Vitess, KingbaseMysql))]
 fn create_constraint_name_tests_w_implicit_names(api: TestApi) {
     let dm = api.datamodel_with_provider(
         r#"
@@ -900,7 +942,7 @@ fn create_constraint_name_tests_w_implicit_names(api: TestApi) {
         });
 }
 
-#[test_connector(exclude(Sqlite, Vitess))]
+#[test_connector(exclude(Sqlite, Vitess, KingbaseMysql))]
 fn create_constraint_name_tests_w_explicit_names(api: TestApi) {
     let dm = api.datamodel_with_provider(
         r#"
@@ -1103,7 +1145,7 @@ fn create_constraint_name_tests_w_explicit_names(api: TestApi) {
         });
 }
 
-#[cfg_attr(not(target_os = "windows"), test_connector(exclude(Mysql)))]
+#[cfg_attr(not(target_os = "windows"), test_connector(exclude(Mysql, KingbaseMysql)))]
 fn alter_constraint_name(mut api: TestApi) {
     let plain_dm = api.datamodel_with_provider(
         r#"
@@ -1306,7 +1348,7 @@ fn alter_constraint_name(mut api: TestApi) {
         });
 }
 
-#[test_connector(exclude(Mysql, Sqlite, Mssql))]
+#[test_connector(exclude(Mysql, Sqlite, Mssql, KingbaseMysql))]
 fn alter_constraint_name_and_alter_columns_at_same_time(mut api: TestApi) {
     let plain_dm = api.datamodel_with_provider(
         r#"

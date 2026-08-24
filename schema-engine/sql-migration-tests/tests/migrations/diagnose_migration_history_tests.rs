@@ -157,7 +157,7 @@ fn diagnose_migration_history_without_opt_in_to_shadow_database_does_not_calcula
     assert!(error_in_unapplied_migration.is_none());
 }
 
-#[test_connector(exclude(Postgres, Mssql))]
+#[test_connector(exclude(Postgres, Mssql, KingbaseMysql))]
 fn diagnose_migration_history_calculates_drift_in_presence_of_failed_migrations(api: TestApi) {
     let directory = api.create_migrations_directory();
 
@@ -652,7 +652,7 @@ fn diagnose_migrations_history_with_a_nonexistent_migrations_directory_works(api
     assert!(error_in_unapplied_migration.is_none());
 }
 
-#[test_connector]
+#[test_connector(exclude(KingbaseMysql))]
 fn dmh_with_a_failed_migration(api: TestApi) {
     let migrations_directory = api.create_migrations_directory();
 

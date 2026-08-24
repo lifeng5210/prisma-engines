@@ -12,7 +12,7 @@ use std::{
     path::{self, PathBuf},
 };
 use test_setup::{
-    mssql::init_mssql_database, mysql::create_mysql_database, postgres::create_postgres_database,
+    TestApiArgs, mssql::init_mssql_database, mysql::create_mysql_database, postgres::create_postgres_database,
     runtime::run_with_thread_local_runtime as tok, sqlite_test_url,
 };
 
@@ -95,22 +95,31 @@ source .test_database_urls/mysql_5_6
     let version = tok(conn.version()).unwrap();
 
     let provider = if version.map(|v| v.contains("CockroachDB")).unwrap_or(false) {
-        "cockroachdb"
+        "cockroachdb".to_owned()
     } else {
         let provider = database_url
             .find(':')
-            .map(|prefix_end| &database_url[..prefix_end])
-            .unwrap_or_else(|| database_url.as_str());
+            .map(|prefix_end| database_url[..prefix_end].to_owned())
+            .unwrap_or_else(|| database_url.clone());
 
-        if provider == "file" { "sqlite" } else { provider }
+        if provider == "file" {
+            "sqlite".to_owned()
+        } else {
+            provider
+        }
     };
 
-    match provider {
+    match provider.as_str() {
         "cockroachdb" | "postgres" | "postgresql" => {
             tok(create_postgres_database(&database_url, test_function_name)).unwrap();
         }
         "mysql" => {
             tok(create_mysql_database(&database_url, test_function_name)).unwrap();
+        }
+        "kingbase" | "kingbase-mysql" => {
+            let args = TestApiArgs::new(test_function_name, &[], &[]);
+            let (_, connection_string) = tok(args.create_kingbase_mysql_database());
+            database_url = connection_string;
         }
         "sqlserver" => {
             tok(init_mssql_database(&database_url, test_function_name)).unwrap();
@@ -118,7 +127,9 @@ source .test_database_urls/mysql_5_6
         _ => (),
     }
 
-    let database_url = if provider == "sqlserver" {
+    let database_url = if provider == "kingbase" || provider == "kingbase-mysql" {
+        database_url.clone()
+    } else if provider == "sqlserver" {
         let mut jdbc: JdbcString = format!("jdbc:{database_url}").parse().unwrap();
 
         jdbc.properties_mut()
@@ -141,10 +152,11 @@ source .test_database_urls/mysql_5_6
         shadow_database_connection_string: None,
     };
 
-    let mut api = match provider {
+    let mut api = match provider.as_str() {
         "cockroachdb" => SqlSchemaConnector::new_cockroach(params).unwrap(),
         "postgres" | "postgresql" => SqlSchemaConnector::new_postgres(params).unwrap(),
         "mysql" => SqlSchemaConnector::new_mysql(params).unwrap(),
+        "kingbase" | "kingbase-mysql" => SqlSchemaConnector::new_kingbase_mysql(params).unwrap(),
         "sqlserver" => SqlSchemaConnector::new_mssql(params).unwrap(),
         "sqlite" => SqlSchemaConnector::new_sqlite(params).unwrap(),
         _ => unreachable!(),

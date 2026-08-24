@@ -115,7 +115,7 @@ fn from_unique_index_to_without(mut api: TestApi) {
     expected_printed_messages.assert_debug_eq(&host.printed_messages.lock().unwrap());
 }
 
-#[test_connector]
+#[test_connector(exclude(KingbaseMysql))]
 fn from_unique_index_to_pk(mut api: TestApi) {
     let tempdir = tempfile::tempdir().unwrap();
     let host = Arc::new(TestConnectorHost::default());

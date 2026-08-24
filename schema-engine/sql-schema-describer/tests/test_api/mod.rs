@@ -21,7 +21,10 @@ pub struct TestApi {
 impl TestApi {
     pub(crate) fn new(args: TestApiArgs) -> Self {
         let tags = args.tags();
-        let (db_name, conn) = if tags.contains(Tags::Mysql) {
+        let (db_name, conn) = if tags.contains(Tags::KingbaseMysql) {
+            let (db_name, cs) = tok(args.create_kingbase_mysql_database());
+            (db_name, tok(Quaint::new(&cs)).unwrap())
+        } else if tags.contains(Tags::Mysql) {
             let (db_name, cs) = tok(args.create_mysql_database());
             (db_name, tok(Quaint::new(&cs)).unwrap())
         } else if tags.contains(Tags::Postgres) {
@@ -101,6 +104,18 @@ impl TestApi {
             }
             #[cfg(feature = "mysql")]
             SqlFamily::Mysql => {
+                #[cfg(feature = "kingbase-mysql")]
+                if self.tags.contains(Tags::KingbaseMysql) {
+                    use sql_schema_describer::kingbase_mysql::Circumstances;
+
+                    return sql_schema_describer::kingbase_mysql::SqlSchemaDescriber::new(
+                        &self.database,
+                        Circumstances::CheckConstraints.into(),
+                    )
+                    .describe(schemas)
+                    .await;
+                }
+
                 use mysql::Circumstances;
                 sql_schema_describer::mysql::SqlSchemaDescriber::new(
                     &self.database,

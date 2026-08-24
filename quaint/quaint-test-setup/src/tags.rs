@@ -46,7 +46,7 @@ fn tag_names<'a>() -> [(&'a str, Tags); 8] {
         ("kingbase-mysql", Tags::KINGBASE_MYSQL),
         ("mssql", Tags::MSSQL),
         (
-             "mysql",
+            "mysql",
             Tags::MYSQL5_7 | Tags::MYSQL8 | Tags::MYSQL_MARIADB | Tags::KINGBASE_MYSQL,
         ),
         ("mysql5_7", Tags::MYSQL5_7),

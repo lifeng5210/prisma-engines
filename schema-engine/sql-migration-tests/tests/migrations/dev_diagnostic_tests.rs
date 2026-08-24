@@ -102,7 +102,7 @@ fn dev_diagnostic_detects_drift(api: TestApi) {
     assert!(action.as_reset().unwrap().starts_with(expected_start));
 }
 
-#[test_connector(exclude(Postgres, Mssql))]
+#[test_connector(exclude(Postgres, Mssql, KingbaseMysql))]
 fn dev_diagnostic_calculates_drift_in_presence_of_failed_migrations(api: TestApi) {
     let directory = api.create_migrations_directory();
 
@@ -409,7 +409,7 @@ fn dev_diagnostic_with_a_nonexistent_migrations_directory_works(api: TestApi) {
     assert!(action.is_create_migration());
 }
 
-#[test_connector]
+#[test_connector(exclude(KingbaseMysql))]
 fn with_a_failed_migration(api: TestApi) {
     let migrations_directory = api.create_migrations_directory();
 

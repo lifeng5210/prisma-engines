@@ -156,7 +156,7 @@ fn schema_filter_migration_removing_external_enum(mut api: TestApi) {
     });
 }
 
-#[test_connector(exclude(CockroachDb, Vitess))]
+#[test_connector(exclude(CockroachDb, Vitess, KingbaseMysql))]
 fn schema_filter_migration_adding_external_tables_incl_relations(api: TestApi) {
     let schema = api.datamodel_with_provider(
         r#"
@@ -277,7 +277,7 @@ fn schema_filter_migration_adding_external_tables_incl_relations(api: TestApi) {
         });
 }
 
-#[test_connector(exclude(CockroachDb, Vitess))]
+#[test_connector(exclude(CockroachDb, Vitess, KingbaseMysql))]
 fn schema_filter_migration_removing_external_tables_incl_relations(mut api: TestApi) {
     let schema_1 = api.datamodel_with_provider(
         r#"
@@ -421,7 +421,7 @@ fn schema_filter_migration_removing_external_tables_incl_relations(mut api: Test
         });
 }
 
-#[test_connector(exclude(CockroachDb, Vitess))]
+#[test_connector(exclude(CockroachDb, Vitess, KingbaseMysql))]
 fn schema_filter_migration_modifying_external_tables_incl_relations(mut api: TestApi) {
     let schema_1 = api.datamodel_with_provider(
         r#"
@@ -547,7 +547,7 @@ fn schema_filter_migration_modifying_external_tables_incl_relations(mut api: Tes
         });
 }
 
-#[test_connector(exclude(CockroachDb, Vitess))]
+#[test_connector(exclude(CockroachDb, Vitess, KingbaseMysql))]
 fn schema_filter_leveraging_init_script(api: TestApi) {
     // Creating the external table through the init script so it exists in the shadow db.
     // Therefore it can be referenced with a foreign key constraint from the Cat model without being created by a Prisma migration itself.

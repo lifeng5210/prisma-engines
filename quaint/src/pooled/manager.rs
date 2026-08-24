@@ -95,7 +95,7 @@ impl Queryable for PooledConnection {
 
 #[doc(hidden)]
 pub enum QuaintManager {
-    #[cfg(feature = "mysql")]
+    #[cfg(feature = "mysql-native")]
     Mysql { url: MysqlUrl },
 
     #[cfg(feature = "kingbase-mysql-native")]

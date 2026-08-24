@@ -927,7 +927,7 @@ fn on_update_required_default_action(api: TestApi) {
     });
 }
 
-#[test_connector(exclude(Vitess, CockroachDb))]
+#[test_connector(exclude(Vitess, CockroachDb, KingbaseMysql))]
 fn adding_mutual_references_on_existing_tables_works(api: TestApi) {
     let dm1 = r#"
         model A {

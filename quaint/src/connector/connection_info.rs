@@ -169,7 +169,9 @@ impl ConnectionInfo {
                 #[cfg(feature = "mysql-native")]
                 NativeConnectionInfo::Mysql(url) => url.dbname(),
                 #[cfg(feature = "kingbase-mysql-native")]
-                NativeConnectionInfo::KingbaseMysql(url) => url.dbname(),
+                NativeConnectionInfo::KingbaseMysql(url) => {
+                    Some(url.schema().unwrap_or(crate::connector::DEFAULT_KINGBASE_MYSQL_SCHEMA))
+                }
                 #[cfg(feature = "mssql-native")]
                 NativeConnectionInfo::Mssql(url) => Some(url.schema()),
                 #[cfg(feature = "sqlite-native")]
