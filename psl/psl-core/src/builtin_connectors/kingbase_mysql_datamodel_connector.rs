@@ -227,8 +227,8 @@ impl Connector for KingbaseMysqlDatamodelConnector {
     }
 
     fn validate_url(&self, url: &str) -> Result<(), String> {
-        if !url.starts_with("kingbase-mysql://") {
-            return Err("must start with the protocol `kingbase-mysql://`.".to_owned());
+        if !url.starts_with("kingbase-mysql://") && !url.starts_with("kingbase://") {
+            return Err("must start with the protocol `kingbase-mysql://` or `kingbase://`.".to_owned());
         }
 
         Ok(())
