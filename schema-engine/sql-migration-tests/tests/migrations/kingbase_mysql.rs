@@ -85,6 +85,35 @@ fn schema_push_creates_indexes_foreign_keys_and_is_idempotent(api: TestApi) {
 }
 
 #[test_connector(tags(KingbaseMysql))]
+fn fulltext_indexes_use_gin_and_are_idempotent(api: TestApi) {
+    let schema = r#"
+        model Article {
+            id      Int    @id
+            title   String @db.Text
+            content String @db.Text
+
+            @@fulltext([title, content])
+        }
+    "#;
+
+    api.schema_push_w_datasource(schema)
+        .send()
+        .assert_green()
+        .assert_has_executed_steps();
+
+    api.assert_schema().assert_table("Article", |table| {
+        table.assert_index_on_columns(&["title", "content"], |index| {
+            index.assert_is_fulltext().assert_name("Article_title_content_idx")
+        })
+    });
+
+    api.schema_push_w_datasource(schema)
+        .send()
+        .assert_green()
+        .assert_no_steps();
+}
+
+#[test_connector(tags(KingbaseMysql))]
 fn enum_columns_can_be_created_altered_and_reintrospected(api: TestApi) {
     let initial_schema = r#"
         model Post {

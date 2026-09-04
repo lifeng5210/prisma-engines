@@ -25,6 +25,7 @@ impl KingbaseMysql {
         } = template;
         let (sql, parameter_fragments) = template_sql(fragments);
 
+        let sql = rewrite_full_text_search(sql);
         let sql = cast_sum_parameters(sql, &parameters);
         promote_json_numeric_comparison_params(&sql, &mut parameters);
         let sql = cast_json_comparison_expressions(sql);
@@ -60,6 +61,103 @@ impl KingbaseMysql {
         let params = template.parameters;
         Ok((sql, params))
     }
+}
+
+/// Rewrites the MySQL visitor's `MATCH (...) AGAINST (... IN BOOLEAN MODE)`
+/// output to Kingbase's PostgreSQL-compatible full-text syntax. We keep the
+/// `simple` configuration fixed because it makes the `to_tsvector` expression
+/// immutable, allowing the same expression to back a GIN index.
+fn rewrite_full_text_search(sql: String) -> String {
+    const MATCH: &str = "MATCH";
+    const AGAINST: &str = "AGAINST";
+    const BOOLEAN_MODE: &str = "IN BOOLEAN MODE";
+
+    let mut output = String::with_capacity(sql.len());
+    let mut cursor = 0;
+    let mut search_start = 0;
+
+    while let Some(offset) = sql[search_start..].find(MATCH) {
+        let match_start = search_start + offset;
+        let match_open = skip_whitespace(&sql, match_start + MATCH.len());
+
+        if sql.as_bytes().get(match_open) != Some(&b'(') {
+            search_start = match_start + MATCH.len();
+            continue;
+        }
+
+        let Some(columns_end) = matching_parenthesis(&sql, match_open) else {
+            break;
+        };
+
+        let against_start = skip_whitespace(&sql, columns_end + 1);
+        if !sql[against_start..].starts_with(AGAINST) {
+            search_start = columns_end + 1;
+            continue;
+        }
+
+        let against_open = skip_whitespace(&sql, against_start + AGAINST.len());
+        if sql.as_bytes().get(against_open) != Some(&b'(') {
+            search_start = against_start + AGAINST.len();
+            continue;
+        }
+
+        let Some(against_end) = matching_parenthesis(&sql, against_open) else {
+            break;
+        };
+
+        let Some(mode_start) = sql[against_open + 1..against_end]
+            .rfind(BOOLEAN_MODE)
+            .map(|offset| against_open + 1 + offset)
+        else {
+            search_start = against_end + 1;
+            continue;
+        };
+
+        if !sql[mode_start + BOOLEAN_MODE.len()..against_end].trim().is_empty() {
+            search_start = against_end + 1;
+            continue;
+        }
+
+        output.push_str(&sql[cursor..match_start]);
+        let document = fulltext_document(&sql[match_open + 1..columns_end]);
+        let query = sql[against_open + 1..mode_start].trim();
+
+        if is_fulltext_relevance_expression(&sql, match_start) {
+            output.push_str("ts_rank(to_tsvector('simple', ");
+            output.push_str(&document);
+            output.push_str("), to_tsquery('simple', ");
+            output.push_str(query);
+            output.push_str("))");
+        } else {
+            output.push_str("to_tsvector('simple', ");
+            output.push_str(&document);
+            output.push_str(") @@ to_tsquery('simple', ");
+            output.push_str(query);
+            output.push(')');
+        }
+
+        cursor = against_end + 1;
+        search_start = cursor;
+    }
+
+    output.push_str(&sql[cursor..]);
+    output
+}
+
+fn fulltext_document(columns: &str) -> String {
+    columns
+        .split(',')
+        .map(|column| format!("COALESCE({}, '')", column.trim()))
+        .reduce(|document, column| format!("textcat({document}, textcat(' ', {column}))"))
+        .expect("a MySQL MATCH expression must contain at least one column")
+}
+
+fn is_fulltext_relevance_expression(sql: &str, match_start: usize) -> bool {
+    let before_match = &sql[..match_start];
+    let last_order_by = before_match.rfind("ORDER BY ");
+    let last_where = before_match.rfind(" WHERE ");
+
+    last_order_by.is_some_and(|order_by| last_where.is_none_or(|where_clause| order_by > where_clause))
 }
 
 fn template_sql(fragments: Vec<Fragment>) -> (String, Vec<Fragment>) {
@@ -532,8 +630,12 @@ fn native_uuid_as_text(sql: String) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::KingbaseMysql;
-    use crate::ast::{Column, Expression, JsonPath, Select, ValueType, json_extract, json_unquote, native_uuid};
+    use super::{KingbaseMysql, rewrite_full_text_search};
+    use crate::Value;
+    use crate::ast::{
+        Column, Comparable, Expression, JsonPath, Select, ValueType, json_extract, json_unquote, native_uuid,
+        text_search,
+    };
 
     #[test]
     fn json_unquote_uses_the_unambiguous_jsonpath_operator() {
@@ -567,6 +669,29 @@ mod tests {
             Some("JSONPATH")
         ));
         assert!(matches!(template.parameters[0].typed, ValueType::Text(Some(_))));
+    }
+
+    #[test]
+    fn full_text_filters_use_kingbase_syntax() {
+        let search: Expression = text_search(&[Column::from("name"), Column::from("email")]).into();
+        let query = Select::from_table("User").so_that(search.matches("John & Smith"));
+        let (sql, params) = KingbaseMysql::build(query).unwrap();
+
+        assert_eq!(
+            "SELECT `User`.* FROM `User` WHERE to_tsvector('simple', textcat(COALESCE(`name`, ''), textcat(' ', COALESCE(`email`, '')))) @@ to_tsquery('simple', ?)",
+            sql
+        );
+        assert_eq!(params, vec![Value::text("John & Smith")]);
+    }
+
+    #[test]
+    fn full_text_relevance_uses_kingbase_syntax() {
+        assert_eq!(
+            "SELECT `User`.* FROM `User` ORDER BY ts_rank(to_tsvector('simple', COALESCE(`name`, '')), to_tsquery('simple', ?)) DESC",
+            rewrite_full_text_search(
+                "SELECT `User`.* FROM `User` ORDER BY MATCH (`name`)AGAINST (? IN BOOLEAN MODE) DESC".to_owned(),
+            )
+        );
     }
 }
 

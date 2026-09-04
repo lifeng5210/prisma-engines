@@ -136,7 +136,13 @@ impl SqlSchemaDifferFlavour for KingbaseMysqlSchemaDifferFlavour {
     }
 
     fn should_create_indexes_from_created_tables(&self) -> bool {
-        false
+        // Full-text indexes use a GIN expression and must be created after
+        // the table. Normal and unique indexes remain table constraints.
+        true
+    }
+
+    fn should_skip_index_for_new_table(&self, index: IndexWalker<'_>) -> bool {
+        index.index_type() != sql_schema_describer::IndexType::Fulltext
     }
 
     fn should_ignore_json_defaults(&self) -> bool {

@@ -20,6 +20,14 @@ use tracing::trace;
 /// ```
 static DEFAULT_QUOTES: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"'(.*)'").unwrap());
 
+/// Captures the source columns in the immutable `to_tsvector('simple',
+/// textcat(COALESCE(column, ''), ...))` expression rendered for Kingbase full-text
+/// indexes. PostgreSQL catalog entries use double-quoted identifiers only
+/// when necessary, so accept both quoted and bare forms.
+static FULLTEXT_INDEX_COLUMN: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#"(?i)COALESCE\(\s*(?:\"((?:[^\"]|\"\")*)\"|([A-Za-z_][A-Za-z0-9_$]*))\s*,"#).unwrap()
+});
+
 fn is_mariadb(version: &str) -> bool {
     version.contains("MariaDB")
 }
@@ -107,7 +115,8 @@ async fn push_indexes(
             NULL::TEXT AS column_order,
             NOT rawindex.indisunique AS non_unique,
             indexaccess.amname AS index_type,
-            rawindex.indisprimary AS is_primary
+            rawindex.indisprimary AS is_primary,
+            pg_catalog.pg_get_expr(rawindex.indexprs, rawindex.indrelid) AS index_expression
         FROM pg_catalog.pg_index AS rawindex
         INNER JOIN pg_catalog.pg_class AS tableinfo
             ON tableinfo.oid = rawindex.indrelid
@@ -161,6 +170,30 @@ async fn push_indexes(
         });
 
         let seq_in_index = row.get_expect_i64("seq_in_index"); // starts at 1
+
+        if seq_in_index == 1
+            && row.get_string("index_type").as_deref() == Some("gin")
+            && let Some(columns) = fulltext_index_columns(row.get_string("index_expression").as_deref())
+        {
+            let index_id = sql_schema.push_fulltext_index(table_id, index_name);
+
+            for column_name in columns {
+                let column_id = sql_schema
+                    .walk(table_id)
+                    .column(&column_name)
+                    .expect("Kingbase full-text index column was not found in the described table")
+                    .id;
+                sql_schema.push_index_column(IndexColumn {
+                    index_id,
+                    column_id,
+                    sort_order: None,
+                    length: None,
+                });
+            }
+
+            current_index_id = Some(index_id);
+            continue;
+        }
 
         let column_name = if let Some(name) = row.get_string("column_name") {
             name
@@ -219,6 +252,26 @@ async fn push_indexes(
     }
 
     Ok(())
+}
+
+fn fulltext_index_columns(index_expression: Option<&str>) -> Option<Vec<String>> {
+    let index_expression = index_expression?;
+
+    if !index_expression.contains("to_tsvector") || !index_expression.contains("'simple'") {
+        return None;
+    }
+
+    let columns: Vec<_> = FULLTEXT_INDEX_COLUMN
+        .captures_iter(index_expression)
+        .filter_map(|captures| {
+            captures
+                .get(1)
+                .or_else(|| captures.get(2))
+                .map(|capture| capture.as_str().replace("\"\"", "\""))
+        })
+        .collect();
+
+    (!columns.is_empty()).then_some(columns)
 }
 
 impl Parser for SqlSchemaDescriber<'_> {}

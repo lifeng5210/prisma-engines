@@ -159,6 +159,10 @@ impl SqlRenderer for KingbaseMysqlRenderer {
     }
 
     fn render_create_index(&self, index: IndexWalker<'_>) -> String {
+        if index.index_type() == sql::IndexType::Fulltext {
+            return render_fulltext_index(index);
+        }
+
         MysqlRenderer.render_create_index(index)
     }
 
@@ -172,16 +176,18 @@ impl SqlRenderer for KingbaseMysqlRenderer {
         ddl::CreateTable {
             table_name: &table_name,
             columns: table.columns().map(render_column).collect(),
+            // The GIN expression used by full-text indexes cannot be defined
+            // inline. Normal and unique indexes stay inline so constraints
+            // referenced by foreign keys exist when the table is created.
             indexes: table
                 .indexes()
-                .filter(|idx| !idx.is_primary_key())
+                .filter(|index| !index.is_primary_key() && index.index_type() != sql::IndexType::Fulltext)
                 .map(|index| ddl::IndexClause {
                     index_name: Some(Cow::from(index.name())),
                     r#type: match index.index_type() {
                         sql::IndexType::Unique => ddl::IndexType::Unique,
                         sql::IndexType::Normal => ddl::IndexType::Normal,
-                        sql::IndexType::Fulltext => ddl::IndexType::Fulltext,
-                        sql::IndexType::PrimaryKey => unreachable!(),
+                        sql::IndexType::Fulltext | sql::IndexType::PrimaryKey => unreachable!(),
                     },
                     columns: index.columns().map(render_index_column).collect(),
                 })
@@ -199,6 +205,15 @@ impl SqlRenderer for KingbaseMysqlRenderer {
     }
 
     fn render_drop_and_recreate_index(&self, indexes: MigrationPair<IndexWalker<'_>>) -> Vec<String> {
+        if indexes.previous.index_type() == sql::IndexType::Fulltext
+            || indexes.next.index_type() == sql::IndexType::Fulltext
+        {
+            return vec![
+                self.render_drop_index(None, indexes.previous),
+                self.render_create_index(indexes.next),
+            ];
+        }
+
         MysqlRenderer.render_drop_and_recreate_index(indexes)
     }
 
@@ -255,6 +270,20 @@ impl SqlRenderer for KingbaseMysqlRenderer {
     fn render_create_namespace(&self, namespace: sql::NamespaceWalker<'_>) -> Vec<String> {
         MysqlRenderer.render_create_namespace(namespace)
     }
+}
+
+fn render_fulltext_index(index: IndexWalker<'_>) -> String {
+    let document = index
+        .columns()
+        .map(|column| format!("COALESCE({}, '')", Quoted::mysql_ident(column.as_column().name())))
+        .reduce(|document, column| format!("textcat({document}, textcat(' ', {column}))"))
+        .expect("a full-text index must contain at least one column");
+
+    format!(
+        "CREATE INDEX {index_name} ON {table_name} USING GIN (to_tsvector('simple', {document}))",
+        index_name = Quoted::mysql_ident(index.name()),
+        table_name = Quoted::mysql_ident(index.table().name()),
+    )
 }
 
 fn render_column(col: TableColumnWalker<'_>) -> ddl::Column<'_> {
