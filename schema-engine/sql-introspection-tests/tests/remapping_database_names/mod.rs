@@ -222,7 +222,7 @@ async fn remapping_fields_in_compound_relations(api: &mut TestApi) -> TestResult
 
                 if sql_family.is_mysql() {
                     t.inject_custom(
-                        "CONSTRAINT asdf FOREIGN KEY (user_id, user_age) REFERENCES User(id, `age-that-is-invalid`) ON DELETE RESTRICT ON UPDATE CASCADE",
+                        "CONSTRAINT asdf FOREIGN KEY (user_id, user_age) REFERENCES `User`(id, `age-that-is-invalid`) ON DELETE RESTRICT ON UPDATE CASCADE",
                     );
                 } else {
                     t.inject_custom(

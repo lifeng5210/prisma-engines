@@ -10,7 +10,7 @@ use std::{fmt, sync::Arc};
 #[cfg(feature = "sqlite-native")]
 use std::convert::TryFrom;
 
-#[cfg(native)]
+#[cfg(feature = "sqlite-native")]
 use crate::connector::NativeConnectionInfo;
 
 /// The main entry point and an abstraction over a database connection.

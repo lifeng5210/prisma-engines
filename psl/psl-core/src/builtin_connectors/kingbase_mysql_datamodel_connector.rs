@@ -102,7 +102,10 @@ impl Connector for KingbaseMysqlDatamodelConnector {
     }
 
     fn max_identifier_length(&self) -> usize {
-        64
+        // Kingbase uses PostgreSQL's 64-byte identifier storage, including
+        // the terminating NUL byte. Identifiers are therefore limited to 63
+        // bytes, even in MySQL compatibility mode.
+        63
     }
 
     fn foreign_key_referential_actions(&self) -> BitFlags<ReferentialAction> {

@@ -755,16 +755,12 @@ fn explicit_cast_supported_by_names(previous: &str, next: &str) -> bool {
 fn is_signedness_only_change(previous: &str, next: &str) -> bool {
     matches!(
         (native_type_base(previous), native_type_base(next)),
-        ("Int", "UnsignedInt")
-            | ("UnsignedInt", "Int")
-            | ("SmallInt", "UnsignedSmallInt")
+        ("SmallInt", "UnsignedSmallInt")
             | ("UnsignedSmallInt", "SmallInt")
             | ("TinyInt", "UnsignedTinyInt")
             | ("UnsignedTinyInt", "TinyInt")
             | ("MediumInt", "UnsignedMediumInt")
             | ("UnsignedMediumInt", "MediumInt")
-            | ("BigInt", "UnsignedBigInt")
-            | ("UnsignedBigInt", "BigInt")
     )
 }
 
@@ -868,8 +864,6 @@ fn sql_literal(from_type: &str, value: &quaint::ValueType<'_>) -> String {
 
 fn warning_native_type(native_type: &str) -> &str {
     match native_type {
-        "UnsignedBigInt" => "BigInt",
-        "UnsignedInt" => "Int",
         "UnsignedMediumInt" => "MediumInt",
         "UnsignedSmallInt" => "SmallInt",
         "UnsignedTinyInt" => "TinyInt",
@@ -898,9 +892,8 @@ fn run_casts_with_existing_data(api: &mut TestApi, cases: Cases, cast_kind: Cast
         });
         let mut groups = Vec::new();
 
-        // Kingbase stores signed/unsigned aliases as the same signed SQL type.
-        // Keep those MySQL matrix entries in the test, but assert them as
-        // successful no-op schema pushes rather than dropping them.
+        // Kingbase has no narrower unsigned types for TinyInt, SmallInt, or
+        // MediumInt. Keep those MySQL matrix entries as no-op schema pushes.
         if !no_op.is_empty() {
             groups.push((no_op, CastKind::Safe));
         }
@@ -1150,9 +1143,10 @@ fn all_supported_native_types_can_be_created_and_reintrospected(api: TestApi) {
         let expected_native_types = [
             ("id", Some("Int")),
             ("intValue", Some("Int")),
-            // Kingbase accepts the unsigned Prisma annotations but stores the equivalent
-            // signed SQL type; the schema differ treats these pairs as equivalent.
-            ("unsignedInt", Some("Int")),
+            // Kingbase exposes 32- and 64-bit unsigned integers as sys.uint4
+            // and sys.uint8. Its MySQL compatibility layer has no narrower
+            // unsigned equivalents for TinyInt, SmallInt, or MediumInt.
+            ("unsignedInt", Some("UnsignedInt")),
             ("smallInt", Some("SmallInt")),
             ("unsignedSmallInt", Some("SmallInt")),
             ("tinyInt", Some("TinyInt")),
@@ -1160,7 +1154,7 @@ fn all_supported_native_types_can_be_created_and_reintrospected(api: TestApi) {
             ("mediumInt", Some("MediumInt")),
             ("unsignedMediumInt", Some("MediumInt")),
             ("bigInt", Some("BigInt")),
-            ("unsignedBigInt", Some("BigInt")),
+            ("unsignedBigInt", Some("UnsignedBigInt")),
             ("decimalValue", Some("Decimal(5,3)")),
             ("floatValue", Some("Float")),
             ("doubleValue", Some("Double")),

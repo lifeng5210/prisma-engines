@@ -21,15 +21,19 @@ use crate::{
 };
 use async_trait::async_trait;
 use futures::{Future, StreamExt, future::FutureExt};
-use native_tls::TlsConnector;
+use native_tls::{Certificate, Identity, TlsConnector};
 use std::{
+    fs,
     sync::atomic::{AtomicBool, Ordering},
     time::Duration,
 };
 use tokio::task::JoinHandle;
 use tracing_futures::WithSubscriber;
 
-use super::KingbaseMysqlUrl;
+use super::{
+    KingbaseMysqlUrl,
+    url::{SslAcceptMode, SslParams},
+};
 use kingbase_postgres_native_tls::MakeTlsConnector;
 use kingbase_tokio_postgres::{Client, types::Type};
 
@@ -47,16 +51,7 @@ pub struct KingbaseMysql {
 impl KingbaseMysql {
     pub async fn new(url: KingbaseMysqlUrl) -> crate::Result<Self> {
         let config = url.to_config()?;
-        let tls = TlsConnector::builder()
-            .danger_accept_invalid_certs(true)
-            .build()
-            .map_err(|error| {
-                Error::builder(ErrorKind::Native(NativeErrorKind::TlsError {
-                    message: error.to_string(),
-                }))
-                .build()
-            })?;
-        let tls = MakeTlsConnector::new(tls);
+        let tls = make_tls_connector(url.ssl_params())?;
         let (client, connection) = timeout::connect(url.connect_timeout(), config.connect(tls)).await?;
 
         let handle = tokio::spawn(
@@ -146,6 +141,55 @@ impl KingbaseMysql {
         drop(self.client);
         self.handle.await.expect("Kingbase connection task panicked");
     }
+}
+
+fn make_tls_connector(ssl_params: &SslParams) -> crate::Result<MakeTlsConnector> {
+    let mut tls_builder = TlsConnector::builder();
+
+    if let Some(certificate_file) = &ssl_params.certificate_file {
+        let certificate = fs::read(certificate_file).map_err(|error| {
+            Error::builder(ErrorKind::Native(NativeErrorKind::TlsError {
+                message: format!("cert file not found ({error})"),
+            }))
+            .build()
+        })?;
+        let certificate = Certificate::from_pem(&certificate).map_err(|error| {
+            Error::builder(ErrorKind::Native(NativeErrorKind::TlsError {
+                message: error.to_string(),
+            }))
+            .build()
+        })?;
+        tls_builder.add_root_certificate(certificate);
+    }
+
+    tls_builder.danger_accept_invalid_certs(ssl_params.ssl_accept_mode == SslAcceptMode::AcceptInvalidCerts);
+
+    if let Some(identity_file) = &ssl_params.identity_file {
+        let identity = fs::read(identity_file).map_err(|error| {
+            Error::builder(ErrorKind::Native(NativeErrorKind::TlsError {
+                message: format!("identity file not found ({error})"),
+            }))
+            .build()
+        })?;
+        let password = ssl_params.identity_password.0.as_deref().unwrap_or("");
+        let identity = Identity::from_pkcs12(&identity, password).map_err(|error| {
+            Error::builder(ErrorKind::Native(NativeErrorKind::TlsError {
+                message: error.to_string(),
+            }))
+            .build()
+        })?;
+        tls_builder.identity(identity);
+    }
+
+    tls_builder
+        .build()
+        .map_err(|error| {
+            Error::builder(ErrorKind::Native(NativeErrorKind::TlsError {
+                message: error.to_string(),
+            }))
+            .build()
+        })
+        .map(MakeTlsConnector::new)
 }
 
 impl_default_TransactionCapable!(KingbaseMysql);

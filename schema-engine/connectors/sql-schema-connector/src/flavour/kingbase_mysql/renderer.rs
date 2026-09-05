@@ -371,13 +371,14 @@ fn render_column_type(column: TableColumnWalker<'_>) -> Cow<'static, str> {
         KingbaseMySqlType::Timestamp(precision) => format!("TIMESTAMP{}", render(*precision)).into(),
         KingbaseMySqlType::Year => "YEAR".into(),
         KingbaseMySqlType::Json => "JSON".into(),
-        // Kingbase's MySQL compatibility layer accepts these integer names,
-        // but not MySQL's `UNSIGNED` modifier.
-        KingbaseMySqlType::UnsignedInt => "INTEGER".into(),
+        // Kingbase does not accept MySQL's `INT UNSIGNED` modifier. Its MySQL
+        // compatibility layer exposes the two native unsigned integer types
+        // below instead.
+        KingbaseMySqlType::UnsignedInt => "sys.uint4".into(),
         KingbaseMySqlType::UnsignedSmallInt => "SMALLINT".into(),
         KingbaseMySqlType::UnsignedTinyInt => "TINYINT".into(),
         KingbaseMySqlType::UnsignedMediumInt => "MEDIUMINT".into(),
-        KingbaseMySqlType::UnsignedBigInt => "BIGINT".into(),
+        KingbaseMySqlType::UnsignedBigInt => "sys.uint8".into(),
     }
 }
 

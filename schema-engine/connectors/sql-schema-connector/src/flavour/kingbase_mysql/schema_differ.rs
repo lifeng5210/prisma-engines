@@ -161,16 +161,12 @@ impl SqlSchemaDifferFlavour for KingbaseMysqlSchemaDifferFlavour {
 fn integer_signedness_is_only_difference(previous: &KingbaseMySqlType, next: &KingbaseMySqlType) -> bool {
     matches!(
         (previous, next),
-        (KingbaseMySqlType::Int, KingbaseMySqlType::UnsignedInt)
-            | (KingbaseMySqlType::UnsignedInt, KingbaseMySqlType::Int)
-            | (KingbaseMySqlType::SmallInt, KingbaseMySqlType::UnsignedSmallInt)
+        (KingbaseMySqlType::SmallInt, KingbaseMySqlType::UnsignedSmallInt)
             | (KingbaseMySqlType::UnsignedSmallInt, KingbaseMySqlType::SmallInt)
             | (KingbaseMySqlType::TinyInt, KingbaseMySqlType::UnsignedTinyInt)
             | (KingbaseMySqlType::UnsignedTinyInt, KingbaseMySqlType::TinyInt)
             | (KingbaseMySqlType::MediumInt, KingbaseMySqlType::UnsignedMediumInt)
             | (KingbaseMySqlType::UnsignedMediumInt, KingbaseMySqlType::MediumInt)
-            | (KingbaseMySqlType::BigInt, KingbaseMySqlType::UnsignedBigInt)
-            | (KingbaseMySqlType::UnsignedBigInt, KingbaseMySqlType::BigInt)
     )
 }
 

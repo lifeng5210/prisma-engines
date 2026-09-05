@@ -1,7 +1,30 @@
 use crate::error::{Error, ErrorKind};
 use kingbase_tokio_postgres::Config;
-use std::time::Duration;
+use std::{fmt, time::Duration};
 use url::Url;
+
+#[derive(Clone)]
+pub(crate) struct Hidden<T>(pub(crate) T);
+
+impl<T> fmt::Debug for Hidden<T> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("<HIDDEN>")
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SslAcceptMode {
+    Strict,
+    AcceptInvalidCerts,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct SslParams {
+    pub(crate) certificate_file: Option<String>,
+    pub(crate) identity_file: Option<String>,
+    pub(crate) identity_password: Hidden<Option<String>>,
+    pub(crate) ssl_accept_mode: SslAcceptMode,
+}
 
 /// A KingbaseES connection URL for the MySQL-compatible provider.
 ///
@@ -116,6 +139,10 @@ impl KingbaseMysqlUrl {
     pub(crate) fn pg_bouncer(&self) -> bool {
         self.query_params.pg_bouncer
     }
+
+    pub(crate) fn ssl_params(&self) -> &SslParams {
+        &self.query_params.ssl_params
+    }
 }
 
 fn is_quaint_only_parameter(key: &str) -> bool {
@@ -136,8 +163,9 @@ fn is_quaint_only_parameter(key: &str) -> bool {
     )
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 struct KingbaseMysqlUrlQueryParams {
+    ssl_params: SslParams,
     schema: Option<String>,
     pg_bouncer: bool,
     connect_timeout: Option<Duration>,
@@ -150,43 +178,86 @@ struct KingbaseMysqlUrlQueryParams {
 
 impl KingbaseMysqlUrlQueryParams {
     fn parse(url: &Url) -> crate::Result<Self> {
-        let mut params = Self::default();
+        let mut schema = None;
+        let mut certificate_file = None;
+        let mut identity_file = None;
+        let mut identity_password = None;
+        let mut ssl_accept_mode = SslAcceptMode::AcceptInvalidCerts;
+        let mut pg_bouncer = false;
+        let mut connect_timeout = None;
+        let mut socket_timeout = None;
+        let mut connection_limit = None;
+        let mut pool_timeout = None;
+        let mut max_connection_lifetime = None;
+        let mut max_idle_connection_lifetime = None;
 
         for (key, value) in url.query_pairs() {
             match key.as_ref() {
-                "schema" => params.schema = Some(value.into_owned()),
+                "schema" => schema = Some(value.into_owned()),
+                "sslcert" => certificate_file = Some(value.into_owned()),
+                "sslidentity" => identity_file = Some(value.into_owned()),
+                "sslpassword" => identity_password = Some(value.into_owned()),
+                "sslaccept" => {
+                    ssl_accept_mode = match value.as_ref() {
+                        "strict" => SslAcceptMode::Strict,
+                        "accept_invalid_certs" => SslAcceptMode::AcceptInvalidCerts,
+                        _ => {
+                            tracing::debug!(
+                                message = "Unsupported SSL accept mode, defaulting to `strict`",
+                                mode = &*value
+                            );
+
+                            SslAcceptMode::Strict
+                        }
+                    };
+                }
                 "pgbouncer" => {
-                    params.pg_bouncer = value
+                    pg_bouncer = value
                         .parse()
                         .map_err(|_| Error::builder(ErrorKind::InvalidConnectionArguments).build())?;
                 }
                 "connect_timeout" => {
-                    params.connect_timeout = parse_optional_timeout(&value)?;
+                    connect_timeout = parse_optional_timeout(&value)?;
                 }
                 "socket_timeout" => {
-                    params.socket_timeout = parse_optional_timeout(&value)?;
+                    socket_timeout = parse_optional_timeout(&value)?;
                 }
                 "connection_limit" => {
-                    params.connection_limit = Some(
+                    connection_limit = Some(
                         value
                             .parse()
                             .map_err(|_| Error::builder(ErrorKind::InvalidConnectionArguments).build())?,
                     );
                 }
                 "pool_timeout" => {
-                    params.pool_timeout = parse_optional_timeout(&value)?;
+                    pool_timeout = parse_optional_timeout(&value)?;
                 }
                 "max_connection_lifetime" => {
-                    params.max_connection_lifetime = parse_optional_timeout(&value)?;
+                    max_connection_lifetime = parse_optional_timeout(&value)?;
                 }
                 "max_idle_connection_lifetime" => {
-                    params.max_idle_connection_lifetime = parse_optional_timeout(&value)?;
+                    max_idle_connection_lifetime = parse_optional_timeout(&value)?;
                 }
                 _ => (),
             }
         }
 
-        Ok(params)
+        Ok(Self {
+            ssl_params: SslParams {
+                certificate_file,
+                identity_file,
+                identity_password: Hidden(identity_password),
+                ssl_accept_mode,
+            },
+            schema,
+            pg_bouncer,
+            connect_timeout,
+            socket_timeout,
+            connection_limit,
+            pool_timeout,
+            max_connection_lifetime,
+            max_idle_connection_lifetime,
+        })
     }
 }
 
@@ -200,7 +271,7 @@ fn parse_optional_timeout(value: &str) -> crate::Result<Option<Duration>> {
 
 #[cfg(test)]
 mod tests {
-    use super::KingbaseMysqlUrl;
+    use super::{KingbaseMysqlUrl, SslAcceptMode};
     use url::Url;
 
     #[test]
@@ -232,5 +303,15 @@ mod tests {
         let url = KingbaseMysqlUrl::new(Url::parse("kingbase-mysql://localhost/app").unwrap()).unwrap();
 
         assert!(!url.to_config().unwrap().get_pgbouncer_mode());
+    }
+
+    #[test]
+    fn parses_strict_sslaccept_mode() {
+        let url = KingbaseMysqlUrl::new(
+            Url::parse("kingbase-mysql://localhost/app?sslmode=require&sslaccept=strict").unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(url.ssl_params().ssl_accept_mode, SslAcceptMode::Strict);
     }
 }

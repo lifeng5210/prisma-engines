@@ -321,7 +321,10 @@ async fn reintrospect_force_invalid_config(api: &mut TestApi) -> TestResult {
 
     let input_dms = [("foo.prisma", invalid_config_dm.to_string())];
 
-    let expected = expect![[r#"
+    let expected = if api.tags().contains(Tags::KingbaseMysql) {
+        expect!["error: The `schemas` property is not supported on the current connector.\n  -->  foo.prisma:3\n   |\u{20}\n 2 |   provider = \"mysql\"\n 3 |   schemas  = [\"foo\"]\n   |\u{20}\n\n"]
+    } else {
+        expect![[r#"
         [1;91merror[0m: [1mThe `schemas` property is not supported on the current connector.[0m
           [1;94m-->[0m  [4mfoo.prisma:3[0m
         [1;94m   | [0m
@@ -329,7 +332,8 @@ async fn reintrospect_force_invalid_config(api: &mut TestApi) -> TestResult {
         [1;94m 3 | [0m  schemas  = [1;91m["foo"][0m
         [1;94m   | [0m
 
-    "#]];
+    "#]]
+    };
 
     api.expect_re_introspected_force_datamodels_error(&input_dms, expected)
         .await;

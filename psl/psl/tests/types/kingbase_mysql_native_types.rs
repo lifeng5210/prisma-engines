@@ -6,6 +6,44 @@ use psl::{
 };
 
 #[test]
+fn constraint_names_are_limited_to_sixty_three_bytes() {
+    let valid_name = "a".repeat(63);
+    let invalid_name = "a".repeat(64);
+
+    assert_valid(&format!(
+        r#"
+        datasource db {{
+          provider = "kingbase-mysql"
+        }}
+
+        model User {{
+          id    Int    @id
+          email String
+
+          @@unique([email], map: "{valid_name}")
+        }}
+        "#
+    ));
+
+    let error = parse_unwrap_err(&format!(
+        r#"
+        datasource db {{
+          provider = "kingbase-mysql"
+        }}
+
+        model User {{
+          id    Int    @id
+          email String
+
+          @@unique([email], map: "{invalid_name}")
+        }}
+        "#
+    ));
+
+    assert!(error.contains("The maximum allowed length is 63 bytes."));
+}
+
+#[test]
 fn text_type_should_fail_on_unique() {
     let schema = indoc! {r#"
         datasource db {

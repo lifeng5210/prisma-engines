@@ -136,6 +136,28 @@ async fn push_indexes(
     "#;
 
     let rows = conn.query_raw(sql, &[schema_name.into()]).await?;
+    // `SqlSchema` walkers expect indexes to be grouped by table id. The
+    // catalog query's collation is not guaranteed to match the binary sort
+    // used when table ids are assigned, so normalize the order here instead
+    // of relying on database-specific collation behavior.
+    let mut rows = rows
+        .into_iter()
+        .filter_map(|row| {
+            let table_name = row.get_string("table_name")?;
+            let table_id = table_ids.get(table_name.as_str()).copied()?;
+            let index_name = row.get_expect_string("index_name");
+            let seq_in_index = row.get_expect_i64("seq_in_index");
+
+            Some((table_id, index_name, seq_in_index, row))
+        })
+        .collect::<Vec<_>>();
+
+    rows.sort_unstable_by(|(table_a, index_a, seq_a, _), (table_b, index_b, seq_b, _)| {
+        table_a
+            .cmp(table_b)
+            .then_with(|| index_a.cmp(index_b))
+            .then_with(|| seq_a.cmp(seq_b))
+    });
     let mut current_index_id: Option<IndexId> = None;
     let mut index_should_be_filtered_out = false;
 
@@ -151,15 +173,7 @@ async fn push_indexes(
         }
     };
 
-    for row in rows {
-        let table_name = row.get_expect_string("table_name");
-
-        let table_id = if let Some(id) = table_ids.get(table_name.as_str()) {
-            *id
-        } else {
-            continue;
-        };
-
+    for (table_id, _, _, row) in rows {
         let index_name = row.get_expect_string("index_name");
         let length = row.get_u32("partial");
 
@@ -514,12 +528,12 @@ impl<'a> SqlSchemaDescriber<'a> {
                         let default_expression = default_generated || maria_db;
 
                         Some(match &tpe.family {
-                            ColumnTypeFamily::Int => match Self::parse_int(&default_string) {
+                            ColumnTypeFamily::Int => match Self::parse_int_default(&default_string) {
                                 Some(int_value) => DefaultValue::value(int_value),
                                 None if default_expression => Self::dbgenerated_expression(&default_string),
                                 None => DefaultValue::db_generated(default_string),
                             },
-                            ColumnTypeFamily::BigInt => match Self::parse_big_int(&default_string) {
+                            ColumnTypeFamily::BigInt => match Self::parse_big_int_default(&default_string) {
                                 Some(int_value) => DefaultValue::value(int_value),
                                 None if default_expression => Self::dbgenerated_expression(&default_string),
                                 None => DefaultValue::db_generated(default_string),
@@ -718,6 +732,24 @@ impl<'a> SqlSchemaDescriber<'a> {
         }
     }
 
+    fn parse_int_default(value: &str) -> Option<PrismaValue> {
+        let value = value
+            .split_once("::")
+            .map_or(value, |(value, _)| value)
+            .trim_matches('\'');
+
+        Self::parse_int(value)
+    }
+
+    fn parse_big_int_default(value: &str) -> Option<PrismaValue> {
+        let value = value
+            .split_once("::")
+            .map_or(value, |(value, _)| value)
+            .trim_matches('\'');
+
+        Self::parse_big_int(value)
+    }
+
     fn get_column_type(
         (table, column_name): (&str, &str),
         data_type: &str,
@@ -747,6 +779,8 @@ impl<'a> SqlSchemaDescriber<'a> {
             .trim()
             .to_ascii_lowercase();
         let (family, native_type) = match data_type.as_str() {
+            "uint4" => (ColumnTypeFamily::Int, Some(KingbaseMySqlType::UnsignedInt)),
+            "uint8" => (ColumnTypeFamily::BigInt, Some(KingbaseMySqlType::UnsignedBigInt)),
             "int" | "integer" if UNSIGNEDNESS_RE.is_match(full_data_type) => {
                 (ColumnTypeFamily::Int, Some(KingbaseMySqlType::UnsignedInt))
             }

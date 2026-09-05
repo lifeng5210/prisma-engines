@@ -34,6 +34,11 @@ use std::convert::TryFrom;
 
 use super::ExternalConnectionInfo;
 
+/// KingbaseES uses the PostgreSQL wire protocol, whose prepared-statement
+/// parameter count is represented by a signed 16-bit integer.
+#[cfg(feature = "kingbase-mysql")]
+const KINGBASE_MYSQL_MAX_BIND_VALUES: usize = i16::MAX as usize;
+
 /// General information about a SQL connection.
 #[derive(Debug, Clone)]
 #[cfg_attr(target_arch = "wasm32", repr(transparent))]
@@ -277,8 +282,24 @@ impl ConnectionInfo {
                 feature = "postgresql-native",
                 feature = "mssql-native"
             ))]
+            #[cfg(feature = "kingbase-mysql-native")]
+            ConnectionInfo::Native(NativeConnectionInfo::KingbaseMysql(_)) => {
+                self.sql_family().max_bind_values().min(KINGBASE_MYSQL_MAX_BIND_VALUES)
+            }
+            #[cfg(any(
+                feature = "sqlite-native",
+                feature = "mysql-native",
+                feature = "kingbase-mysql-native",
+                feature = "postgresql-native",
+                feature = "mssql-native"
+            ))]
             ConnectionInfo::Native(_) => self.sql_family().max_bind_values(),
             // Wasm connectors can override the default max bind values.
+            #[cfg(feature = "kingbase-mysql")]
+            ConnectionInfo::External(info) if info.is_kingbase_mysql() => info
+                .max_bind_values
+                .unwrap_or(self.sql_family().max_bind_values())
+                .min(KINGBASE_MYSQL_MAX_BIND_VALUES),
             ConnectionInfo::External(info) => info.max_bind_values.unwrap_or(self.sql_family().max_bind_values()),
         }
     }
@@ -528,6 +549,7 @@ impl SqlFamily {
     #[cfg(any(
         feature = "sqlite-native",
         feature = "mysql-native",
+        feature = "kingbase-mysql-native",
         feature = "postgresql-native",
         feature = "mssql-native"
     ))]
@@ -548,6 +570,7 @@ impl SqlFamily {
     #[cfg(not(any(
         feature = "sqlite-native",
         feature = "mysql-native",
+        feature = "kingbase-mysql-native",
         feature = "postgresql-native",
         feature = "mssql-native"
     )))]
@@ -631,7 +654,7 @@ impl fmt::Display for SqlFamily {
 
 #[cfg(test)]
 mod tests {
-    #[cfg(any(feature = "sqlite-native", feature = "mysql-native"))]
+    #[cfg(any(feature = "sqlite-native", feature = "mysql-native", feature = "kingbase-mysql"))]
     use super::*;
 
     #[test]
@@ -677,5 +700,25 @@ mod tests {
         } else {
             panic!("Wrong type of connection info, should be Mysql");
         }
+    }
+
+    #[test]
+    #[cfg(feature = "kingbase-mysql")]
+    fn kingbase_mysql_external_connection_info_limits_bind_values() {
+        for max_bind_values in [None, Some(65_535)] {
+            let connection_info = ConnectionInfo::External(
+                ExternalConnectionInfo::new(SqlFamily::Mysql, None, max_bind_values, true).with_kingbase_mysql(),
+            );
+
+            assert_eq!(connection_info.max_bind_values(), 32_767);
+        }
+    }
+
+    #[test]
+    #[cfg(feature = "kingbase-mysql-native")]
+    fn kingbase_mysql_native_connection_info_limits_bind_values() {
+        let connection_info = ConnectionInfo::from_url("kingbase-mysql://localhost/app").unwrap();
+
+        assert_eq!(connection_info.max_bind_values(), 32_767);
     }
 }
