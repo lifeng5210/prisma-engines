@@ -57,9 +57,20 @@ impl From<kingbase_tokio_postgres::error::Error> for Error {
                 builder.build()
             } // sigh...
             // https://github.com/sfackler/rust-postgres/blob/0c84ed9f8201f4e5b4803199a24afa2c9f3723b2/tokio-postgres/src/connect_tls.rs#L37
-            "error performing TLS handshake: server does not support TLS" => {
+            // `kingbase-tokio-postgres` may omit the detailed handshake reason from
+            // the outer error (for example, it reports just
+            // `error performing TLS handshake` when the server has TLS disabled).
+            // Match the stable prefix so these failures are still exposed as TLS
+            // errors instead of generic query errors.
+            reason if reason.starts_with("error performing TLS handshake") => {
+                use std::error::Error as _;
+
+                let message = e
+                    .source()
+                    .map(|source| format!("{reason}: {source}"))
+                    .unwrap_or_else(|| reason.to_owned());
                 let mut builder = Error::builder(ErrorKind::Native(NativeErrorKind::TlsError {
-                    message: reason.clone(),
+                    message,
                 }));
 
                 if let Some(code) = code {

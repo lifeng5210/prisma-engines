@@ -1,5 +1,5 @@
 use crate::{
-    ast::{NativeColumnType, Query, Value, ValueType},
+    ast::{NativeColumnType, OpaqueType, Query, Value, ValueType},
     error::{Error, ErrorKind},
     visitor::{Mysql, Visitor},
 };
@@ -127,8 +127,16 @@ fn rewrite_full_text_search(sql: String, parameters: &mut [Value<'_>]) -> crate:
         let document = fulltext_document(&sql[match_open + 1..columns_end]);
         let query = sql[against_open + 1..mode_start].trim();
         let query_parameter_index = fulltext_query_parameter_index(query, &sql)?;
-        let tsquery = mysql_boolean_mode_to_tsquery(fulltext_query_parameter(parameters, query_parameter_index)?)?;
-        set_fulltext_query_parameter(parameters, query_parameter_index, tsquery)?;
+        // Query Compiler represents request values as opaque placeholders so a
+        // compiled plan can be reused. Those values are bound only at
+        // execution time, therefore they cannot be translated here. Kingbase
+        // callers use `tsquery` syntax for dynamic full-text searches; keep
+        // that parameter intact. The legacy static-value path below can still
+        // translate MySQL Boolean Mode syntax before binding it.
+        if let Some(query) = fulltext_query_parameter(parameters, query_parameter_index)? {
+            let tsquery = mysql_boolean_mode_to_tsquery(query)?;
+            set_fulltext_query_parameter(parameters, query_parameter_index, tsquery)?;
+        }
 
         output.push_str(&sql[cursor..match_start]);
 
@@ -167,9 +175,10 @@ fn fulltext_query_parameter_index(query: &str, sql: &str) -> crate::Result<usize
         .map_err(|_| fulltext_conversion_error("Kingbase MySQL full-text search parameter could not be located"))
 }
 
-fn fulltext_query_parameter<'a>(parameters: &'a [Value<'_>], index: usize) -> crate::Result<&'a str> {
+fn fulltext_query_parameter<'a>(parameters: &'a [Value<'_>], index: usize) -> crate::Result<Option<&'a str>> {
     match parameters.get(index).map(|parameter| &parameter.typed) {
-        Some(ValueType::Text(Some(query))) => Ok(query),
+        Some(ValueType::Text(Some(query))) => Ok(Some(query)),
+        Some(ValueType::Opaque(opaque)) if opaque.typ() == &OpaqueType::Text => Ok(None),
         _ => Err(fulltext_conversion_error(
             "Kingbase MySQL full-text search requires a non-null string search value",
         )),
@@ -954,7 +963,7 @@ mod tests {
     use super::KingbaseMysql;
     use crate::Value;
     use crate::ast::{
-        Column, Comparable, Expression, JsonPath, Select, ValueType, json_extract, json_unquote, native_uuid,
+        Column, Comparable, Expression, JsonPath, OpaqueType, Select, ValueType, json_extract, json_unquote, native_uuid,
         text_search, text_search_relevance,
     };
 
@@ -1022,6 +1031,25 @@ mod tests {
 
             assert_eq!(params, vec![Value::text(expected_tsquery)]);
         }
+    }
+
+    #[test]
+    fn full_text_filters_preserve_dynamic_tsquery_parameters() {
+        let search: Expression = text_search(&[Column::from("name")]).into();
+        let query = Select::from_table("User").so_that(search.matches(Value::opaque(
+            "search".to_owned(),
+            OpaqueType::Text,
+        )));
+        let (sql, params) = KingbaseMysql::build(query).unwrap();
+
+        assert_eq!(
+            "SELECT `User`.* FROM `User` WHERE to_tsvector('simple', COALESCE(`name`, '')) @@ to_tsquery('simple', ?)",
+            sql
+        );
+        assert!(matches!(
+            params[0].typed,
+            ValueType::Opaque(ref opaque) if opaque.typ() == &OpaqueType::Text
+        ));
     }
 
     #[test]

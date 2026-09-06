@@ -61,6 +61,18 @@ impl KingbaseMysqlUrl {
                 Error::builder(ErrorKind::DatabaseUrlIsInvalid("invalid Kingbase URL scheme".into())).build()
             })?;
         }
+
+        // `kingbase_tokio_postgres` inherits PostgreSQL's 5432 default. KingbaseES
+        // listens on 54321 by default, so write the Kingbase default into the URL
+        // before the driver parser applies its own fallback.
+        if driver_url.port().is_none() {
+            driver_url
+                .set_port(Some(super::DEFAULT_KINGBASE_MYSQL_PORT))
+                .map_err(|_| {
+                    Error::builder(ErrorKind::DatabaseUrlIsInvalid("invalid Kingbase URL port".into())).build()
+                })?;
+        }
+
         let driver_params = self
             .url
             .query_pairs()
@@ -113,7 +125,7 @@ impl KingbaseMysqlUrl {
     }
 
     pub fn port(&self) -> u16 {
-        self.url.port().unwrap_or(5432)
+        self.url.port().unwrap_or(super::DEFAULT_KINGBASE_MYSQL_PORT)
     }
 
     pub(crate) fn socket_timeout(&self) -> Option<Duration> {
@@ -306,6 +318,14 @@ mod tests {
     }
 
     #[test]
+    fn uses_kingbase_default_port_when_the_url_omits_one() {
+        let url = KingbaseMysqlUrl::new(Url::parse("kingbase-mysql://localhost/app").unwrap()).unwrap();
+
+        assert_eq!(url.port(), 54321);
+        assert_eq!(url.to_config().unwrap().get_ports(), &[54321]);
+    }
+
+    #[test]
     fn parses_strict_sslaccept_mode() {
         let url = KingbaseMysqlUrl::new(
             Url::parse("kingbase-mysql://localhost/app?sslmode=require&sslaccept=strict").unwrap(),
@@ -313,5 +333,49 @@ mod tests {
         .unwrap();
 
         assert_eq!(url.ssl_params().ssl_accept_mode, SslAcceptMode::Strict);
+    }
+
+    #[test]
+    fn parses_accept_invalid_certs_sslaccept_mode() {
+        let url = KingbaseMysqlUrl::new(
+            Url::parse("kingbase-mysql://localhost/app?sslmode=require&sslaccept=accept_invalid_certs").unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(url.ssl_params().ssl_accept_mode, SslAcceptMode::AcceptInvalidCerts);
+    }
+
+    #[test]
+    fn defaults_invalid_sslaccept_mode_to_strict() {
+        let url = KingbaseMysqlUrl::new(
+            Url::parse("kingbase-mysql://localhost/app?sslmode=require&sslaccept=unknown").unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(url.ssl_params().ssl_accept_mode, SslAcceptMode::Strict);
+    }
+
+    #[cfg(feature = "kingbase-mysql-native")]
+    #[tokio::test]
+    async fn should_map_tls_errors() {
+        use crate::tests::test_api::kingbase_mysql::CONN_STR;
+        use crate::{
+            error::{ErrorKind, NativeErrorKind},
+            single::Quaint,
+        };
+
+        let mut url = Url::parse(CONN_STR.as_str()).expect("parsing Kingbase URL");
+        url.set_query(Some("sslmode=require&sslaccept=strict"));
+
+        let result = Quaint::new(url.as_str()).await;
+
+        assert!(result.is_err());
+        match result {
+            Ok(_) => unreachable!(),
+            Err(error) => assert!(matches!(
+                error.kind(),
+                ErrorKind::Native(NativeErrorKind::TlsError { .. })
+            )),
+        }
     }
 }

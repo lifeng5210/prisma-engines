@@ -183,19 +183,22 @@ async fn query_with_backoff(
     flavour: &mut dyn SqlConnector,
     query: &str,
 ) -> ConnectorResult<quaint::prelude::ResultSet> {
-    let delay = std::time::Duration::from_millis(400);
     let mut result = flavour.query_raw(query, &[]).await;
 
     for i in 0..6 {
         match &result {
             Ok(_result_set) => break,
-            Err(_) => tokio::time::sleep(delay.saturating_mul(2 ^ i)).await,
+            Err(_) => tokio::time::sleep(retry_delay(i)).await,
         }
 
         result = flavour.query_raw(query, &[]).await
     }
 
     result
+}
+
+fn retry_delay(retry: u32) -> std::time::Duration {
+    std::time::Duration::from_millis(400).saturating_mul(1 << retry)
 }
 
 /// If the type change is an enum change, diagnose it, and return whether it _was_ an enum change.
@@ -228,4 +231,18 @@ fn is_safe_enum_change(
     }
 
     false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::retry_delay;
+    use std::time::Duration;
+
+    #[test]
+    fn retry_delay_grows_exponentially() {
+        assert_eq!(retry_delay(0), Duration::from_millis(400));
+        assert_eq!(retry_delay(1), Duration::from_millis(800));
+        assert_eq!(retry_delay(2), Duration::from_millis(1_600));
+        assert_eq!(retry_delay(5), Duration::from_millis(12_800));
+    }
 }
