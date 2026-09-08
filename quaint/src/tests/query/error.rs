@@ -477,12 +477,55 @@ async fn sqlite_isolation_error(api: &mut dyn TestApi) -> crate::Result<()> {
 }
 
 // Postgres and MySQL error on Snapshot.
-#[test_each_connector(tags("postgresql", "mysql"))]
+#[test_each_connector(tags("postgresql", "mysql", "kingbase-oracle"))]
 async fn snapshot_isolation_error(api: &mut dyn TestApi) -> crate::Result<()> {
     let res = api.conn().start_transaction(Some(IsolationLevel::Snapshot)).await;
 
     let err = res.err().expect("Postgres/MySQL must fail on isolation SNAPSHOT");
     assert_eq!(err.to_string(), "Invalid isolation level: SNAPSHOT");
+
+    Ok(())
+}
+
+#[test_each_connector(tags("kingbase-oracle"))]
+async fn kingbase_oracle_unsupported_isolation_levels_are_rejected(api: &mut dyn TestApi) -> crate::Result<()> {
+    for isolation_level in [IsolationLevel::ReadUncommitted, IsolationLevel::RepeatableRead] {
+        let err = match api.conn().start_transaction(Some(isolation_level)).await {
+            Ok(_) => panic!("Kingbase Oracle must reject unsupported isolation levels"),
+            Err(err) => err,
+        };
+
+        assert_eq!(err.to_string(), format!("Invalid isolation level: {isolation_level}"));
+    }
+
+    Ok(())
+}
+
+#[test_each_connector(tags("kingbase-oracle"))]
+async fn kingbase_oracle_unsupported_ast_features_are_rejected(api: &mut dyn TestApi) -> crate::Result<()> {
+    let upsert: Insert<'_> = Insert::single_into("items").value("id", 1).value("value", 1).into();
+    let update = Update::table("items").set("id", 2);
+    let err = api
+        .conn()
+        .execute(upsert.on_conflict(OnConflict::Update(update, vec!["id".into()])).into())
+        .await
+        .expect_err("Kingbase Oracle must reject a MERGE upsert that updates its conflict constraint");
+    assert!(err.to_string().contains("updating a conflict constraint"));
+
+    let err = api
+        .conn()
+        .select(Select::default().value(Value::array(vec![Value::int32(1)]).raw()))
+        .await
+        .expect_err("Kingbase Oracle must reject SQL array literals");
+    assert!(err.to_string().contains("array literal"));
+
+    let search: Expression<'_> = text_search(&[Column::from("body")]).into();
+    let err = api
+        .conn()
+        .select(Select::from_table("items").so_that(search.matches("kingbase")))
+        .await
+        .expect_err("Kingbase Oracle must reject full-text search");
+    assert!(err.to_string().contains("full-text search"));
 
     Ok(())
 }

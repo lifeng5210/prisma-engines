@@ -10,7 +10,8 @@ bitflags! {
         const MYSQL5_7      = 0b00001000;
         const MYSQL8        = 0b00010000;
         const MYSQL_MARIADB = 0b00100000;
-        const KINGBASE_MYSQL = 0b01000000;
+        const KINGBASE_MYSQL  = 0b01000000;
+        const KINGBASE_ORACLE = 0b10000000;
     }
 }
 
@@ -41,9 +42,10 @@ impl FromStr for Tags {
 }
 
 /// All the tags, sorted by name.
-fn tag_names<'a>() -> [(&'a str, Tags); 8] {
+fn tag_names<'a>() -> [(&'a str, Tags); 9] {
     [
         ("kingbase-mysql", Tags::KINGBASE_MYSQL),
+        ("kingbase-oracle", Tags::KINGBASE_ORACLE),
         ("mssql", Tags::MSSQL),
         (
             "mysql",

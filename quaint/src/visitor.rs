@@ -8,6 +8,8 @@
 //! For prelude, all important imports are in `quaint::visitor::*`;
 #[cfg(feature = "kingbase-mysql")]
 mod kingbase_mysql;
+#[cfg(feature = "kingbase-oracle")]
+mod kingbase_oracle;
 #[cfg(feature = "mssql")]
 mod mssql;
 #[cfg(feature = "mysql")]
@@ -22,6 +24,8 @@ mod query_writer;
 
 #[cfg(feature = "kingbase-mysql")]
 pub use self::kingbase_mysql::KingbaseMysql;
+#[cfg(feature = "kingbase-oracle")]
+pub use self::kingbase_oracle::KingbaseOracle;
 #[cfg(feature = "mssql")]
 pub use self::mssql::Mssql;
 #[cfg(feature = "mysql")]

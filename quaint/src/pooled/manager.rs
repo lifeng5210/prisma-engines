@@ -6,6 +6,8 @@ use tracing_futures::WithSubscriber;
 
 #[cfg(feature = "kingbase-mysql-native")]
 use crate::connector::KingbaseMysqlUrl;
+#[cfg(feature = "kingbase-oracle-native")]
+use crate::connector::KingbaseOracleUrl;
 #[cfg(feature = "mssql-native")]
 use crate::connector::MssqlUrl;
 #[cfg(feature = "mysql-native")]
@@ -101,6 +103,9 @@ pub enum QuaintManager {
     #[cfg(feature = "kingbase-mysql-native")]
     KingbaseMysql { url: KingbaseMysqlUrl },
 
+    #[cfg(feature = "kingbase-oracle-native")]
+    KingbaseOracle { url: KingbaseOracleUrl },
+
     #[cfg(feature = "postgresql")]
     Postgres {
         url: PostgresNativeUrl,
@@ -141,6 +146,12 @@ impl Manager for QuaintManager {
             QuaintManager::KingbaseMysql { url } => {
                 use crate::connector::KingbaseMysql;
                 Ok(Box::new(KingbaseMysql::new(url.clone()).await?) as Self::Connection)
+            }
+
+            #[cfg(feature = "kingbase-oracle-native")]
+            QuaintManager::KingbaseOracle { url } => {
+                use crate::connector::KingbaseOracle;
+                Ok(Box::new(KingbaseOracle::new(url.clone()).await?) as Self::Connection)
             }
 
             #[cfg(feature = "postgresql-native")]

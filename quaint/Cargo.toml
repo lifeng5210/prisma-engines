@@ -31,6 +31,7 @@ expose-drivers = []
 all-native = [
   "postgresql-native",
   "kingbase-mysql-native",
+  "kingbase-oracle-native",
   "mysql-native",
   "mssql-native",
   "sqlite-native",
@@ -60,6 +61,19 @@ postgresql = []
 kingbase-mysql = ["mysql"]
 kingbase-mysql-native = [
   "kingbase-mysql",
+  "dep:native-tls",
+  "dep:bytes",
+  "dep:kingbase-tokio-postgres",
+  "dep:kingbase-postgres-native-tls",
+  "dep:kingbase-postgres-types",
+  "dep:kingbase-bigdecimal",
+  "dep:tokio",
+  "dep:bit-vec",
+]
+
+kingbase-oracle = []
+kingbase-oracle-native = [
+  "kingbase-oracle",
   "dep:native-tls",
   "dep:bytes",
   "dep:kingbase-tokio-postgres",

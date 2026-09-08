@@ -26,7 +26,8 @@ where
     feature = "mssql",
     feature = "postgresql",
     feature = "mysql",
-    feature = "kingbase-mysql-native"
+    feature = "kingbase-mysql-native",
+    feature = "kingbase-oracle-native"
 ))]
 async fn timeout<T, F, E, EF>(duration: Option<Duration>, f: F, e_f: EF) -> crate::Result<T>
 where

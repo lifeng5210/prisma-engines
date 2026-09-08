@@ -320,6 +320,7 @@ pub enum Flavour {
     Cockroach,
     Mongo,
     KingbaseMysql,
+    KingbaseOracle,
     Sqlserver,
     Mysql,
     Postgres,

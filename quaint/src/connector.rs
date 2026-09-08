@@ -20,6 +20,7 @@ mod result_set;
     feature = "mssql-native",
     feature = "postgresql-native",
     feature = "kingbase-mysql-native",
+    feature = "kingbase-oracle-native",
     feature = "mysql-native"
 ))]
 mod timeout;
@@ -61,6 +62,11 @@ pub use mysql::*;
 pub(crate) mod kingbase_mysql;
 #[cfg(feature = "kingbase-mysql-native")]
 pub use kingbase_mysql::*;
+
+#[cfg(feature = "kingbase-oracle-native")]
+pub(crate) mod kingbase_oracle;
+#[cfg(feature = "kingbase-oracle-native")]
+pub use kingbase_oracle::*;
 
 #[cfg(feature = "sqlite")]
 pub(crate) mod sqlite;

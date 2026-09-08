@@ -5,6 +5,7 @@
     feature = "sqlite-native",
     feature = "mysql-native",
     feature = "kingbase-mysql-native",
+    feature = "kingbase-oracle-native",
     feature = "postgresql-native",
     feature = "mssql-native"
 ))]
@@ -14,6 +15,7 @@ use std::{borrow::Cow, fmt};
     feature = "sqlite-native",
     feature = "mysql-native",
     feature = "kingbase-mysql-native",
+    feature = "kingbase-oracle-native",
     feature = "postgresql-native",
     feature = "mssql-native"
 ))]
@@ -21,6 +23,8 @@ use url::Url;
 
 #[cfg(feature = "kingbase-mysql-native")]
 use crate::connector::KingbaseMysqlUrl;
+#[cfg(feature = "kingbase-oracle-native")]
+use crate::connector::KingbaseOracleUrl;
 #[cfg(feature = "mssql-native")]
 use crate::connector::MssqlUrl;
 #[cfg(feature = "mysql-native")]
@@ -36,8 +40,8 @@ use super::ExternalConnectionInfo;
 
 /// KingbaseES uses the PostgreSQL wire protocol, whose prepared-statement
 /// parameter count is represented by a signed 16-bit integer.
-#[cfg(feature = "kingbase-mysql")]
-const KINGBASE_MYSQL_MAX_BIND_VALUES: usize = i16::MAX as usize;
+#[cfg(any(feature = "kingbase-mysql", feature = "kingbase-oracle"))]
+const KINGBASE_MAX_BIND_VALUES: usize = i16::MAX as usize;
 
 /// General information about a SQL connection.
 #[derive(Debug, Clone)]
@@ -47,6 +51,7 @@ pub enum ConnectionInfo {
         feature = "sqlite-native",
         feature = "mysql-native",
         feature = "kingbase-mysql-native",
+        feature = "kingbase-oracle-native",
         feature = "postgresql-native",
         feature = "mssql-native"
     ))]
@@ -63,6 +68,7 @@ impl ConnectionInfo {
         feature = "sqlite-native",
         feature = "mysql-native",
         feature = "kingbase-mysql-native",
+        feature = "kingbase-oracle-native",
         feature = "postgresql-native",
         feature = "mssql-native"
     ))]
@@ -107,6 +113,13 @@ impl ConnectionInfo {
             )));
         }
 
+        #[cfg(feature = "kingbase-oracle-native")]
+        if url.scheme() == "kingbase-oracle" {
+            return Ok(ConnectionInfo::Native(NativeConnectionInfo::KingbaseOracle(
+                KingbaseOracleUrl::new(url)?,
+            )));
+        }
+
         match sql_family {
             #[cfg(feature = "mysql-native")]
             SqlFamily::Mysql => Ok(ConnectionInfo::Native(NativeConnectionInfo::Mysql(MysqlUrl::new(url)?))),
@@ -135,6 +148,7 @@ impl ConnectionInfo {
                 feature = "sqlite-native",
                 feature = "mysql-native",
                 feature = "kingbase-mysql-native",
+                feature = "kingbase-oracle-native",
                 feature = "postgresql-native",
                 feature = "mssql-native"
             ))]
@@ -145,6 +159,8 @@ impl ConnectionInfo {
                 NativeConnectionInfo::Mysql(url) => url.dbname().map(Cow::Borrowed),
                 #[cfg(feature = "kingbase-mysql-native")]
                 NativeConnectionInfo::KingbaseMysql(url) => url.dbname().map(Cow::Borrowed),
+                #[cfg(feature = "kingbase-oracle-native")]
+                NativeConnectionInfo::KingbaseOracle(url) => url.dbname().map(Cow::Borrowed),
                 #[cfg(feature = "mssql-native")]
                 NativeConnectionInfo::Mssql(url) => Some(Cow::Borrowed(url.dbname())),
                 #[cfg(feature = "sqlite-native")]
@@ -165,6 +181,7 @@ impl ConnectionInfo {
                 feature = "sqlite-native",
                 feature = "mysql-native",
                 feature = "kingbase-mysql-native",
+                feature = "kingbase-oracle-native",
                 feature = "postgresql-native",
                 feature = "mssql-native"
             ))]
@@ -176,6 +193,10 @@ impl ConnectionInfo {
                 #[cfg(feature = "kingbase-mysql-native")]
                 NativeConnectionInfo::KingbaseMysql(url) => {
                     Some(url.schema().unwrap_or(crate::connector::DEFAULT_KINGBASE_MYSQL_SCHEMA))
+                }
+                #[cfg(feature = "kingbase-oracle-native")]
+                NativeConnectionInfo::KingbaseOracle(url) => {
+                    Some(url.schema().unwrap_or(crate::connector::DEFAULT_KINGBASE_ORACLE_SCHEMA))
                 }
                 #[cfg(feature = "mssql-native")]
                 NativeConnectionInfo::Mssql(url) => Some(url.schema()),
@@ -195,6 +216,7 @@ impl ConnectionInfo {
                 feature = "sqlite-native",
                 feature = "mysql-native",
                 feature = "kingbase-mysql-native",
+                feature = "kingbase-oracle-native",
                 feature = "postgresql-native",
                 feature = "mssql-native"
             ))]
@@ -205,6 +227,8 @@ impl ConnectionInfo {
                 NativeConnectionInfo::Mysql(url) => url.host(),
                 #[cfg(feature = "kingbase-mysql-native")]
                 NativeConnectionInfo::KingbaseMysql(url) => url.host(),
+                #[cfg(feature = "kingbase-oracle-native")]
+                NativeConnectionInfo::KingbaseOracle(url) => url.host(),
                 #[cfg(feature = "mssql-native")]
                 NativeConnectionInfo::Mssql(url) => url.host(),
                 #[cfg(feature = "sqlite-native")]
@@ -222,6 +246,7 @@ impl ConnectionInfo {
                 feature = "sqlite-native",
                 feature = "mysql-native",
                 feature = "kingbase-mysql-native",
+                feature = "kingbase-oracle-native",
                 feature = "postgresql-native",
                 feature = "mssql-native"
             ))]
@@ -232,6 +257,8 @@ impl ConnectionInfo {
                 NativeConnectionInfo::Mysql(url) => Some(url.username()),
                 #[cfg(feature = "kingbase-mysql-native")]
                 NativeConnectionInfo::KingbaseMysql(url) => Some(Cow::Borrowed(url.username())),
+                #[cfg(feature = "kingbase-oracle-native")]
+                NativeConnectionInfo::KingbaseOracle(url) => Some(Cow::Borrowed(url.username())),
                 #[cfg(feature = "mssql-native")]
                 NativeConnectionInfo::Mssql(url) => url.username().map(Cow::from),
                 #[cfg(feature = "sqlite-native")]
@@ -248,6 +275,7 @@ impl ConnectionInfo {
                 feature = "sqlite-native",
                 feature = "mysql-native",
                 feature = "kingbase-mysql-native",
+                feature = "kingbase-oracle-native",
                 feature = "postgresql-native",
                 feature = "mssql-native"
             ))]
@@ -258,6 +286,8 @@ impl ConnectionInfo {
                 NativeConnectionInfo::Mysql(_) => None,
                 #[cfg(feature = "kingbase-mysql-native")]
                 NativeConnectionInfo::KingbaseMysql(_) => None,
+                #[cfg(feature = "kingbase-oracle-native")]
+                NativeConnectionInfo::KingbaseOracle(_) => None,
                 #[cfg(feature = "mssql-native")]
                 NativeConnectionInfo::Mssql(_) => None,
                 #[cfg(feature = "sqlite-native")]
@@ -279,27 +309,39 @@ impl ConnectionInfo {
                 feature = "sqlite-native",
                 feature = "mysql-native",
                 feature = "kingbase-mysql-native",
+                feature = "kingbase-oracle-native",
                 feature = "postgresql-native",
                 feature = "mssql-native"
             ))]
             #[cfg(feature = "kingbase-mysql-native")]
             ConnectionInfo::Native(NativeConnectionInfo::KingbaseMysql(_)) => {
-                self.sql_family().max_bind_values().min(KINGBASE_MYSQL_MAX_BIND_VALUES)
+                self.sql_family().max_bind_values().min(KINGBASE_MAX_BIND_VALUES)
+            }
+            #[cfg(feature = "kingbase-oracle-native")]
+            ConnectionInfo::Native(NativeConnectionInfo::KingbaseOracle(_)) => {
+                self.sql_family().max_bind_values().min(KINGBASE_MAX_BIND_VALUES)
             }
             #[cfg(any(
                 feature = "sqlite-native",
                 feature = "mysql-native",
                 feature = "kingbase-mysql-native",
+                feature = "kingbase-oracle-native",
                 feature = "postgresql-native",
                 feature = "mssql-native"
             ))]
+            #[allow(unreachable_patterns)]
             ConnectionInfo::Native(_) => self.sql_family().max_bind_values(),
             // Wasm connectors can override the default max bind values.
             #[cfg(feature = "kingbase-mysql")]
             ConnectionInfo::External(info) if info.is_kingbase_mysql() => info
                 .max_bind_values
                 .unwrap_or(self.sql_family().max_bind_values())
-                .min(KINGBASE_MYSQL_MAX_BIND_VALUES),
+                .min(KINGBASE_MAX_BIND_VALUES),
+            #[cfg(feature = "kingbase-oracle")]
+            ConnectionInfo::External(info) if info.sql_family.is_kingbase_oracle() => info
+                .max_bind_values
+                .unwrap_or(self.sql_family().max_bind_values())
+                .min(KINGBASE_MAX_BIND_VALUES),
             ConnectionInfo::External(info) => info.max_bind_values.unwrap_or(self.sql_family().max_bind_values()),
         }
     }
@@ -311,6 +353,7 @@ impl ConnectionInfo {
                 feature = "sqlite-native",
                 feature = "mysql-native",
                 feature = "kingbase-mysql-native",
+                feature = "kingbase-oracle-native",
                 feature = "postgresql-native",
                 feature = "mssql-native"
             ))]
@@ -321,6 +364,8 @@ impl ConnectionInfo {
                 NativeConnectionInfo::Mysql(_) => SqlFamily::Mysql,
                 #[cfg(feature = "kingbase-mysql-native")]
                 NativeConnectionInfo::KingbaseMysql(_) => SqlFamily::Mysql,
+                #[cfg(feature = "kingbase-oracle-native")]
+                NativeConnectionInfo::KingbaseOracle(_) => SqlFamily::KingbaseOracle,
                 #[cfg(feature = "mssql-native")]
                 NativeConnectionInfo::Mssql(_) => SqlFamily::Mssql,
                 #[cfg(feature = "sqlite-native")]
@@ -339,10 +384,31 @@ impl ConnectionInfo {
             #[cfg(any(
                 feature = "sqlite-native",
                 feature = "mysql-native",
+                feature = "kingbase-oracle-native",
                 feature = "postgresql-native",
                 feature = "mssql-native"
             ))]
             ConnectionInfo::Native(_) => false,
+        }
+    }
+
+    /// Whether this connection uses KingbaseES in Oracle-compatible mode.
+    pub fn is_kingbase_oracle(&self) -> bool {
+        match self {
+            #[cfg(feature = "kingbase-oracle-native")]
+            ConnectionInfo::Native(NativeConnectionInfo::KingbaseOracle(_)) => true,
+            #[cfg(feature = "kingbase-oracle")]
+            ConnectionInfo::External(info) => info.sql_family.is_kingbase_oracle(),
+            #[cfg(any(
+                feature = "sqlite-native",
+                feature = "mysql-native",
+                feature = "kingbase-mysql-native",
+                feature = "postgresql-native",
+                feature = "mssql-native"
+            ))]
+            ConnectionInfo::Native(_) => false,
+            #[cfg(not(feature = "kingbase-oracle"))]
+            ConnectionInfo::External(_) => false,
         }
     }
 
@@ -353,6 +419,7 @@ impl ConnectionInfo {
                 feature = "sqlite-native",
                 feature = "mysql-native",
                 feature = "kingbase-mysql-native",
+                feature = "kingbase-oracle-native",
                 feature = "postgresql-native",
                 feature = "mssql-native"
             ))]
@@ -363,6 +430,8 @@ impl ConnectionInfo {
                 NativeConnectionInfo::Mysql(url) => Some(url.port()),
                 #[cfg(feature = "kingbase-mysql-native")]
                 NativeConnectionInfo::KingbaseMysql(url) => Some(url.port()),
+                #[cfg(feature = "kingbase-oracle-native")]
+                NativeConnectionInfo::KingbaseOracle(url) => Some(url.port()),
                 #[cfg(feature = "mssql-native")]
                 NativeConnectionInfo::Mssql(url) => Some(url.port()),
                 #[cfg(feature = "sqlite-native")]
@@ -379,6 +448,8 @@ impl ConnectionInfo {
             ConnectionInfo::Native(NativeConnectionInfo::Postgres(PostgresUrl::Native(url))) => url.pg_bouncer(),
             #[cfg(all(not(target_arch = "wasm32"), feature = "kingbase-mysql-native"))]
             ConnectionInfo::Native(NativeConnectionInfo::KingbaseMysql(url)) => url.pg_bouncer(),
+            #[cfg(all(not(target_arch = "wasm32"), feature = "kingbase-oracle-native"))]
+            ConnectionInfo::Native(NativeConnectionInfo::KingbaseOracle(url)) => url.pg_bouncer(),
             _ => false,
         }
     }
@@ -391,6 +462,7 @@ impl ConnectionInfo {
                 feature = "sqlite-native",
                 feature = "mysql-native",
                 feature = "kingbase-mysql-native",
+                feature = "kingbase-oracle-native",
                 feature = "postgresql-native",
                 feature = "mssql-native"
             ))]
@@ -401,6 +473,8 @@ impl ConnectionInfo {
                 NativeConnectionInfo::Mysql(url) => format!("{}:{}", url.host(), url.port()),
                 #[cfg(feature = "kingbase-mysql-native")]
                 NativeConnectionInfo::KingbaseMysql(url) => format!("{}:{}", url.host(), url.port()),
+                #[cfg(feature = "kingbase-oracle-native")]
+                NativeConnectionInfo::KingbaseOracle(url) => format!("{}:{}", url.host(), url.port()),
                 #[cfg(feature = "mssql-native")]
                 NativeConnectionInfo::Mssql(url) => format!("{}:{}", url.host(), url.port()),
                 #[cfg(feature = "sqlite-native")]
@@ -419,6 +493,7 @@ impl ConnectionInfo {
                 feature = "sqlite-native",
                 feature = "mysql-native",
                 feature = "kingbase-mysql-native",
+                feature = "kingbase-oracle-native",
                 feature = "postgresql-native",
                 feature = "mssql-native"
             ))]
@@ -441,6 +516,7 @@ impl ConnectionInfo {
                 feature = "sqlite-native",
                 feature = "mysql-native",
                 feature = "kingbase-mysql-native",
+                feature = "kingbase-oracle-native",
                 feature = "postgresql-native",
                 feature = "mssql-native"
             ))]
@@ -462,6 +538,9 @@ pub enum NativeConnectionInfo {
     /// A KingbaseES connection URL in MySQL-compatible mode.
     #[cfg(feature = "kingbase-mysql-native")]
     KingbaseMysql(KingbaseMysqlUrl),
+    /// A KingbaseES connection URL in Oracle-compatible mode.
+    #[cfg(feature = "kingbase-oracle-native")]
+    KingbaseOracle(KingbaseOracleUrl),
     /// A SQL Server connection URL.
     #[cfg(feature = "mssql-native")]
     Mssql(MssqlUrl),
@@ -494,6 +573,8 @@ pub enum SqlFamily {
     Postgres,
     #[cfg(feature = "mysql")]
     Mysql,
+    #[cfg(feature = "kingbase-oracle")]
+    KingbaseOracle,
     #[cfg(feature = "sqlite")]
     Sqlite,
     #[cfg(feature = "mssql")]
@@ -508,6 +589,8 @@ impl SqlFamily {
             SqlFamily::Postgres => "postgresql",
             #[cfg(feature = "mysql")]
             SqlFamily::Mysql => "mysql",
+            #[cfg(feature = "kingbase-oracle")]
+            SqlFamily::KingbaseOracle => "kingbase-oracle",
             #[cfg(feature = "sqlite")]
             SqlFamily::Sqlite => "sqlite",
             #[cfg(feature = "mssql")]
@@ -526,6 +609,8 @@ impl SqlFamily {
             "mysql" => Some(SqlFamily::Mysql),
             #[cfg(feature = "kingbase-mysql-native")]
             "kingbase" | "kingbase-mysql" => Some(SqlFamily::Mysql),
+            #[cfg(feature = "kingbase-oracle")]
+            "kingbase-oracle" => Some(SqlFamily::KingbaseOracle),
             _ => None,
         }
     }
@@ -537,6 +622,8 @@ impl SqlFamily {
             SqlFamily::Postgres => None,
             #[cfg(feature = "mysql")]
             SqlFamily::Mysql => None,
+            #[cfg(feature = "kingbase-oracle")]
+            SqlFamily::KingbaseOracle => None,
             #[cfg(feature = "sqlite")]
             SqlFamily::Sqlite => Some(999),
             #[cfg(feature = "mssql")]
@@ -550,6 +637,7 @@ impl SqlFamily {
         feature = "sqlite-native",
         feature = "mysql-native",
         feature = "kingbase-mysql-native",
+        feature = "kingbase-oracle-native",
         feature = "postgresql-native",
         feature = "mssql-native"
     ))]
@@ -571,6 +659,7 @@ impl SqlFamily {
         feature = "sqlite-native",
         feature = "mysql-native",
         feature = "kingbase-mysql-native",
+        feature = "kingbase-oracle-native",
         feature = "postgresql-native",
         feature = "mssql-native"
     )))]
@@ -585,6 +674,8 @@ impl SqlFamily {
             SqlFamily::Postgres => 32766,
             #[cfg(feature = "mysql")]
             SqlFamily::Mysql => 65535,
+            #[cfg(feature = "kingbase-oracle")]
+            SqlFamily::KingbaseOracle => KINGBASE_MAX_BIND_VALUES,
             #[cfg(feature = "sqlite")]
             SqlFamily::Sqlite => 999,
             #[cfg(feature = "mssql")]
@@ -621,6 +712,18 @@ impl SqlFamily {
         false
     }
 
+    /// True if the family is KingbaseES in Oracle-compatible mode.
+    #[cfg(feature = "kingbase-oracle")]
+    pub fn is_kingbase_oracle(&self) -> bool {
+        matches!(self, SqlFamily::KingbaseOracle)
+    }
+
+    /// True if Kingbase Oracle support is not compiled in.
+    #[cfg(not(feature = "kingbase-oracle"))]
+    pub fn is_kingbase_oracle(&self) -> bool {
+        false
+    }
+
     /// True, if family is SQLite.
     #[cfg(feature = "sqlite")]
     pub fn is_sqlite(&self) -> bool {
@@ -654,7 +757,12 @@ impl fmt::Display for SqlFamily {
 
 #[cfg(test)]
 mod tests {
-    #[cfg(any(feature = "sqlite-native", feature = "mysql-native", feature = "kingbase-mysql"))]
+    #[cfg(any(
+        feature = "sqlite-native",
+        feature = "mysql-native",
+        feature = "kingbase-mysql",
+        feature = "kingbase-oracle"
+    ))]
     use super::*;
 
     #[test]
@@ -719,6 +827,19 @@ mod tests {
     fn kingbase_mysql_native_connection_info_limits_bind_values() {
         let connection_info = ConnectionInfo::from_url("kingbase-mysql://localhost/app").unwrap();
 
+        assert_eq!(connection_info.max_bind_values(), 32_767);
+    }
+
+    #[test]
+    #[cfg(feature = "kingbase-oracle-native")]
+    fn kingbase_oracle_connection_info_keeps_an_independent_family() {
+        let connection_info = ConnectionInfo::from_url("kingbase-oracle://user@localhost/app?schema=tenant").unwrap();
+
+        assert_eq!(connection_info.sql_family(), SqlFamily::KingbaseOracle);
+        assert!(connection_info.is_kingbase_oracle());
+        assert!(!connection_info.is_kingbase_mysql());
+        assert_eq!(connection_info.dbname().as_deref(), Some("app"));
+        assert_eq!(connection_info.schema_name(), Some("tenant"));
         assert_eq!(connection_info.max_bind_values(), 32_767);
     }
 }

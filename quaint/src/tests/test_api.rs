@@ -2,6 +2,8 @@ use quaint_test_setup::Tags;
 
 #[cfg(feature = "kingbase-mysql-native")]
 pub mod kingbase_mysql;
+#[cfg(feature = "kingbase-oracle-native")]
+pub mod kingbase_oracle;
 #[cfg(feature = "mssql")]
 pub mod mssql;
 #[cfg(feature = "mysql-native")]
@@ -13,6 +15,8 @@ pub mod sqlite;
 
 #[cfg(feature = "kingbase-mysql-native")]
 pub use kingbase_mysql::*;
+#[cfg(feature = "kingbase-oracle-native")]
+pub use kingbase_oracle::*;
 #[cfg(feature = "mssql")]
 pub use mssql::*;
 #[cfg(feature = "mysql-native")]

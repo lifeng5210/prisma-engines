@@ -122,7 +122,8 @@ pub trait TransactionCapable: Queryable {
     feature = "mssql-native",
     feature = "postgresql-native",
     feature = "mysql-native",
-    feature = "kingbase-mysql-native"
+    feature = "kingbase-mysql-native",
+    feature = "kingbase-oracle-native"
 ))]
 macro_rules! impl_default_TransactionCapable {
     ($t:ty) => {
@@ -147,6 +148,7 @@ macro_rules! impl_default_TransactionCapable {
     feature = "mssql-native",
     feature = "postgresql-native",
     feature = "mysql-native",
-    feature = "kingbase-mysql-native"
+    feature = "kingbase-mysql-native",
+    feature = "kingbase-oracle-native"
 ))]
 pub(crate) use impl_default_TransactionCapable;
