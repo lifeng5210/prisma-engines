@@ -528,7 +528,7 @@ impl<'a> Visitor<'a> for KingbaseOracle<'a> {
             ValueType::Char(value) => value.map(|value| self.write_quoted_string(&value.to_string())),
             ValueType::Bytes(value) => value
                 .as_deref()
-                .map(|value| self.write(format!("HEXTORAW('{}')", hex::encode(value)))),
+                .map(|value| self.write(format!("decode('{}', 'hex')", hex::encode(value)))),
             ValueType::Json(value) => value.as_ref().map(|value| {
                 let json = serde_json::to_string(value)?;
                 self.write_quoted_string(&json)
@@ -801,6 +801,15 @@ mod tests {
         let (sql, params) = KingbaseOracle::build(query).unwrap();
 
         assert_eq!("SELECT 'NaN', 'Infinity', '-Infinity'", sql);
+        assert!(params.is_empty());
+    }
+
+    #[test]
+    fn renders_raw_bytes_with_the_kingbase_hex_decoder() {
+        let (sql, params) =
+            KingbaseOracle::build(Select::default().value(Value::bytes(vec![0xab, 0xcd]).raw())).unwrap();
+
+        assert_eq!("SELECT decode('abcd', 'hex')", sql);
         assert!(params.is_empty());
     }
 

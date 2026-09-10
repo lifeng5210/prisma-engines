@@ -57,7 +57,7 @@ const SCALAR_TYPE_DEFAULTS: &[(ScalarType, KingbaseOracleType)] = &[
     (ScalarType::BigInt, Number(PrecisionAndScale(19, 0))),
     (ScalarType::Float, BinaryDouble),
     (ScalarType::Decimal, Number(PrecisionAndScale(65, 30))),
-    (ScalarType::Boolean, Number(PrecisionAndScale(1, 0))),
+    (ScalarType::Boolean, Boolean),
     (ScalarType::String, VarChar2(Some(4000))),
     (ScalarType::DateTime, Timestamp(Some(3))),
     (ScalarType::Bytes, Blob),
@@ -102,7 +102,6 @@ impl Connector for KingbaseOracleDatamodelConnector {
     ) -> Option<ScalarFieldType> {
         let native_type: &KingbaseOracleType = native_type.downcast_ref();
         let scalar_type = match native_type {
-            Number(Precision(1) | PrecisionAndScale(1, 0)) => ScalarType::Boolean,
             Number(Precision(precision) | PrecisionAndScale(precision, 0)) if *precision <= 10 => ScalarType::Int,
             Number(Precision(precision) | PrecisionAndScale(precision, 0)) if *precision <= 19 => ScalarType::BigInt,
             Number(_) => ScalarType::Decimal,
@@ -154,7 +153,10 @@ impl Connector for KingbaseOracleDatamodelConnector {
             Float(Some(precision)) if *precision == 0 || *precision > 53 => {
                 errors.push_error(error.new_argument_m_out_of_range_error("Precision must be between 1 and 53.", span))
             }
-            Char(Some(length)) | VarChar2(Some(length)) | NChar(Some(length)) | NVarChar2(Some(length))
+            VarChar2(Some(length)) if *length == 0 || *length > 4_000 => {
+                errors.push_error(error.new_argument_m_out_of_range_error("Length must be between 1 and 4,000.", span))
+            }
+            Char(Some(length)) | NChar(Some(length)) | NVarChar2(Some(length))
                 if *length == 0 || *length > 10_485_760 =>
             {
                 errors.push_error(

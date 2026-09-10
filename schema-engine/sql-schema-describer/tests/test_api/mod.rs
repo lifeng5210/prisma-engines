@@ -21,7 +21,10 @@ pub struct TestApi {
 impl TestApi {
     pub(crate) fn new(args: TestApiArgs) -> Self {
         let tags = args.tags();
-        let (db_name, conn) = if tags.contains(Tags::KingbaseMysql) {
+        let (db_name, conn) = if tags.contains(Tags::KingbaseOracle) {
+            let (db_name, cs) = tok(args.create_kingbase_oracle_database());
+            (db_name, tok(Quaint::new(&cs)).unwrap())
+        } else if tags.contains(Tags::KingbaseMysql) {
             let (db_name, cs) = tok(args.create_kingbase_mysql_database());
             (db_name, tok(Quaint::new(&cs)).unwrap())
         } else if tags.contains(Tags::Mysql) {
@@ -135,6 +138,12 @@ impl TestApi {
             #[cfg(feature = "mssql")]
             SqlFamily::Mssql => {
                 sql_schema_describer::mssql::SqlSchemaDescriber::new(&self.database)
+                    .describe(schemas)
+                    .await
+            }
+            #[cfg(feature = "kingbase-oracle")]
+            SqlFamily::KingbaseOracle => {
+                sql_schema_describer::kingbase_oracle::SqlSchemaDescriber::new(&self.database)
                     .describe(schemas)
                     .await
             }

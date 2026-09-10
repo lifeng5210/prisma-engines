@@ -65,6 +65,12 @@ impl SqlSchemaDialect {
         Self::new(Box::new(flavour::KingbaseMysqlDialect::default()))
     }
 
+    /// Creates a Kingbase Oracle-compatible schema dialect.
+    #[cfg(feature = "kingbase-oracle")]
+    pub fn kingbase_oracle() -> Self {
+        Self::new(Box::new(flavour::KingbaseOracleDialect::default()))
+    }
+
     /// Creates a SQLite schema dialect with the default settings.
     #[cfg(feature = "sqlite")]
     pub fn sqlite() -> Self {
@@ -189,6 +195,7 @@ impl SchemaDialect for SqlSchemaDialect {
                     feature = "mssql-native",
                     feature = "mysql-native",
                     feature = "kingbase-mysql-native",
+                    feature = "kingbase-oracle-native",
                     feature = "postgresql-native",
                     feature = "sqlite-native"
                 )))]
@@ -200,6 +207,7 @@ impl SchemaDialect for SqlSchemaDialect {
                     feature = "mssql-native",
                     feature = "mysql-native",
                     feature = "kingbase-mysql-native",
+                    feature = "kingbase-oracle-native",
                     feature = "postgresql-native",
                     feature = "sqlite-native"
                 ))]
@@ -343,6 +351,15 @@ impl SqlSchemaConnector {
     pub fn new_kingbase_mysql(params: ConnectorParams) -> ConnectorResult<Self> {
         Ok(SqlSchemaConnector {
             inner: Box::new(flavour::KingbaseMysqlConnector::new_with_params(params)?),
+            host: Arc::new(EmptyHost),
+        })
+    }
+
+    /// Initialize a Kingbase Oracle-compatible migration connector.
+    #[cfg(feature = "kingbase-oracle-native")]
+    pub fn new_kingbase_oracle(params: ConnectorParams) -> ConnectorResult<Self> {
+        Ok(SqlSchemaConnector {
+            inner: Box::new(flavour::KingbaseOracleConnector::new_with_params(params)?),
             host: Arc::new(EmptyHost),
         })
     }

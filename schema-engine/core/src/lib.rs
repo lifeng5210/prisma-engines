@@ -76,6 +76,14 @@ fn connector_for_connection_string(
             };
             Ok(Box::new(SqlSchemaConnector::new_kingbase_mysql(params)?))
         }
+        Some("kingbase-oracle") => {
+            let params = ConnectorParams {
+                connection_string,
+                preview_features,
+                shadow_database_connection_string,
+            };
+            Ok(Box::new(SqlSchemaConnector::new_kingbase_oracle(params)?))
+        }
         Some("sqlserver") => {
             let params = ConnectorParams {
                 connection_string,
@@ -178,9 +186,7 @@ fn connector_for_provider(
             Flavour::Postgres => Ok(Box::new(SqlSchemaConnector::new_postgres(params)?)),
             Flavour::Sqlite => Ok(Box::new(SqlSchemaConnector::new_sqlite(params)?)),
             Flavour::KingbaseMysql => Ok(Box::new(SqlSchemaConnector::new_kingbase_mysql(params)?)),
-            Flavour::KingbaseOracle => Err(CoreError::from_msg(
-                "`kingbase-oracle` schema engine support is not implemented yet.".to_owned(),
-            )),
+            Flavour::KingbaseOracle => Ok(Box::new(SqlSchemaConnector::new_kingbase_oracle(params)?)),
         }
     } else {
         Err(CoreError::from_msg(format!(

@@ -137,7 +137,7 @@ impl SqlRenderer for KingbaseMysqlRenderer {
                 }
                 TableChange::DropAndRecreateColumn { column_id, changes: _ } => {
                     let columns = schemas.walk(*column_id);
-                    lines.push(format!("DROP COLUMN `{}`", columns.previous.name()));
+                    lines.push(format!("DROP COLUMN {}", quote_identifier(columns.previous.name())));
                     lines.push(format!("ADD COLUMN {}", render_column(columns.next)));
                 }
             }
@@ -372,12 +372,14 @@ fn render_column_type(column: TableColumnWalker<'_>) -> Cow<'static, str> {
         KingbaseMySqlType::Year => "YEAR".into(),
         KingbaseMySqlType::Json => "JSON".into(),
         // Kingbase does not accept MySQL's `INT UNSIGNED` modifier. Its MySQL
-        // compatibility layer exposes the two native unsigned integer types
-        // below instead.
+        // compatibility layer exposes `sys.uint4` and `sys.uint8` instead.
+        // `TINYINT`, `SMALLINT`, and `MEDIUMINT` would silently truncate or
+        // reject values in their MySQL unsigned ranges, so all 32-bit-or-less
+        // unsigned aliases use `sys.uint4`.
         KingbaseMySqlType::UnsignedInt => "sys.uint4".into(),
-        KingbaseMySqlType::UnsignedSmallInt => "SMALLINT".into(),
-        KingbaseMySqlType::UnsignedTinyInt => "TINYINT".into(),
-        KingbaseMySqlType::UnsignedMediumInt => "MEDIUMINT".into(),
+        KingbaseMySqlType::UnsignedSmallInt
+        | KingbaseMySqlType::UnsignedTinyInt
+        | KingbaseMySqlType::UnsignedMediumInt => "sys.uint4".into(),
         KingbaseMySqlType::UnsignedBigInt => "sys.uint8".into(),
     }
 }
@@ -561,6 +563,10 @@ fn escape_string_literal(s: &str) -> Cow<'_, str> {
     STRING_LITERAL_CHARACTER_TO_ESCAPE_RE.replace_all(s, "'$0")
 }
 
+fn quote_identifier(identifier: &str) -> String {
+    format!("`{}`", identifier.replace('`', "``"))
+}
+
 fn render_default<'a>(column: TableColumnWalker<'a>, default: &'a DefaultValue) -> Cow<'a, str> {
     match default.kind() {
         DefaultKind::DbGenerated(Some(value)) => value.as_str().into(),
@@ -587,6 +593,7 @@ mod tests {
     #[test]
     fn starts_with_mysql_identifier_quoting() {
         assert_eq!(KingbaseMysqlRenderer.quote("users").to_string(), "`users`");
+        assert_eq!(quote_identifier("old`name"), "`old``name`");
     }
 
     #[test]

@@ -106,7 +106,7 @@ pub enum QuaintManager {
     #[cfg(feature = "kingbase-oracle-native")]
     KingbaseOracle { url: KingbaseOracleUrl },
 
-    #[cfg(feature = "postgresql")]
+    #[cfg(feature = "postgresql-native")]
     Postgres {
         url: PostgresNativeUrl,
         tls_manager: Box<MakeTlsConnectorManager>,
@@ -202,7 +202,7 @@ impl Manager for QuaintManager {
 
     fn validate(&self, conn: &mut Self::Connection) -> bool {
         let single_use_connection = match self {
-            #[cfg(feature = "postgresql")]
+            #[cfg(feature = "postgresql-native")]
             Self::Postgres { url, .. } => url.single_use_connections(),
             _ => false,
         };

@@ -1,6 +1,6 @@
 //! Postgres schema description.
 
-mod default;
+pub(crate) mod default;
 mod extensions;
 
 use either::Either;

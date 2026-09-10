@@ -20,14 +20,6 @@ use tracing::trace;
 /// ```
 static DEFAULT_QUOTES: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"'(.*)'").unwrap());
 
-/// Captures the source columns in the immutable `to_tsvector('simple',
-/// textcat(COALESCE(column, ''), ...))` expression rendered for Kingbase full-text
-/// indexes. PostgreSQL catalog entries use double-quoted identifiers only
-/// when necessary, so accept both quoted and bare forms.
-static FULLTEXT_INDEX_COLUMN: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r#"(?i)COALESCE\(\s*(?:\"((?:[^\"]|\"\")*)\"|([A-Za-z_][A-Za-z0-9_$]*))\s*,"#).unwrap()
-});
-
 fn is_mariadb(version: &str) -> bool {
     version.contains("MariaDB")
 }
@@ -159,7 +151,7 @@ async fn push_indexes(
             .then_with(|| seq_a.cmp(seq_b))
     });
     let mut current_index_id: Option<IndexId> = None;
-    let mut index_should_be_filtered_out = false;
+    let mut skip_current_index = false;
 
     let remove_last_index = |schema: &mut SqlSchema, index_id: IndexId| {
         schema.indexes.pop().unwrap();
@@ -184,6 +176,11 @@ async fn push_indexes(
         });
 
         let seq_in_index = row.get_expect_i64("seq_in_index"); // starts at 1
+
+        if seq_in_index == 1 {
+            current_index_id = None;
+            skip_current_index = false;
+        }
 
         if seq_in_index == 1
             && row.get_string("index_type").as_deref() == Some("gin")
@@ -212,13 +209,19 @@ async fn push_indexes(
         let column_name = if let Some(name) = row.get_string("column_name") {
             name
         } else {
-            // filter out indexes on expressions
-            // if the sequence is 1 and we have an expression,
-            // we never create an index to the collection and can
-            // just continue
-            index_should_be_filtered_out = seq_in_index > 1;
+            // Prisma does not model arbitrary expression indexes. Skip the
+            // whole index, including any later ordinary columns, rather than
+            // attaching those columns to the previous index.
+            if let Some(index_id) = current_index_id.take() {
+                remove_last_index(sql_schema, index_id);
+            }
+            skip_current_index = true;
             continue;
         };
+
+        if skip_current_index {
+            continue;
+        }
 
         let column_id = if let Some(col) = sql_schema.walk(table_id).column(&column_name) {
             col.id
@@ -232,14 +235,6 @@ async fn push_indexes(
 
         if seq_in_index == 1 {
             // new index!
-
-            // first delete the old one if necessary
-            if index_should_be_filtered_out {
-                remove_last_index(sql_schema, current_index_id.unwrap());
-                index_should_be_filtered_out = false;
-            }
-
-            // then install the new one
             let index_id = if is_pk {
                 sql_schema.push_primary_key(table_id, String::new())
             } else if is_unique {
@@ -261,31 +256,198 @@ async fn push_indexes(
         });
     }
 
-    if index_should_be_filtered_out {
-        remove_last_index(sql_schema, current_index_id.unwrap())
-    }
-
     Ok(())
 }
 
 fn fulltext_index_columns(index_expression: Option<&str>) -> Option<Vec<String>> {
-    let index_expression = index_expression?;
+    let tokens = tokenize_fulltext_expression(index_expression?)?;
+    FulltextExpressionParser::new(&tokens).parse()
+}
 
-    if !index_expression.contains("to_tsvector") || !index_expression.contains("'simple'") {
-        return None;
+/// Parses only the `to_tsvector('simple', textcat(COALESCE(...), ...))`
+/// expression rendered by `KingbaseMysqlRenderer`. A GIN index that merely
+/// happens to use `to_tsvector` must remain an expression index during
+/// introspection rather than being reinterpreted as Prisma `@@fulltext`.
+#[derive(Debug, PartialEq, Eq)]
+enum FulltextToken {
+    Identifier(String),
+    StringLiteral(String),
+    LeftParen,
+    RightParen,
+    Comma,
+    Cast,
+}
+
+fn tokenize_fulltext_expression(input: &str) -> Option<Vec<FulltextToken>> {
+    let mut tokens = Vec::new();
+    let mut chars = input.chars().peekable();
+
+    while let Some(character) = chars.next() {
+        match character {
+            character if character.is_ascii_whitespace() => (),
+            '(' => tokens.push(FulltextToken::LeftParen),
+            ')' => tokens.push(FulltextToken::RightParen),
+            ',' => tokens.push(FulltextToken::Comma),
+            ':' if chars.next_if_eq(&':').is_some() => tokens.push(FulltextToken::Cast),
+            '"' => {
+                let mut identifier = String::new();
+
+                loop {
+                    match chars.next()? {
+                        '"' if chars.next_if_eq(&'"').is_some() => identifier.push('"'),
+                        '"' => break,
+                        character => identifier.push(character),
+                    }
+                }
+
+                tokens.push(FulltextToken::Identifier(identifier));
+            }
+            '\'' => {
+                let mut value = String::new();
+
+                loop {
+                    match chars.next()? {
+                        '\'' if chars.next_if_eq(&'\'').is_some() => value.push('\''),
+                        '\'' => break,
+                        character => value.push(character),
+                    }
+                }
+
+                tokens.push(FulltextToken::StringLiteral(value));
+            }
+            character if character.is_ascii_alphabetic() || character == '_' => {
+                let mut identifier = String::from(character);
+                while matches!(chars.peek(), Some(character) if character.is_ascii_alphanumeric() || *character == '_' || *character == '$')
+                {
+                    identifier.push(chars.next().expect("peeked character must be available"));
+                }
+                tokens.push(FulltextToken::Identifier(identifier));
+            }
+            _ => return None,
+        }
     }
 
-    let columns: Vec<_> = FULLTEXT_INDEX_COLUMN
-        .captures_iter(index_expression)
-        .filter_map(|captures| {
-            captures
-                .get(1)
-                .or_else(|| captures.get(2))
-                .map(|capture| capture.as_str().replace("\"\"", "\""))
-        })
-        .collect();
+    Some(tokens)
+}
 
-    (!columns.is_empty()).then_some(columns)
+struct FulltextExpressionParser<'a> {
+    tokens: &'a [FulltextToken],
+    cursor: usize,
+}
+
+impl<'a> FulltextExpressionParser<'a> {
+    fn new(tokens: &'a [FulltextToken]) -> Self {
+        Self { tokens, cursor: 0 }
+    }
+
+    fn parse(mut self) -> Option<Vec<String>> {
+        self.consume_identifier("to_tsvector")?;
+        self.consume(FulltextToken::LeftParen)?;
+        self.consume_string("simple")?;
+        self.consume_casts()?;
+        self.consume(FulltextToken::Comma)?;
+        let columns = self.parse_document()?;
+        self.consume(FulltextToken::RightParen)?;
+        self.consume_casts()?;
+
+        (self.cursor == self.tokens.len()).then_some(columns)
+    }
+
+    fn parse_document(&mut self) -> Option<Vec<String>> {
+        let parentheses = self.consume_open_parentheses();
+
+        let columns = if self.next_identifier_is("coalesce") {
+            vec![self.parse_coalesce()?]
+        } else {
+            self.consume_identifier("textcat")?;
+            self.consume(FulltextToken::LeftParen)?;
+            let mut columns = vec![self.parse_coalesce()?];
+            self.consume(FulltextToken::Comma)?;
+            self.consume_identifier("textcat")?;
+            self.consume(FulltextToken::LeftParen)?;
+            self.consume_string(" ")?;
+            self.consume_casts()?;
+            self.consume(FulltextToken::Comma)?;
+            columns.extend(self.parse_document()?);
+            self.consume(FulltextToken::RightParen)?;
+            self.consume(FulltextToken::RightParen)?;
+            columns
+        };
+
+        for _ in 0..parentheses {
+            self.consume(FulltextToken::RightParen)?;
+        }
+        self.consume_casts()?;
+
+        Some(columns)
+    }
+
+    fn parse_coalesce(&mut self) -> Option<String> {
+        let parentheses = self.consume_open_parentheses();
+        self.consume_identifier("coalesce")?;
+        self.consume(FulltextToken::LeftParen)?;
+        let column = self.consume_any_identifier()?;
+        self.consume(FulltextToken::Comma)?;
+        self.consume_string("")?;
+        self.consume_casts()?;
+        self.consume(FulltextToken::RightParen)?;
+
+        for _ in 0..parentheses {
+            self.consume(FulltextToken::RightParen)?;
+        }
+        self.consume_casts()?;
+
+        Some(column)
+    }
+
+    fn consume_open_parentheses(&mut self) -> usize {
+        let start = self.cursor;
+        while self.consume(FulltextToken::LeftParen).is_some() {}
+        self.cursor - start
+    }
+
+    fn consume_casts(&mut self) -> Option<()> {
+        while self.consume(FulltextToken::Cast).is_some() {
+            let cast_type = self.consume_any_identifier()?;
+            if cast_type.eq_ignore_ascii_case("character") {
+                self.consume_identifier("varying")?;
+            }
+        }
+
+        Some(())
+    }
+
+    fn consume_any_identifier(&mut self) -> Option<String> {
+        let FulltextToken::Identifier(identifier) = self.tokens.get(self.cursor)? else {
+            return None;
+        };
+        self.cursor += 1;
+        Some(identifier.clone())
+    }
+
+    fn next_identifier_is(&self, expected: &str) -> bool {
+        matches!(self.tokens.get(self.cursor), Some(FulltextToken::Identifier(identifier)) if identifier.eq_ignore_ascii_case(expected))
+    }
+
+    fn consume_identifier(&mut self, expected: &str) -> Option<()> {
+        self.next_identifier_is(expected).then(|| {
+            self.cursor += 1;
+        })
+    }
+
+    fn consume_string(&mut self, expected: &str) -> Option<()> {
+        matches!(self.tokens.get(self.cursor), Some(FulltextToken::StringLiteral(value)) if value == expected).then(
+            || {
+                self.cursor += 1;
+            },
+        )
+    }
+
+    fn consume(&mut self, expected: FulltextToken) -> Option<()> {
+        (self.tokens.get(self.cursor) == Some(&expected)).then(|| {
+            self.cursor += 1;
+        })
+    }
 }
 
 impl Parser for SqlSchemaDescriber<'_> {}
@@ -1168,5 +1330,27 @@ fn push_enum_variants(full_data_type: &str, enum_id: EnumId, sql_schema: &mut Sq
     let vals = &full_data_type[5..len];
     for variant in vals.split(',').map(unquote_string) {
         sql_schema.push_enum_variant(enum_id, variant.replace("''", "'"));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::fulltext_index_columns;
+
+    #[test]
+    fn recognizes_the_renderer_fulltext_expression() {
+        let expression = "to_tsvector('simple'::regconfig, textcat((COALESCE(title, ''::varchar))::text, textcat(' '::text, (COALESCE(content, ''::varchar))::text)))";
+
+        assert_eq!(
+            fulltext_index_columns(Some(expression)),
+            Some(vec!["title".to_owned(), "content".to_owned()])
+        );
+    }
+
+    #[test]
+    fn leaves_other_tsvector_expressions_as_expression_indexes() {
+        let expression = "to_tsvector('simple', COALESCE(title, '') || COALESCE(content, ''))";
+
+        assert_eq!(fulltext_index_columns(Some(expression)), None);
     }
 }

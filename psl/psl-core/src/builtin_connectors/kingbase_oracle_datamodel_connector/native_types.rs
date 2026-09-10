@@ -48,7 +48,7 @@ impl fmt::Display for KingbaseOracleNumberArguments {
 crate::native_type_definition! {
     /// Native types exposed by KingbaseES in Oracle compatibility mode.
     KingbaseOracleType;
-    Number(KingbaseOracleNumberArguments) -> Boolean | Int | BigInt | Float | Decimal,
+    Number(KingbaseOracleNumberArguments) -> Int | BigInt | Float | Decimal,
     Float(Option<u32>) -> Float,
     BinaryFloat -> Float,
     BinaryDouble -> Float,

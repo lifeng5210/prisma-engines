@@ -114,7 +114,7 @@ impl SqlSchemaDifferFlavour for KingbaseMysqlSchemaDifferFlavour {
             (Some(previous), Some(next)) if !explicit_cast_supported(Some(previous), Some(next)) => {
                 return Some(ColumnTypeChange::NotCastable);
             }
-            (Some(previous), Some(next)) if integer_signedness_is_only_difference(previous, next) => return None,
+            (Some(previous), Some(next)) if integer_types_share_kingbase_representation(previous, next) => return None,
             (None, Some(KingbaseMySqlType::TinyInt)) | (Some(KingbaseMySqlType::TinyInt), None)
                 if differ.previous.column_type_family().is_boolean()
                     && differ.next.column_type_family().is_boolean() =>
@@ -158,15 +158,19 @@ impl SqlSchemaDifferFlavour for KingbaseMysqlSchemaDifferFlavour {
     }
 }
 
-fn integer_signedness_is_only_difference(previous: &KingbaseMySqlType, next: &KingbaseMySqlType) -> bool {
+fn integer_types_share_kingbase_representation(previous: &KingbaseMySqlType, next: &KingbaseMySqlType) -> bool {
     matches!(
-        (previous, next),
-        (KingbaseMySqlType::SmallInt, KingbaseMySqlType::UnsignedSmallInt)
-            | (KingbaseMySqlType::UnsignedSmallInt, KingbaseMySqlType::SmallInt)
-            | (KingbaseMySqlType::TinyInt, KingbaseMySqlType::UnsignedTinyInt)
-            | (KingbaseMySqlType::UnsignedTinyInt, KingbaseMySqlType::TinyInt)
-            | (KingbaseMySqlType::MediumInt, KingbaseMySqlType::UnsignedMediumInt)
-            | (KingbaseMySqlType::UnsignedMediumInt, KingbaseMySqlType::MediumInt)
+        previous,
+        KingbaseMySqlType::UnsignedInt
+            | KingbaseMySqlType::UnsignedSmallInt
+            | KingbaseMySqlType::UnsignedTinyInt
+            | KingbaseMySqlType::UnsignedMediumInt
+    ) && matches!(
+        next,
+        KingbaseMySqlType::UnsignedInt
+            | KingbaseMySqlType::UnsignedSmallInt
+            | KingbaseMySqlType::UnsignedTinyInt
+            | KingbaseMySqlType::UnsignedMediumInt
     )
 }
 
@@ -260,10 +264,14 @@ fn datetime_numeric_cast_supported(previous: &KingbaseMySqlType, next: &Kingbase
     };
 
     let capacity = match next {
-        KingbaseMySqlType::TinyInt | KingbaseMySqlType::UnsignedTinyInt => 3,
-        KingbaseMySqlType::SmallInt | KingbaseMySqlType::UnsignedSmallInt => 5,
-        KingbaseMySqlType::MediumInt | KingbaseMySqlType::UnsignedMediumInt => 7,
-        KingbaseMySqlType::Int | KingbaseMySqlType::UnsignedInt => 10,
+        KingbaseMySqlType::TinyInt => 3,
+        KingbaseMySqlType::SmallInt => 5,
+        KingbaseMySqlType::MediumInt => 7,
+        KingbaseMySqlType::Int
+        | KingbaseMySqlType::UnsignedInt
+        | KingbaseMySqlType::UnsignedSmallInt
+        | KingbaseMySqlType::UnsignedTinyInt
+        | KingbaseMySqlType::UnsignedMediumInt => 10,
         KingbaseMySqlType::BigInt | KingbaseMySqlType::UnsignedBigInt => 19,
         KingbaseMySqlType::Decimal(Some((precision, _))) => *precision,
         KingbaseMySqlType::Decimal(None) => 10,

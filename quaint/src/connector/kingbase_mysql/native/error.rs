@@ -69,9 +69,7 @@ impl From<kingbase_tokio_postgres::error::Error> for Error {
                     .source()
                     .map(|source| format!("{reason}: {source}"))
                     .unwrap_or_else(|| reason.to_owned());
-                let mut builder = Error::builder(ErrorKind::Native(NativeErrorKind::TlsError {
-                    message,
-                }));
+                let mut builder = Error::builder(ErrorKind::Native(NativeErrorKind::TlsError { message }));
 
                 if let Some(code) = code {
                     builder.set_original_code(code);

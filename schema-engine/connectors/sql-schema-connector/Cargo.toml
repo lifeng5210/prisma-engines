@@ -20,6 +20,14 @@ kingbase-mysql-native = [
     "quaint/expose-drivers",
     "user-facing-errors/kingbase-mysql-native",
 ]
+kingbase-oracle = ["postgresql", "psl/kingbase-oracle", "quaint/kingbase-oracle", "schema-connector/kingbase-oracle", "sql-schema-describer/kingbase-oracle"]
+kingbase-oracle-native = [
+    "kingbase-oracle",
+    "quaint/kingbase-oracle-native",
+    "quaint/pooled",
+    "quaint/expose-drivers",
+    "user-facing-errors/kingbase-oracle-native",
+]
 mssql = ["psl/mssql", "quaint/mssql", "schema-connector/mssql", "sql-schema-describer/mssql"]
 mssql-native = ["mssql", "quaint/mssql-native", "quaint/pooled"]
 cockroachdb = ["psl/cockroachdb", "quaint/postgresql", "schema-connector/cockroachdb", "sql-schema-describer/cockroachdb"]
@@ -30,6 +38,7 @@ all-native = [
     "sqlite-native",
     "mysql-native",
     "kingbase-mysql-native",
+    "kingbase-oracle-native",
     "mssql-native",
     "cockroachdb-native",
     "schema-connector/all-native",

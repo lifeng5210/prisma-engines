@@ -465,3 +465,23 @@ fn join_table_unique_indexes_must_be_inferred(api: TestApi) {
         })
     });
 }
+
+#[test_connector(tags(KingbaseMysql))]
+fn expression_indexes_do_not_corrupt_following_indexes(api: TestApi) {
+    api.raw_cmd(
+        r#"
+        CREATE TABLE expression_indexes (
+            id INT NOT NULL PRIMARY KEY,
+            name VARCHAR(64) NOT NULL,
+            age INT NOT NULL
+        );
+
+        CREATE INDEX expression_first ON expression_indexes ((lower(name)), age);
+        CREATE INDEX ordinary_index ON expression_indexes (age);
+        "#,
+    );
+
+    api.describe().assert_table("expression_indexes", |table| {
+        table.assert_index_on_columns(&["age"], |index| index.assert_name("ordinary_index"))
+    });
+}

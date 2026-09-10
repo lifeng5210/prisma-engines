@@ -700,10 +700,10 @@ fn datetime_numeric_cast_supported(previous: &str, next: &str) -> bool {
     };
 
     let capacity = match native_type_base(next) {
-        "TinyInt" | "UnsignedTinyInt" => 3,
-        "SmallInt" | "UnsignedSmallInt" => 5,
-        "MediumInt" | "UnsignedMediumInt" => 7,
-        "Int" | "UnsignedInt" => 10,
+        "TinyInt" => 3,
+        "SmallInt" => 5,
+        "MediumInt" => 7,
+        "Int" | "UnsignedInt" | "UnsignedSmallInt" | "UnsignedTinyInt" | "UnsignedMediumInt" => 10,
         "BigInt" | "UnsignedBigInt" => 19,
         "Decimal" => next
             .split_once('(')
@@ -752,20 +752,18 @@ fn explicit_cast_supported_by_names(previous: &str, next: &str) -> bool {
     true
 }
 
-fn is_signedness_only_change(previous: &str, next: &str) -> bool {
+fn shares_uint4_representation(previous: &str, next: &str) -> bool {
     matches!(
-        (native_type_base(previous), native_type_base(next)),
-        ("SmallInt", "UnsignedSmallInt")
-            | ("UnsignedSmallInt", "SmallInt")
-            | ("TinyInt", "UnsignedTinyInt")
-            | ("UnsignedTinyInt", "TinyInt")
-            | ("MediumInt", "UnsignedMediumInt")
-            | ("UnsignedMediumInt", "MediumInt")
+        native_type_base(previous),
+        "UnsignedInt" | "UnsignedSmallInt" | "UnsignedTinyInt" | "UnsignedMediumInt"
+    ) && matches!(
+        native_type_base(next),
+        "UnsignedInt" | "UnsignedSmallInt" | "UnsignedTinyInt" | "UnsignedMediumInt"
     )
 }
 
 fn kingbase_cast_kind(from_type: &str, to_type: &str, cast_kind: CastKind) -> CastKind {
-    if is_signedness_only_change(from_type, to_type) {
+    if shares_uint4_representation(from_type, to_type) {
         return CastKind::Safe;
     }
 
@@ -864,9 +862,7 @@ fn sql_literal(from_type: &str, value: &quaint::ValueType<'_>) -> String {
 
 fn warning_native_type(native_type: &str) -> &str {
     match native_type {
-        "UnsignedMediumInt" => "MediumInt",
-        "UnsignedSmallInt" => "SmallInt",
-        "UnsignedTinyInt" => "TinyInt",
+        "UnsignedMediumInt" | "UnsignedSmallInt" | "UnsignedTinyInt" => "UnsignedInt",
         "Time" => "Time(0)",
         native_type => native_type,
     }
@@ -888,12 +884,12 @@ fn run_casts_with_existing_data(api: &mut TestApi, cases: Cases, cast_kind: Cast
     for (from_type, test_value, to_types) in cases {
         let (no_op, remaining): (Vec<_>, Vec<_>) = to_types.iter().copied().partition(|to_type| {
             matches!(kingbase_cast_kind(from_type, to_type, cast_kind), CastKind::Safe)
-                && is_signedness_only_change(from_type, to_type)
+                && shares_uint4_representation(from_type, to_type)
         });
         let mut groups = Vec::new();
 
-        // Kingbase has no narrower unsigned types for TinyInt, SmallInt, or
-        // MediumInt. Keep those MySQL matrix entries as no-op schema pushes.
+        // Kingbase represents every <= 32-bit unsigned MySQL alias as
+        // `sys.uint4`, so changes between those aliases are no-op pushes.
         if !no_op.is_empty() {
             groups.push((no_op, CastKind::Safe));
         }
@@ -1139,20 +1135,23 @@ fn all_supported_native_types_can_be_created_and_reintrospected(api: TestApi) {
         .send()
         .assert_green()
         .assert_has_executed_steps();
+    api.raw_cmd(
+        "INSERT INTO `NativeTypes` (`id`, `unsignedTinyInt`, `unsignedSmallInt`, `unsignedMediumInt`) VALUES (1, 255, 65535, 16777215)",
+    );
     api.assert_schema().assert_table("NativeTypes", |table| {
         let expected_native_types = [
             ("id", Some("Int")),
             ("intValue", Some("Int")),
             // Kingbase exposes 32- and 64-bit unsigned integers as sys.uint4
-            // and sys.uint8. Its MySQL compatibility layer has no narrower
-            // unsigned equivalents for TinyInt, SmallInt, or MediumInt.
+            // and sys.uint8. Narrow MySQL unsigned aliases are represented by
+            // sys.uint4 to preserve their complete value ranges.
             ("unsignedInt", Some("UnsignedInt")),
             ("smallInt", Some("SmallInt")),
-            ("unsignedSmallInt", Some("SmallInt")),
+            ("unsignedSmallInt", Some("UnsignedInt")),
             ("tinyInt", Some("TinyInt")),
-            ("unsignedTinyInt", Some("TinyInt")),
+            ("unsignedTinyInt", Some("UnsignedInt")),
             ("mediumInt", Some("MediumInt")),
-            ("unsignedMediumInt", Some("MediumInt")),
+            ("unsignedMediumInt", Some("UnsignedInt")),
             ("bigInt", Some("BigInt")),
             ("unsignedBigInt", Some("UnsignedBigInt")),
             ("decimalValue", Some("Decimal(5,3)")),

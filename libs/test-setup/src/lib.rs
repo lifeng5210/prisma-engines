@@ -5,6 +5,7 @@
 //! engines.
 
 mod kingbase_mysql;
+mod kingbase_oracle;
 pub mod mssql;
 pub mod mysql;
 pub mod postgres;
@@ -79,6 +80,18 @@ pub fn should_skip_test(
     capabilities: BitFlags<Capabilities>,
 ) -> bool {
     let db = test_api_args::db_under_test();
+
+    // Kingbase Oracle is covered by explicitly tagged tests only. The shared
+    // schema-engine suites use Barrel to generate PostgreSQL/MySQL/SQLite/MSSQL
+    // DDL, but Barrel has no Oracle dialect. Running an untagged suite against
+    // Oracle would therefore test a different SQL dialect or fail before
+    // introspection. Add `tags(KingbaseOracle)` only after the test DDL and its
+    // expected Prisma schema have been verified against Oracle mode.
+    if db.tags.contains(Tags::KingbaseOracle) && !include_tagged.contains(Tags::KingbaseOracle) {
+        println!("Test skipped");
+        return true;
+    }
+
     if !capabilities.is_empty() && !db.capabilities.contains(capabilities) {
         println!("Test skipped");
         return true;

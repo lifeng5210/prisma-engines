@@ -147,7 +147,7 @@ impl DestructiveChangeCheckerFlavour for KingbaseMysqlDestructiveChangeCheckerFl
         connector: &'a mut dyn SqlConnector,
         table: &'a Table,
     ) -> BoxFuture<'a, ConnectorResult<i64>> {
-        let query = format!("SELECT COUNT(*) FROM `{}`", table.table);
+        let query = format!("SELECT COUNT(*) FROM {}", quote_identifier(&table.table));
 
         Box::pin(async move {
             query_with_backoff(connector, &query)
@@ -162,8 +162,9 @@ impl DestructiveChangeCheckerFlavour for KingbaseMysqlDestructiveChangeCheckerFl
         column: &'a Column,
     ) -> BoxFuture<'a, ConnectorResult<i64>> {
         let query = format!(
-            "SELECT COUNT(*) FROM `{}` WHERE `{}` IS NOT NULL",
-            column.table, column.column
+            "SELECT COUNT(*) FROM {} WHERE {} IS NOT NULL",
+            quote_identifier(&column.table),
+            quote_identifier(&column.column),
         );
 
         Box::pin(async move {
@@ -172,6 +173,10 @@ impl DestructiveChangeCheckerFlavour for KingbaseMysqlDestructiveChangeCheckerFl
                 .and_then(extract_column_values_count)
         })
     }
+}
+
+fn quote_identifier(identifier: &str) -> String {
+    format!("`{}`", identifier.replace('`', "``"))
 }
 
 /// Run the query with exponential backoff on error, from 400ms up to (400 × 2⁵)ms.
@@ -235,7 +240,7 @@ fn is_safe_enum_change(
 
 #[cfg(test)]
 mod tests {
-    use super::retry_delay;
+    use super::{quote_identifier, retry_delay};
     use std::time::Duration;
 
     #[test]
@@ -244,5 +249,10 @@ mod tests {
         assert_eq!(retry_delay(1), Duration::from_millis(800));
         assert_eq!(retry_delay(2), Duration::from_millis(1_600));
         assert_eq!(retry_delay(5), Duration::from_millis(12_800));
+    }
+
+    #[test]
+    fn quote_identifier_escapes_backticks() {
+        assert_eq!(quote_identifier("table`name"), "`table``name`");
     }
 }

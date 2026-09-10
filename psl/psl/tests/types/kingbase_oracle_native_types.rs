@@ -20,7 +20,8 @@ fn provider_and_core_native_types_are_valid() {
           big       BigInt   @db.Number(19)
           ratio     Float    @db.BinaryDouble
           amount    Decimal  @db.Number(65, 30)
-          active    Boolean  @db.Number(1, 0)
+          digit     Int      @db.Number(1, 0)
+          active    Boolean  @db.Boolean
           name      String   @db.VarChar2(191)
           createdAt DateTime @db.Timestamp(3)
           payload   Bytes    @db.Blob
@@ -48,7 +49,7 @@ fn default_scalar_types_use_oracle_compatible_native_types() {
         (ScalarType::BigInt, Number(PrecisionAndScale(19, 0))),
         (ScalarType::Float, BinaryDouble),
         (ScalarType::Decimal, Number(PrecisionAndScale(65, 30))),
-        (ScalarType::Boolean, Number(PrecisionAndScale(1, 0))),
+        (ScalarType::Boolean, Boolean),
         (ScalarType::String, VarChar2(Some(4000))),
         (ScalarType::DateTime, Timestamp(Some(3))),
         (ScalarType::Bytes, Blob),
@@ -83,6 +84,23 @@ fn number_accepts_zero_one_or_two_arguments() {
     "#};
 
     assert_valid(schema);
+}
+
+#[test]
+fn number_cannot_be_used_for_boolean_fields() {
+    let schema = indoc! {r#"
+        datasource db {
+          provider = "kingbase-oracle"
+        }
+
+        model User {
+          id     Int     @id
+          active Boolean @db.Number(1)
+        }
+    "#};
+
+    let error = parse_unwrap_err(schema);
+    assert!(error.contains("Native type Number is not compatible with declared field type Boolean"));
 }
 
 #[test]
@@ -134,6 +152,23 @@ fn float_precision_above_53_is_rejected() {
 
     let error = parse_unwrap_err(schema);
     assert!(error.contains("Precision must be between 1 and 53."));
+}
+
+#[test]
+fn varchar2_length_above_four_thousand_is_rejected() {
+    let schema = indoc! {r#"
+        datasource db {
+          provider = "kingbase-oracle"
+        }
+
+        model User {
+          id    Int    @id
+          value String @db.VarChar2(4001)
+        }
+    "#};
+
+    let error = parse_unwrap_err(schema);
+    assert!(error.contains("Length must be between 1 and 4,000."));
 }
 
 #[test]

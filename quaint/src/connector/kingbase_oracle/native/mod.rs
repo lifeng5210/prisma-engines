@@ -7,7 +7,7 @@ mod column_type;
 mod conversion;
 mod error;
 
-use column_type::{column_type_from_type, is_oracle_text_type};
+use column_type::{column_type_from_type, is_catalog_text_array, is_oracle_text_type};
 use error::convert_driver_error;
 
 use crate::{
@@ -229,6 +229,9 @@ fn convert_row(row: &Row) -> crate::Result<Vec<Value<'static>>> {
             ValueType::Json(driver_result(row.try_get(index))?).into()
         } else if typ == &Type::UUID {
             ValueType::Uuid(driver_result(row.try_get(index))?).into()
+        } else if typ == &Type::CHAR {
+            let value: Option<i8> = driver_result(row.try_get(index))?;
+            ValueType::Char(value.map(|value| (value as u8) as char)).into()
         } else if matches!(typ, &Type::TIMESTAMP | &Type::ORACLE_SYS_DATE) {
             let value: Option<NaiveDateTime> = driver_result(row.try_get(index))?;
             ValueType::DateTime(value.map(|value| DateTime::<Utc>::from_naive_utc_and_offset(value, Utc))).into()
@@ -238,6 +241,15 @@ fn convert_row(row: &Row) -> crate::Result<Vec<Value<'static>>> {
             ValueType::Date(driver_result(row.try_get::<_, Option<NaiveDate>>(index))?).into()
         } else if typ == &Type::TIME {
             ValueType::Time(driver_result(row.try_get::<_, Option<NaiveTime>>(index))?).into()
+        } else if is_catalog_text_array(typ) {
+            let values: Option<Vec<Option<&str>>> = driver_result(row.try_get(index))?;
+            ValueType::Array(values.map(|values| {
+                values
+                    .into_iter()
+                    .map(|value| ValueType::Text(value.map(ToOwned::to_owned).map(Cow::Owned)).into())
+                    .collect()
+            }))
+            .into()
         } else {
             return Err(Error::builder(ErrorKind::UnsupportedColumnType {
                 column_type: typ.to_string(),

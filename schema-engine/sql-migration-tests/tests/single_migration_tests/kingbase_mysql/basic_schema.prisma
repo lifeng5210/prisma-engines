@@ -29,21 +29,21 @@ enum Status {
 // CREATE TABLE `Account` (
 //     `id` INTEGER NOT NULL,
 //     `email` VARCHAR(64) NOT NULL,
-// 
+//
 //     UNIQUE INDEX `Account_email_key`(`email`),
 //     PRIMARY KEY (`id`)
 // );
-// 
+//
 // -- CreateTable
 // CREATE TABLE `Post` (
 //     `id` INTEGER NOT NULL,
 //     `accountId` INTEGER NOT NULL,
 //     `status` ENUM('DRAFT', 'PUBLISHED') NOT NULL DEFAULT 'DRAFT',
 //     `createdAt` DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
-// 
+//
 //     INDEX `Post_accountId_idx`(`accountId`),
 //     PRIMARY KEY (`id`)
 // );
-// 
+//
 // -- AddForeignKey
 // ALTER TABLE `Post` ADD CONSTRAINT `Post_accountId_fkey` FOREIGN KEY (`accountId`) REFERENCES `Account`(`id`) ON DELETE CASCADE ON UPDATE CASCADE;

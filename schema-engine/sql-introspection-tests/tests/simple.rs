@@ -121,13 +121,18 @@ source .test_database_urls/mysql_5_6
             let (_, connection_string) = tok(args.create_kingbase_mysql_database());
             database_url = connection_string;
         }
+        "kingbase-oracle" => {
+            let args = TestApiArgs::new(test_function_name, &[], &[]);
+            let (_, connection_string) = tok(args.create_kingbase_oracle_database());
+            database_url = connection_string;
+        }
         "sqlserver" => {
             tok(init_mssql_database(&database_url, test_function_name)).unwrap();
         }
         _ => (),
     }
 
-    let database_url = if provider == "kingbase" || provider == "kingbase-mysql" {
+    let database_url = if matches!(provider.as_str(), "kingbase" | "kingbase-mysql" | "kingbase-oracle") {
         database_url.clone()
     } else if provider == "sqlserver" {
         let mut jdbc: JdbcString = format!("jdbc:{database_url}").parse().unwrap();
@@ -157,6 +162,7 @@ source .test_database_urls/mysql_5_6
         "postgres" | "postgresql" => SqlSchemaConnector::new_postgres(params).unwrap(),
         "mysql" => SqlSchemaConnector::new_mysql(params).unwrap(),
         "kingbase" | "kingbase-mysql" => SqlSchemaConnector::new_kingbase_mysql(params).unwrap(),
+        "kingbase-oracle" => SqlSchemaConnector::new_kingbase_oracle(params).unwrap(),
         "sqlserver" => SqlSchemaConnector::new_mssql(params).unwrap(),
         "sqlite" => SqlSchemaConnector::new_sqlite(params).unwrap(),
         _ => unreachable!(),

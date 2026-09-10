@@ -479,7 +479,7 @@ impl Quaint {
 
                 Ok(builder)
             }
-            #[cfg(feature = "postgresql")]
+            #[cfg(feature = "postgresql-native")]
             s if s.starts_with("postgres") || s.starts_with("postgresql") => {
                 let url = crate::connector::PostgresNativeUrl::new(url::Url::parse(s)?)?;
                 let connection_limit = url.connection_limit();

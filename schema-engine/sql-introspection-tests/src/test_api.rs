@@ -79,6 +79,16 @@ impl TestApi {
             let me = SqlSchemaConnector::new_kingbase_mysql(params).unwrap();
 
             (Quaint::new(&cs).await.unwrap(), cs, me)
+        } else if tags.contains(Tags::KingbaseOracle) {
+            let (_, cs) = args.create_kingbase_oracle_database().await;
+            let params = ConnectorParams {
+                connection_string: cs.to_owned(),
+                preview_features,
+                shadow_database_connection_string: None,
+            };
+            let me = SqlSchemaConnector::new_kingbase_oracle(params).unwrap();
+
+            (Quaint::new(&cs).await.unwrap(), cs, me)
         } else if tags.contains(Tags::Mysql) {
             let (_, cs) = args.create_mysql_database().await;
             let params = ConnectorParams {
@@ -356,6 +366,9 @@ impl TestApi {
                 SqlFamily::Postgres => barrel::SqlVariant::Pg,
                 SqlFamily::Sqlite => barrel::SqlVariant::Sqlite,
                 SqlFamily::Mssql => barrel::SqlVariant::Mssql,
+                SqlFamily::KingbaseOracle => {
+                    panic!("Barrel does not provide an Oracle-compatible SQL variant; use raw Oracle DDL")
+                }
             },
             tags: self.tags(),
         }

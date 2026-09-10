@@ -129,27 +129,34 @@ fn rewrite_full_text_search(sql: String, parameters: &mut [Value<'_>]) -> crate:
         let query_parameter_index = fulltext_query_parameter_index(query, &sql)?;
         // Query Compiler represents request values as opaque placeholders so a
         // compiled plan can be reused. Those values are bound only at
-        // execution time, therefore they cannot be translated here. Kingbase
-        // callers use `tsquery` syntax for dynamic full-text searches; keep
-        // that parameter intact. The legacy static-value path below can still
-        // translate MySQL Boolean Mode syntax before binding it.
-        if let Some(query) = fulltext_query_parameter(parameters, query_parameter_index)? {
+        // execution time, so they cannot be translated to `tsquery` here.
+        // `websearch_to_tsquery` accepts an ordinary search string at execution
+        // time, while static values can retain the closer Boolean Mode
+        // translation below.
+        let tsquery_function = if let Some(query) = fulltext_query_parameter(parameters, query_parameter_index)? {
             let tsquery = mysql_boolean_mode_to_tsquery(query)?;
             set_fulltext_query_parameter(parameters, query_parameter_index, tsquery)?;
-        }
+            "to_tsquery"
+        } else {
+            "websearch_to_tsquery"
+        };
 
         output.push_str(&sql[cursor..match_start]);
 
         if is_fulltext_relevance_expression(&sql, match_start, against_end) {
             output.push_str("ts_rank(to_tsvector('simple', ");
             output.push_str(&document);
-            output.push_str("), to_tsquery('simple', ");
+            output.push_str("), ");
+            output.push_str(tsquery_function);
+            output.push_str("('simple', ");
             output.push_str(query);
             output.push_str("))");
         } else {
             output.push_str("to_tsvector('simple', ");
             output.push_str(&document);
-            output.push_str(") @@ to_tsquery('simple', ");
+            output.push_str(") @@ ");
+            output.push_str(tsquery_function);
+            output.push_str("('simple', ");
             output.push_str(query);
             output.push(')');
         }
@@ -963,8 +970,8 @@ mod tests {
     use super::KingbaseMysql;
     use crate::Value;
     use crate::ast::{
-        Column, Comparable, Expression, JsonPath, OpaqueType, Select, ValueType, json_extract, json_unquote, native_uuid,
-        text_search, text_search_relevance,
+        Column, Comparable, Expression, JsonPath, OpaqueType, Select, ValueType, json_extract, json_unquote,
+        native_uuid, text_search, text_search_relevance,
     };
 
     #[test]
@@ -1034,16 +1041,14 @@ mod tests {
     }
 
     #[test]
-    fn full_text_filters_preserve_dynamic_tsquery_parameters() {
+    fn full_text_filters_accept_dynamic_mysql_search_parameters() {
         let search: Expression = text_search(&[Column::from("name")]).into();
-        let query = Select::from_table("User").so_that(search.matches(Value::opaque(
-            "search".to_owned(),
-            OpaqueType::Text,
-        )));
+        let query =
+            Select::from_table("User").so_that(search.matches(Value::opaque("search".to_owned(), OpaqueType::Text)));
         let (sql, params) = KingbaseMysql::build(query).unwrap();
 
         assert_eq!(
-            "SELECT `User`.* FROM `User` WHERE to_tsvector('simple', COALESCE(`name`, '')) @@ to_tsquery('simple', ?)",
+            "SELECT `User`.* FROM `User` WHERE to_tsvector('simple', COALESCE(`name`, '')) @@ websearch_to_tsquery('simple', ?)",
             sql
         );
         assert!(matches!(

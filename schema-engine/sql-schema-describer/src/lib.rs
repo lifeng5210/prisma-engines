@@ -5,6 +5,8 @@
 
 #[cfg(feature = "kingbase-mysql")]
 pub mod kingbase_mysql;
+#[cfg(feature = "kingbase-oracle")]
+pub mod kingbase_oracle;
 pub mod mssql;
 pub mod mysql;
 pub mod postgres;

@@ -118,6 +118,8 @@ impl IntrospectionContext {
             "sqlserver" => SqlFamily::Mssql,
             #[cfg(feature = "mysql")]
             "mysql" | "kingbase-mysql" => SqlFamily::Mysql,
+            #[cfg(feature = "kingbase-oracle")]
+            "kingbase-oracle" => SqlFamily::KingbaseOracle,
             name => unreachable!("The name `{}` for the datamodel connector is not known", name),
         }
     }

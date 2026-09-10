@@ -1,3 +1,4 @@
+mod kingbase_oracle;
 mod sql_unexecutable_migrations;
 mod sqlite_existing_data_tests;
 mod type_migration_tests;

@@ -1,4 +1,4 @@
-use crate::{Capabilities, Tags, kingbase_mysql, logging, mssql, mysql, postgres};
+use crate::{Capabilities, Tags, kingbase_mysql, kingbase_oracle, logging, mssql, mysql, postgres};
 use enumflags2::BitFlags;
 use quaint::single::Quaint;
 use std::sync::LazyLock;
@@ -77,6 +77,14 @@ static DB_UNDER_TEST: LazyLock<Result<DbUnderTest, String>> = LazyLock::new(|| {
             database_url,
             capabilities: Default::default(),
             provider: "kingbase-mysql",
+            shadow_database_url,
+            max_ddl_refresh_delay: None,
+        }),
+        "kingbase-oracle" => Ok(DbUnderTest {
+            tags: Tags::KingbaseOracle.into(),
+            database_url,
+            capabilities: Capabilities::CreateDatabase | Capabilities::Enums | Capabilities::Json,
+            provider: "kingbase-oracle",
             shadow_database_url,
             max_ddl_refresh_delay: None,
         }),
@@ -182,6 +190,12 @@ impl TestApiArgs {
 
     pub async fn create_kingbase_mysql_database(&self) -> (&'static str, String) {
         kingbase_mysql::create_kingbase_mysql_database(self.database_url(), self.test_function_name)
+            .await
+            .unwrap()
+    }
+
+    pub async fn create_kingbase_oracle_database(&self) -> (&'static str, String) {
+        kingbase_oracle::create_kingbase_oracle_database(self.database_url(), self.test_function_name)
             .await
             .unwrap()
     }
