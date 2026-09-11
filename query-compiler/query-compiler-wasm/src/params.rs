@@ -1,6 +1,9 @@
 use quaint::prelude::{ExternalConnectionInfo, SqlFamily};
 use serde::Deserialize;
 
+#[cfg(feature = "kingbase-oracle")]
+const DEFAULT_KINGBASE_ORACLE_SCHEMA: &str = "public";
+
 // TODO: the code below largely duplicates driver_adapters::types, we should ideally use that
 // crate instead, but it currently uses #cfg target a lot, which causes build issues when not
 // explicitly building against wasm.
@@ -42,6 +45,8 @@ impl JsConnectionInfo {
             AdapterProvider::Mysql => None,
             #[cfg(feature = "kingbase-mysql")]
             AdapterProvider::KingbaseMysql => None,
+            #[cfg(feature = "kingbase-oracle")]
+            AdapterProvider::KingbaseOracle => Some(DEFAULT_KINGBASE_ORACLE_SCHEMA),
             #[cfg(feature = "postgresql")]
             AdapterProvider::Postgres => Some(quaint::connector::DEFAULT_POSTGRES_SCHEMA),
             #[cfg(feature = "sqlite")]
@@ -60,6 +65,9 @@ pub enum AdapterProvider {
     #[cfg(feature = "kingbase-mysql")]
     #[serde(rename = "kingbase-mysql")]
     KingbaseMysql,
+    #[cfg(feature = "kingbase-oracle")]
+    #[serde(rename = "kingbase-oracle")]
+    KingbaseOracle,
     #[cfg(feature = "postgresql")]
     Postgres,
     #[cfg(feature = "sqlite")]
@@ -76,6 +84,8 @@ impl From<AdapterProvider> for SqlFamily {
             AdapterProvider::Mysql => SqlFamily::Mysql,
             #[cfg(feature = "kingbase-mysql")]
             AdapterProvider::KingbaseMysql => SqlFamily::Mysql,
+            #[cfg(feature = "kingbase-oracle")]
+            AdapterProvider::KingbaseOracle => SqlFamily::KingbaseOracle,
             #[cfg(feature = "postgresql")]
             AdapterProvider::Postgres => SqlFamily::Postgres,
             #[cfg(feature = "sqlite")]
@@ -83,5 +93,23 @@ impl From<AdapterProvider> for SqlFamily {
             #[cfg(feature = "mssql")]
             AdapterProvider::SqlServer => SqlFamily::Mssql,
         }
+    }
+}
+
+#[cfg(all(test, feature = "kingbase-oracle"))]
+mod tests {
+    use super::{AdapterProvider, DEFAULT_KINGBASE_ORACLE_SCHEMA, JsConnectionInfo};
+    use quaint::prelude::SqlFamily;
+
+    #[test]
+    fn kingbase_oracle_provider_uses_the_oracle_sql_family_and_default_schema() {
+        let provider: AdapterProvider = serde_json::from_str("\"kingbase-oracle\"").unwrap();
+        let connection_info = JsConnectionInfo::default().into_external_connection_info(provider);
+
+        assert_eq!(connection_info.sql_family, SqlFamily::KingbaseOracle);
+        assert_eq!(
+            connection_info.schema_name.as_deref(),
+            Some(DEFAULT_KINGBASE_ORACLE_SCHEMA)
+        );
     }
 }

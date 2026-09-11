@@ -46,6 +46,8 @@ pub fn compile(
         SqlFamily::Postgres => translate(graph, &SqlQueryBuilder::<visitor::Postgres<'_>>::new(ctx)),
         #[cfg(feature = "mysql")]
         SqlFamily::Mysql => translate(graph, &SqlQueryBuilder::<visitor::Mysql<'_>>::new(ctx)),
+        #[cfg(feature = "kingbase-oracle")]
+        SqlFamily::KingbaseOracle => translate(graph, &SqlQueryBuilder::<visitor::KingbaseOracle<'_>>::new(ctx)),
         #[cfg(feature = "sqlite")]
         SqlFamily::Sqlite => translate(graph, &SqlQueryBuilder::<visitor::Sqlite<'_>>::new(ctx)),
         #[cfg(feature = "mssql")]

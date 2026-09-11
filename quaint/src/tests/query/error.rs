@@ -519,14 +519,6 @@ async fn kingbase_oracle_unsupported_ast_features_are_rejected(api: &mut dyn Tes
         .expect_err("Kingbase Oracle must reject SQL array literals");
     assert!(err.to_string().contains("array literal"));
 
-    let search: Expression<'_> = text_search(&[Column::from("body")]).into();
-    let err = api
-        .conn()
-        .select(Select::from_table("items").so_that(search.matches("kingbase")))
-        .await
-        .expect_err("Kingbase Oracle must reject full-text search");
-    assert!(err.to_string().contains("full-text search"));
-
     Ok(())
 }
 

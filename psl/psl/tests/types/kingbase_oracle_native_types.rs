@@ -241,11 +241,23 @@ fn json_types_cannot_be_used_as_keys_with_or_without_an_explicit_native_type() {
 
 #[test]
 fn connector_only_advertises_verified_query_and_referential_action_capabilities() {
-    assert!(
-        !KINGBASE_ORACLE
-            .capabilities()
-            .contains(ConnectorCapability::CorrelatedSubqueries)
-    );
+    let capabilities = KINGBASE_ORACLE.capabilities();
+
+    assert!(capabilities.contains(ConnectorCapability::InsertReturning));
+    assert!(capabilities.contains(ConnectorCapability::UpdateReturning));
+    assert!(capabilities.contains(ConnectorCapability::DeleteReturning));
+    assert!(capabilities.contains(ConnectorCapability::JsonFiltering));
+    assert!(capabilities.contains(ConnectorCapability::JsonFilteringArrayPath));
+    assert!(capabilities.contains(ConnectorCapability::JsonFilteringAlphanumeric));
+    assert!(capabilities.contains(ConnectorCapability::JsonFilteringAlphanumericFieldRef));
+    assert!(capabilities.contains(ConnectorCapability::JsonArrayContains));
+    assert!(capabilities.contains(ConnectorCapability::InsensitiveFilters));
+    assert!(capabilities.contains(ConnectorCapability::LateralJoin));
+    assert!(capabilities.contains(ConnectorCapability::NativeFullTextSearch));
+    assert!(capabilities.contains(ConnectorCapability::NativeFullTextSearchWithoutIndex));
+    assert!(!capabilities.contains(ConnectorCapability::FullTextIndex));
+    assert!(!capabilities.contains(ConnectorCapability::ScalarLists));
+    assert!(!capabilities.contains(ConnectorCapability::CorrelatedSubqueries));
 
     let referential_actions = KINGBASE_ORACLE.foreign_key_referential_actions();
     assert!(referential_actions.contains(ReferentialAction::Restrict));

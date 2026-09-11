@@ -257,11 +257,11 @@ fn get_scalar_field_result_node(
             };
         }
 
-        // PostgreSQL based databases return bytes as hex encoded strings.
+        // PostgreSQL-wire databases return bytes as hex encoded strings.
         if type_info.typ.id == TypeIdentifier::Bytes
             && matches!(
                 field.dm.schema.connector.flavour(),
-                Flavour::Postgres | Flavour::Cockroach
+                Flavour::Postgres | Flavour::Cockroach | Flavour::KingbaseOracle
             )
         {
             let typ = FieldScalarType::Bytes {

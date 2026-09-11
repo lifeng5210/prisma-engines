@@ -24,10 +24,22 @@ use KingbaseOracleType::*;
 pub const CAPABILITIES: ConnectorCapabilities = make_bitflags!(ConnectorCapability::{
     Enums |
     Json |
+    JsonFiltering |
+    JsonFilteringArrayPath |
+    JsonFilteringAlphanumeric |
+    JsonFilteringAlphanumericFieldRef |
+    JsonArrayContains |
+    InsensitiveFilters |
+    LateralJoin |
+    NativeFullTextSearch |
+    NativeFullTextSearchWithoutIndex |
     AutoIncrement |
     AutoIncrementAllowedOnNonId |
     RelationFieldsInArbitraryOrder |
     CreateMany |
+    InsertReturning |
+    UpdateReturning |
+    DeleteReturning |
     WritableAutoincField |
     CreateManyWriteableAutoIncId |
     UpdateableId |

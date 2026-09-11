@@ -29,17 +29,17 @@ enum Status {
 // Expected Migration:
 // -- CreateSchema
 // CREATE SCHEMA IF NOT EXISTS "public";
-// 
+//
 // -- CreateEnum
 // CREATE TYPE "Status" AS ENUM ('DRAFT', 'PUBLISHED');
-// 
+//
 // -- CreateTable
 // CREATE TABLE "Account" (
 //     "id" NUMBER(10,0) NOT NULL,
 //     "code" VARCHAR2(64) NOT NULL,
 //     CONSTRAINT "Account_pkey" PRIMARY KEY ("id")
 // );
-// 
+//
 // -- CreateTable
 // CREATE TABLE "Post" (
 //     "id" NUMBER(10,0) NOT NULL,
@@ -49,12 +49,12 @@ enum Status {
 //     "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
 //     CONSTRAINT "Post_pkey" PRIMARY KEY ("id")
 // );
-// 
+//
 // -- CreateIndex
 // CREATE UNIQUE INDEX "Account_code_key" ON "Account" ("code");
-// 
+//
 // -- CreateIndex
 // CREATE INDEX "Post_accountId_idx" ON "Post" ("accountId");
-// 
+//
 // -- AddForeignKey
 // ALTER TABLE "Post" ADD CONSTRAINT "Post_accountId_fkey" FOREIGN KEY ("accountId") REFERENCES "Account" ("id") ON DELETE CASCADE ON UPDATE CASCADE;

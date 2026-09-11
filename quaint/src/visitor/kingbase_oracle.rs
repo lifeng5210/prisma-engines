@@ -651,16 +651,57 @@ impl<'a> Visitor<'a> for KingbaseOracle<'a> {
         self.write(" AS VARCHAR2(4000))")
     }
 
-    fn visit_text_search(&mut self, _text_search: TextSearch<'a>) -> visitor::Result {
-        Err(Self::unsupported("full-text search"))
+    fn visit_text_search(&mut self, text_search: TextSearch<'a>) -> visitor::Result {
+        let len = text_search.exprs.len();
+        self.surround_with("to_tsvector(concat_ws(' ', ", "))", |visitor| {
+            for (index, expression) in text_search.exprs.into_iter().enumerate() {
+                visitor.visit_expression(expression)?;
+
+                if index < len - 1 {
+                    visitor.write(",")?;
+                }
+            }
+
+            Ok(())
+        })
     }
 
-    fn visit_matches(&mut self, _left: Expression<'a>, _right: Expression<'a>, _not: bool) -> visitor::Result {
-        Err(Self::unsupported("full-text search"))
+    fn visit_matches(&mut self, left: Expression<'a>, right: Expression<'a>, not: bool) -> visitor::Result {
+        if not {
+            self.write("(NOT ")?;
+        }
+
+        self.visit_expression(left)?;
+        self.write(" @@ ")?;
+        self.surround_with("to_tsquery(", ")", |visitor| visitor.visit_expression(right))?;
+
+        if not {
+            self.write(")")?;
+        }
+
+        Ok(())
     }
 
-    fn visit_text_search_relevance(&mut self, _relevance: TextSearchRelevance<'a>) -> visitor::Result {
-        Err(Self::unsupported("full-text search"))
+    fn visit_text_search_relevance(&mut self, relevance: TextSearchRelevance<'a>) -> visitor::Result {
+        let len = relevance.exprs.len();
+        let exprs = relevance.exprs;
+        let query = relevance.query;
+
+        self.write("ts_rank(")?;
+        self.surround_with("to_tsvector(concat_ws(' ', ", "))", |visitor| {
+            for (index, expression) in exprs.into_iter().enumerate() {
+                visitor.visit_expression(expression)?;
+
+                if index < len - 1 {
+                    visitor.write(",")?;
+                }
+            }
+
+            Ok(())
+        })?;
+        self.write(", ")?;
+        self.surround_with("to_tsquery(", ")", |visitor| visitor.visit_expression(query))?;
+        self.write(")")
     }
 }
 
@@ -864,5 +905,27 @@ mod tests {
             sql
         );
         assert!(params.is_empty());
+    }
+
+    #[test]
+    fn renders_oracle_full_text_search() {
+        let search: Expression = text_search(&[Column::from("title"), Column::from("body")]).into();
+        let query = Select::from_table("documents").so_that(search.matches("prisma & compiler"));
+        let (sql, params) = KingbaseOracle::build(query).unwrap();
+
+        assert_eq!(
+            "SELECT \"documents\".* FROM \"documents\" WHERE to_tsvector(concat_ws(' ', \"title\",\"body\")) @@ to_tsquery($1)",
+            sql
+        );
+        assert_eq!(vec![Value::text("prisma & compiler")], params);
+
+        let relevance: Expression = text_search_relevance(&[Column::from("title")], "prisma").into();
+        let (sql, params) = KingbaseOracle::build(Select::from_table("documents").value(relevance)).unwrap();
+
+        assert_eq!(
+            "SELECT ts_rank(to_tsvector(concat_ws(' ', \"title\")), to_tsquery($1)) FROM \"documents\"",
+            sql
+        );
+        assert_eq!(vec![Value::text("prisma")], params);
     }
 }

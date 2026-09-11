@@ -37,7 +37,11 @@ fn run_single_migration_test(test_file_path: &str, test_function_name: &'static 
             let mut out = String::with_capacity(text.len() - idx);
             // Skipping the EXPECTATION_TEXT line.
             for line in text[idx..].lines().skip(1) {
-                out.push_str(line.trim_start_matches("// "));
+                out.push_str(if line == "//" {
+                    ""
+                } else {
+                    line.trim_start_matches("// ")
+                });
                 out.push('\n');
             }
             out
