@@ -114,6 +114,7 @@ impl Connector for KingbaseOracleDatamodelConnector {
     ) -> Option<ScalarFieldType> {
         let native_type: &KingbaseOracleType = native_type.downcast_ref();
         let scalar_type = match native_type {
+            TinyInt => ScalarType::Int,
             Number(Precision(precision) | PrecisionAndScale(precision, 0)) if *precision <= 10 => ScalarType::Int,
             Number(Precision(precision) | PrecisionAndScale(precision, 0)) if *precision <= 19 => ScalarType::BigInt,
             Number(_) => ScalarType::Decimal,

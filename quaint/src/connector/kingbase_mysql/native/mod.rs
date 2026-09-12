@@ -192,6 +192,34 @@ fn make_tls_connector(ssl_params: &SslParams) -> crate::Result<MakeTlsConnector>
         .map(MakeTlsConnector::new)
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        connector::Queryable,
+        single::Quaint,
+        tests::test_api::kingbase_mysql::CONN_STR,
+    };
+
+    #[tokio::test]
+    async fn describe_query_preserves_a_double_parameter_type() {
+        let connection = Quaint::new(CONN_STR.as_str()).await.unwrap();
+
+        connection
+            .raw_cmd("CREATE TEMPORARY TABLE `typed_sql_double` (`value` DOUBLE)")
+            .await
+            .unwrap();
+
+        let described = connection
+            .describe_query("SELECT `value` FROM `typed_sql_double` WHERE `value` < ?")
+            .await
+            .unwrap();
+
+        assert_eq!(described.parameters.len(), 1);
+        assert_eq!(described.parameters[0].typ, ColumnType::Double);
+    }
+}
+
 impl_default_TransactionCapable!(KingbaseMysql);
 
 #[async_trait]

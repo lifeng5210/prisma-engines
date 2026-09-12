@@ -10,6 +10,7 @@ fn oracle_mode_column_types_and_identity_are_described(api: TestApi) {
         r#"
         CREATE TABLE type_samples (
             id SERIAL PRIMARY KEY,
+            tinyint_value TINYINT,
             int_value NUMBER(10, 0),
             bigint_value NUMBER(19, 0),
             decimal_value NUMBER(12, 4),
@@ -44,6 +45,11 @@ fn oracle_mode_column_types_and_identity_are_described(api: TestApi) {
             Some(KingbaseOracleType::Number(
                 KingbaseOracleNumberArguments::PrecisionAndScale(10, 0),
             )),
+        ),
+        (
+            "tinyint_value",
+            ColumnTypeFamily::Int,
+            Some(KingbaseOracleType::TinyInt),
         ),
         (
             "int_value",

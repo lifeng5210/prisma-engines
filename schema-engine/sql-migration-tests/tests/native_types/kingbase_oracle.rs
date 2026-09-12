@@ -7,6 +7,7 @@ fn all_supported_oracle_native_types_can_be_created_and_reintrospected(api: Test
     let schema = r#"
         model NativeTypes {
             id                    Int       @id
+            tinyIntValue          Int?      @db.TinyInt
             intValue              Int?      @db.Number(10, 0)
             bigintValue           BigInt?   @db.Number(19, 0)
             decimalValue          Decimal?  @db.Number(12, 4)
@@ -38,8 +39,11 @@ fn all_supported_oracle_native_types_can_be_created_and_reintrospected(api: Test
 
     api.assert_schema().assert_table("NativeTypes", |table| {
         table
-            .assert_columns_count(22)
+            .assert_columns_count(23)
             .assert_column("id", |column| column.assert_type_family(ColumnTypeFamily::Int))
+            .assert_column("tinyIntValue", |column| {
+                column.assert_native_type("TinyInt", KINGBASE_ORACLE)
+            })
             .assert_column("intValue", |column| column.assert_type_family(ColumnTypeFamily::Int))
             .assert_column("bigintValue", |column| {
                 column.assert_type_family(ColumnTypeFamily::BigInt)

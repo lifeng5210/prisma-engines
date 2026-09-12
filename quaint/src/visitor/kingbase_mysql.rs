@@ -128,17 +128,17 @@ fn rewrite_full_text_search(sql: String, parameters: &mut [Value<'_>]) -> crate:
         let query = sql[against_open + 1..mode_start].trim();
         let query_parameter_index = fulltext_query_parameter_index(query, &sql)?;
         // Query Compiler represents request values as opaque placeholders so a
-        // compiled plan can be reused. Those values are bound only at
-        // execution time, so they cannot be translated to `tsquery` here.
-        // `websearch_to_tsquery` accepts an ordinary search string at execution
-        // time, while static values can retain the closer Boolean Mode
-        // translation below.
+        // compiled plan can be reused. The database must parse those values at
+        // execution time. Use `to_tsquery` here, rather than the deliberately
+        // forgiving `websearch_to_tsquery`, so the Kingbase PostgreSQL-style
+        // search syntax (`&`, `|`, `!`) keeps its meaning and invalid tsquery
+        // input is reported to the caller.
         let tsquery_function = if let Some(query) = fulltext_query_parameter(parameters, query_parameter_index)? {
             let tsquery = mysql_boolean_mode_to_tsquery(query)?;
             set_fulltext_query_parameter(parameters, query_parameter_index, tsquery)?;
             "to_tsquery"
         } else {
-            "websearch_to_tsquery"
+            "to_tsquery"
         };
 
         output.push_str(&sql[cursor..match_start]);
@@ -1041,14 +1041,14 @@ mod tests {
     }
 
     #[test]
-    fn full_text_filters_accept_dynamic_mysql_search_parameters() {
+    fn full_text_filters_accept_dynamic_kingbase_tsquery_parameters() {
         let search: Expression = text_search(&[Column::from("name")]).into();
         let query =
             Select::from_table("User").so_that(search.matches(Value::opaque("search".to_owned(), OpaqueType::Text)));
         let (sql, params) = KingbaseMysql::build(query).unwrap();
 
         assert_eq!(
-            "SELECT `User`.* FROM `User` WHERE to_tsvector('simple', COALESCE(`name`, '')) @@ websearch_to_tsquery('simple', ?)",
+            "SELECT `User`.* FROM `User` WHERE to_tsvector('simple', COALESCE(`name`, '')) @@ to_tsquery('simple', ?)",
             sql
         );
         assert!(matches!(

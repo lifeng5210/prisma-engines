@@ -403,6 +403,7 @@ fn optional_argument_type(native_type: &KingbaseOracleType) -> Cow<'static, str>
         KingbaseOracleType::Number(KingbaseOracleNumberArguments::PrecisionAndScale(precision, scale)) => {
             format!("NUMBER({precision},{scale})").into()
         }
+        KingbaseOracleType::TinyInt => "TINYINT".into(),
         KingbaseOracleType::Float(precision) => optional_argument("FLOAT", *precision),
         KingbaseOracleType::BinaryFloat => "BINARY_FLOAT".into(),
         KingbaseOracleType::BinaryDouble => "BINARY_DOUBLE".into(),

@@ -11,8 +11,10 @@ use crate::{
     error::{Error, ErrorKind},
     visitor::{self, Visitor},
 };
+use either::Either;
+use itertools::Itertools;
 use query_template::{PlaceholderFormat, QueryTemplate};
-use std::{borrow::Cow, fmt};
+use std::{borrow::Cow, fmt, iter};
 
 /// A visitor to generate SQL accepted by KingbaseES Oracle-compatible mode.
 pub struct KingbaseOracle<'a> {
@@ -157,7 +159,15 @@ impl<'a> KingbaseOracle<'a> {
         operator: &str,
         right: Expression<'a>,
     ) -> visitor::Result {
-        if left.is_json_value() || right.is_json_value() {
+        let is_json = |expression: &Expression<'_>| {
+            expression.is_json_value()
+                || expression
+                    .as_column()
+                    .and_then(|column| column.native_type.as_deref())
+                    .is_some_and(|native_type| matches!(native_type, "JSON" | "JSONB"))
+        };
+
+        if is_json(&left) || is_json(&right) {
             self.visit_json_as_jsonb(left)?;
             self.write(operator)?;
             self.visit_json_as_jsonb(right)
@@ -334,6 +344,38 @@ impl<'a> Visitor<'a> for KingbaseOracle<'a> {
         self.query_template
             .write_parameter_tuple(item_prefix, separator, item_suffix);
         self.query_template.parameters.push(value);
+        Ok(())
+    }
+
+    fn visit_columns(&mut self, columns: Vec<Expression<'a>>) -> visitor::Result {
+        let len = columns.len();
+
+        let columns = match columns.into_iter().exactly_one() {
+            Ok(Expression {
+                kind: ExpressionKind::ParameterizedRow(row),
+                ..
+            }) => {
+                // Oracle MERGE sources need a column per value. A parameterized
+                // row can represent several relation rows, so render it as
+                // `SELECT $1, $2 UNION ALL SELECT $3, $4` rather than a row
+                // expression (`SELECT ($1, $2)`).
+                self.query_template
+                    .write_parameter_tuple_list("", ",", "", " UNION ALL SELECT ");
+                self.query_template.parameters.push(row);
+                return Ok(());
+            }
+            Ok(other) => Either::Left(iter::once(other)),
+            Err(columns) => Either::Right(columns),
+        };
+
+        for (index, column) in columns.enumerate() {
+            self.visit_expression(column)?;
+
+            if index < len - 1 {
+                self.write(", ")?;
+            }
+        }
+
         Ok(())
     }
 
@@ -709,6 +751,7 @@ impl<'a> Visitor<'a> for KingbaseOracle<'a> {
 mod tests {
     use super::KingbaseOracle;
     use crate::{ast::*, visitor::Visitor};
+    use query_template::Fragment;
 
     #[test]
     fn renders_oracle_insert_returning_and_default_values() {
@@ -790,6 +833,38 @@ mod tests {
                 Value::int32(1)
             ],
             params
+        );
+    }
+
+    #[test]
+    fn renders_parameterized_oracle_merge_source_rows_as_columns() {
+        let b = Column::from("B").table("_GroupToUser");
+        let a = Column::from("A").table("_GroupToUser");
+        let table = Table::from("_GroupToUser").add_unique_index(b.clone());
+        let insert = Insert::expression_into(table, [b, a], Value::array(vec![Value::int32(1), Value::int32(2)]));
+        let template = KingbaseOracle::build_template(insert.on_conflict(OnConflict::DoNothing)).unwrap();
+
+        assert_eq!(
+            "MERGE INTO \"_GroupToUser\" USING (SELECT [($1)]) \"dual\" (\"B\",\"A\") ON (\"dual\".\"B\" = \"_GroupToUser\".\"B\") WHEN NOT MATCHED THEN INSERT  (\"B\",\"A\") VALUES (\"dual\".\"B\",\"dual\".\"A\")",
+            template.to_string()
+        );
+        assert!(template.fragments.iter().any(|fragment| {
+            matches!(
+                fragment,
+                Fragment::ParameterTupleList {
+                    item_prefix,
+                    item_separator,
+                    item_suffix,
+                    group_separator,
+                } if item_prefix.is_empty()
+                    && item_separator == ","
+                    && item_suffix.is_empty()
+                    && group_separator == " UNION ALL SELECT "
+            )
+        }));
+        assert_eq!(
+            vec![Value::array(vec![Value::int32(1), Value::int32(2)])],
+            template.parameters
         );
     }
 
@@ -881,6 +956,17 @@ mod tests {
             sql
         );
         assert_eq!(vec![Value::json(serde_json::json!({ "id": 1 }))], params);
+
+        let left = Column::from("left_payload").native_column_type(Some("JSON"));
+        let right = Column::from("right_payload").native_column_type(Some("JSON"));
+        let query = Select::from_table("documents").so_that(left.equals(right));
+        let (sql, params) = KingbaseOracle::build(query).unwrap();
+
+        assert_eq!(
+            "SELECT \"documents\".* FROM \"documents\" WHERE CAST(\"left_payload\" AS JSONB) = CAST(\"right_payload\" AS JSONB)",
+            sql
+        );
+        assert!(params.is_empty());
 
         let query = Select::from_table("documents").value(json_unquote(Column::from("payload")));
         let (sql, params) = KingbaseOracle::build(query).unwrap();

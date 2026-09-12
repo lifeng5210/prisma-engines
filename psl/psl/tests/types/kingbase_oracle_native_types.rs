@@ -17,6 +17,7 @@ fn provider_and_core_native_types_are_valid() {
 
         model User {
           id        Int      @id @db.Number(10, 0)
+          tiny      Int      @db.TinyInt
           big       BigInt   @db.Number(19)
           ratio     Float    @db.BinaryDouble
           amount    Decimal  @db.Number(65, 30)

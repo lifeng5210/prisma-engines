@@ -293,6 +293,7 @@ fn rewrite_column_type(tpe: &mut ColumnType) {
             .map(|native_type| native_type.downcast_ref::<PostgresType>());
 
         let mapped_type = match type_name.as_str() {
+            "tinyint" => Some((ColumnTypeFamily::Int, KingbaseOracleType::TinyInt)),
             "int2" | "int4" => Some(number_type(KingbaseOracleNumberArguments::PrecisionAndScale(10, 0))),
             "int8" => Some(number_type(KingbaseOracleNumberArguments::PrecisionAndScale(19, 0))),
             "numeric" => Some(number_type(number_arguments(postgres_native_type))),

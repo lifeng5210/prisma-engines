@@ -49,6 +49,7 @@ crate::native_type_definition! {
     /// Native types exposed by KingbaseES in Oracle compatibility mode.
     KingbaseOracleType;
     Number(KingbaseOracleNumberArguments) -> Int | BigInt | Float | Decimal,
+    TinyInt -> Int,
     Float(Option<u32>) -> Float,
     BinaryFloat -> Float,
     BinaryDouble -> Float,
