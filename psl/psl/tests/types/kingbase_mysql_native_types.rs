@@ -60,12 +60,12 @@ fn text_type_should_fail_on_unique() {
     "#};
 
     let expectation = expect![[r#"
-        [1;91merror[0m: [1mNative type `Text` cannot be unique in Kingbase MySQL. Please use the `length` argument to the field in the index definition to allow this.[0m
-          [1;94m-->[0m  [4mschema.prisma:10[0m
-        [1;94m   | [0m
-        [1;94m 9 | [0m
-        [1;94m10 | [0m  [1;91m@@unique([firstName, lastName])[0m
-        [1;94m   | [0m
+        error: Native type `Text` cannot be unique in Kingbase MySQL. Please use the `length` argument to the field in the index definition to allow this.
+          -->  schema.prisma:10
+           | 
+         9 | 
+        10 |   @@unique([firstName, lastName])
+           | 
     "#]];
 
     expect_error(schema, &expectation);
@@ -88,12 +88,12 @@ fn longtext_type_should_fail_on_unique() {
     "#};
 
     let expectation = expect![[r#"
-        [1;91merror[0m: [1mNative type `LongText` cannot be unique in Kingbase MySQL. Please use the `length` argument to the field in the index definition to allow this.[0m
-          [1;94m-->[0m  [4mschema.prisma:10[0m
-        [1;94m   | [0m
-        [1;94m 9 | [0m
-        [1;94m10 | [0m  [1;91m@@unique([firstName, lastName])[0m
-        [1;94m   | [0m
+        error: Native type `LongText` cannot be unique in Kingbase MySQL. Please use the `length` argument to the field in the index definition to allow this.
+          -->  schema.prisma:10
+           | 
+         9 | 
+        10 |   @@unique([firstName, lastName])
+           | 
     "#]];
 
     expect_error(schema, &expectation);
@@ -116,12 +116,12 @@ fn mediumtext_type_should_fail_on_unique() {
     "#};
 
     let expectation = expect![[r#"
-        [1;91merror[0m: [1mNative type `MediumText` cannot be unique in Kingbase MySQL. Please use the `length` argument to the field in the index definition to allow this.[0m
-          [1;94m-->[0m  [4mschema.prisma:10[0m
-        [1;94m   | [0m
-        [1;94m 9 | [0m
-        [1;94m10 | [0m  [1;91m@@unique([firstName, lastName])[0m
-        [1;94m   | [0m
+        error: Native type `MediumText` cannot be unique in Kingbase MySQL. Please use the `length` argument to the field in the index definition to allow this.
+          -->  schema.prisma:10
+           | 
+         9 | 
+        10 |   @@unique([firstName, lastName])
+           | 
     "#]];
 
     expect_error(schema, &expectation);
@@ -144,12 +144,12 @@ fn tinytext_type_should_fail_on_unique() {
     "#};
 
     let expectation = expect![[r#"
-        [1;91merror[0m: [1mNative type `TinyText` cannot be unique in Kingbase MySQL. Please use the `length` argument to the field in the index definition to allow this.[0m
-          [1;94m-->[0m  [4mschema.prisma:10[0m
-        [1;94m   | [0m
-        [1;94m 9 | [0m
-        [1;94m10 | [0m  [1;91m@@unique([firstName, lastName])[0m
-        [1;94m   | [0m
+        error: Native type `TinyText` cannot be unique in Kingbase MySQL. Please use the `length` argument to the field in the index definition to allow this.
+          -->  schema.prisma:10
+           | 
+         9 | 
+        10 |   @@unique([firstName, lastName])
+           | 
     "#]];
 
     expect_error(schema, &expectation);
@@ -172,12 +172,12 @@ fn blob_type_should_fail_on_unique() {
     "#};
 
     let expectation = expect![[r#"
-        [1;91merror[0m: [1mNative type `Blob` cannot be unique in Kingbase MySQL. Please use the `length` argument to the field in the index definition to allow this.[0m
-          [1;94m-->[0m  [4mschema.prisma:10[0m
-        [1;94m   | [0m
-        [1;94m 9 | [0m
-        [1;94m10 | [0m  [1;91m@@unique([firstName, lastName])[0m
-        [1;94m   | [0m
+        error: Native type `Blob` cannot be unique in Kingbase MySQL. Please use the `length` argument to the field in the index definition to allow this.
+          -->  schema.prisma:10
+           | 
+         9 | 
+        10 |   @@unique([firstName, lastName])
+           | 
     "#]];
 
     expect_error(schema, &expectation);
@@ -200,12 +200,12 @@ fn longblob_type_should_fail_on_unique() {
     "#};
 
     let expectation = expect![[r#"
-        [1;91merror[0m: [1mNative type `LongBlob` cannot be unique in Kingbase MySQL. Please use the `length` argument to the field in the index definition to allow this.[0m
-          [1;94m-->[0m  [4mschema.prisma:10[0m
-        [1;94m   | [0m
-        [1;94m 9 | [0m
-        [1;94m10 | [0m  [1;91m@@unique([firstName, lastName])[0m
-        [1;94m   | [0m
+        error: Native type `LongBlob` cannot be unique in Kingbase MySQL. Please use the `length` argument to the field in the index definition to allow this.
+          -->  schema.prisma:10
+           | 
+         9 | 
+        10 |   @@unique([firstName, lastName])
+           | 
     "#]];
 
     expect_error(schema, &expectation);
@@ -228,12 +228,12 @@ fn mediumblob_type_should_fail_on_unique() {
     "#};
 
     let expectation = expect![[r#"
-        [1;91merror[0m: [1mNative type `MediumBlob` cannot be unique in Kingbase MySQL. Please use the `length` argument to the field in the index definition to allow this.[0m
-          [1;94m-->[0m  [4mschema.prisma:10[0m
-        [1;94m   | [0m
-        [1;94m 9 | [0m
-        [1;94m10 | [0m  [1;91m@@unique([firstName, lastName])[0m
-        [1;94m   | [0m
+        error: Native type `MediumBlob` cannot be unique in Kingbase MySQL. Please use the `length` argument to the field in the index definition to allow this.
+          -->  schema.prisma:10
+           | 
+         9 | 
+        10 |   @@unique([firstName, lastName])
+           | 
     "#]];
 
     expect_error(schema, &expectation);
@@ -256,12 +256,12 @@ fn tinyblob_type_should_fail_on_unique() {
     "#};
 
     let expectation = expect![[r#"
-        [1;91merror[0m: [1mNative type `TinyBlob` cannot be unique in Kingbase MySQL. Please use the `length` argument to the field in the index definition to allow this.[0m
-          [1;94m-->[0m  [4mschema.prisma:10[0m
-        [1;94m   | [0m
-        [1;94m 9 | [0m
-        [1;94m10 | [0m  [1;91m@@unique([firstName, lastName])[0m
-        [1;94m   | [0m
+        error: Native type `TinyBlob` cannot be unique in Kingbase MySQL. Please use the `length` argument to the field in the index definition to allow this.
+          -->  schema.prisma:10
+           | 
+         9 | 
+        10 |   @@unique([firstName, lastName])
+           | 
     "#]];
 
     expect_error(schema, &expectation);
@@ -284,12 +284,12 @@ fn text_type_should_fail_on_index() {
     "#};
 
     let expectation = expect![[r#"
-        [1;91merror[0m: [1mYou cannot define an index on fields with native type `Text` of Kingbase MySQL. Please use the `length` argument to the field in the index definition to allow this.[0m
-          [1;94m-->[0m  [4mschema.prisma:10[0m
-        [1;94m   | [0m
-        [1;94m 9 | [0m
-        [1;94m10 | [0m  [1;91m@@index([firstName, lastName])[0m
-        [1;94m   | [0m
+        error: You cannot define an index on fields with native type `Text` of Kingbase MySQL. Please use the `length` argument to the field in the index definition to allow this.
+          -->  schema.prisma:10
+           | 
+         9 | 
+        10 |   @@index([firstName, lastName])
+           | 
     "#]];
 
     expect_error(schema, &expectation);
@@ -312,12 +312,12 @@ fn longtext_type_should_fail_on_index() {
     "#};
 
     let expectation = expect![[r#"
-        [1;91merror[0m: [1mYou cannot define an index on fields with native type `LongText` of Kingbase MySQL. Please use the `length` argument to the field in the index definition to allow this.[0m
-          [1;94m-->[0m  [4mschema.prisma:10[0m
-        [1;94m   | [0m
-        [1;94m 9 | [0m
-        [1;94m10 | [0m  [1;91m@@index([firstName, lastName])[0m
-        [1;94m   | [0m
+        error: You cannot define an index on fields with native type `LongText` of Kingbase MySQL. Please use the `length` argument to the field in the index definition to allow this.
+          -->  schema.prisma:10
+           | 
+         9 | 
+        10 |   @@index([firstName, lastName])
+           | 
     "#]];
 
     expect_error(schema, &expectation);
@@ -340,12 +340,12 @@ fn mediumtext_type_should_fail_on_index() {
     "#};
 
     let expectation = expect![[r#"
-        [1;91merror[0m: [1mYou cannot define an index on fields with native type `MediumText` of Kingbase MySQL. Please use the `length` argument to the field in the index definition to allow this.[0m
-          [1;94m-->[0m  [4mschema.prisma:10[0m
-        [1;94m   | [0m
-        [1;94m 9 | [0m
-        [1;94m10 | [0m  [1;91m@@index([firstName, lastName])[0m
-        [1;94m   | [0m
+        error: You cannot define an index on fields with native type `MediumText` of Kingbase MySQL. Please use the `length` argument to the field in the index definition to allow this.
+          -->  schema.prisma:10
+           | 
+         9 | 
+        10 |   @@index([firstName, lastName])
+           | 
     "#]];
 
     expect_error(schema, &expectation);
@@ -368,12 +368,12 @@ fn tinytext_type_should_fail_on_index() {
     "#};
 
     let expectation = expect![[r#"
-        [1;91merror[0m: [1mYou cannot define an index on fields with native type `TinyText` of Kingbase MySQL. Please use the `length` argument to the field in the index definition to allow this.[0m
-          [1;94m-->[0m  [4mschema.prisma:10[0m
-        [1;94m   | [0m
-        [1;94m 9 | [0m
-        [1;94m10 | [0m  [1;91m@@index([firstName, lastName])[0m
-        [1;94m   | [0m
+        error: You cannot define an index on fields with native type `TinyText` of Kingbase MySQL. Please use the `length` argument to the field in the index definition to allow this.
+          -->  schema.prisma:10
+           | 
+         9 | 
+        10 |   @@index([firstName, lastName])
+           | 
     "#]];
 
     expect_error(schema, &expectation);
@@ -396,12 +396,12 @@ fn blob_type_should_fail_on_index() {
     "#};
 
     let expectation = expect![[r#"
-        [1;91merror[0m: [1mYou cannot define an index on fields with native type `Blob` of Kingbase MySQL. Please use the `length` argument to the field in the index definition to allow this.[0m
-          [1;94m-->[0m  [4mschema.prisma:10[0m
-        [1;94m   | [0m
-        [1;94m 9 | [0m
-        [1;94m10 | [0m  [1;91m@@index([firstName, lastName])[0m
-        [1;94m   | [0m
+        error: You cannot define an index on fields with native type `Blob` of Kingbase MySQL. Please use the `length` argument to the field in the index definition to allow this.
+          -->  schema.prisma:10
+           | 
+         9 | 
+        10 |   @@index([firstName, lastName])
+           | 
     "#]];
 
     expect_error(schema, &expectation);
@@ -424,12 +424,12 @@ fn longblob_type_should_fail_on_index() {
     "#};
 
     let expectation = expect![[r#"
-        [1;91merror[0m: [1mYou cannot define an index on fields with native type `LongBlob` of Kingbase MySQL. Please use the `length` argument to the field in the index definition to allow this.[0m
-          [1;94m-->[0m  [4mschema.prisma:10[0m
-        [1;94m   | [0m
-        [1;94m 9 | [0m
-        [1;94m10 | [0m  [1;91m@@index([firstName, lastName])[0m
-        [1;94m   | [0m
+        error: You cannot define an index on fields with native type `LongBlob` of Kingbase MySQL. Please use the `length` argument to the field in the index definition to allow this.
+          -->  schema.prisma:10
+           | 
+         9 | 
+        10 |   @@index([firstName, lastName])
+           | 
     "#]];
 
     expect_error(schema, &expectation);
@@ -452,12 +452,12 @@ fn mediumblob_type_should_fail_on_index() {
     "#};
 
     let expectation = expect![[r#"
-        [1;91merror[0m: [1mYou cannot define an index on fields with native type `MediumBlob` of Kingbase MySQL. Please use the `length` argument to the field in the index definition to allow this.[0m
-          [1;94m-->[0m  [4mschema.prisma:10[0m
-        [1;94m   | [0m
-        [1;94m 9 | [0m
-        [1;94m10 | [0m  [1;91m@@index([firstName, lastName])[0m
-        [1;94m   | [0m
+        error: You cannot define an index on fields with native type `MediumBlob` of Kingbase MySQL. Please use the `length` argument to the field in the index definition to allow this.
+          -->  schema.prisma:10
+           | 
+         9 | 
+        10 |   @@index([firstName, lastName])
+           | 
     "#]];
 
     expect_error(schema, &expectation);
@@ -480,12 +480,12 @@ fn tinyblob_type_should_fail_on_index() {
     "#};
 
     let expectation = expect![[r#"
-        [1;91merror[0m: [1mYou cannot define an index on fields with native type `TinyBlob` of Kingbase MySQL. Please use the `length` argument to the field in the index definition to allow this.[0m
-          [1;94m-->[0m  [4mschema.prisma:10[0m
-        [1;94m   | [0m
-        [1;94m 9 | [0m
-        [1;94m10 | [0m  [1;91m@@index([firstName, lastName])[0m
-        [1;94m   | [0m
+        error: You cannot define an index on fields with native type `TinyBlob` of Kingbase MySQL. Please use the `length` argument to the field in the index definition to allow this.
+          -->  schema.prisma:10
+           | 
+         9 | 
+        10 |   @@index([firstName, lastName])
+           | 
     "#]];
 
     expect_error(schema, &expectation);
@@ -507,12 +507,12 @@ fn text_type_should_fail_on_id() {
     "#};
 
     let expectation = expect![[r#"
-        [1;91merror[0m: [1mNative type `Text` of Kingbase MySQL cannot be used on a field that is `@id` or `@@id`. Please use the `length` argument to the field in the index definition to allow this.[0m
-          [1;94m-->[0m  [4mschema.prisma:9[0m
-        [1;94m   | [0m
-        [1;94m 8 | [0m
-        [1;94m 9 | [0m  [1;91m@@id([firstName, lastName])[0m
-        [1;94m   | [0m
+        error: Native type `Text` of Kingbase MySQL cannot be used on a field that is `@id` or `@@id`. Please use the `length` argument to the field in the index definition to allow this.
+          -->  schema.prisma:9
+           | 
+         8 | 
+         9 |   @@id([firstName, lastName])
+           | 
     "#]];
 
     expect_error(schema, &expectation);
@@ -534,12 +534,12 @@ fn longtext_type_should_fail_on_id() {
     "#};
 
     let expectation = expect![[r#"
-        [1;91merror[0m: [1mNative type `LongText` of Kingbase MySQL cannot be used on a field that is `@id` or `@@id`. Please use the `length` argument to the field in the index definition to allow this.[0m
-          [1;94m-->[0m  [4mschema.prisma:9[0m
-        [1;94m   | [0m
-        [1;94m 8 | [0m
-        [1;94m 9 | [0m  [1;91m@@id([firstName, lastName])[0m
-        [1;94m   | [0m
+        error: Native type `LongText` of Kingbase MySQL cannot be used on a field that is `@id` or `@@id`. Please use the `length` argument to the field in the index definition to allow this.
+          -->  schema.prisma:9
+           | 
+         8 | 
+         9 |   @@id([firstName, lastName])
+           | 
     "#]];
 
     expect_error(schema, &expectation);
@@ -561,12 +561,12 @@ fn mediumtext_type_should_fail_on_id() {
     "#};
 
     let expectation = expect![[r#"
-        [1;91merror[0m: [1mNative type `MediumText` of Kingbase MySQL cannot be used on a field that is `@id` or `@@id`. Please use the `length` argument to the field in the index definition to allow this.[0m
-          [1;94m-->[0m  [4mschema.prisma:9[0m
-        [1;94m   | [0m
-        [1;94m 8 | [0m
-        [1;94m 9 | [0m  [1;91m@@id([firstName, lastName])[0m
-        [1;94m   | [0m
+        error: Native type `MediumText` of Kingbase MySQL cannot be used on a field that is `@id` or `@@id`. Please use the `length` argument to the field in the index definition to allow this.
+          -->  schema.prisma:9
+           | 
+         8 | 
+         9 |   @@id([firstName, lastName])
+           | 
     "#]];
 
     expect_error(schema, &expectation);
@@ -588,12 +588,12 @@ fn tinytext_type_should_fail_on_id() {
     "#};
 
     let expectation = expect![[r#"
-        [1;91merror[0m: [1mNative type `TinyText` of Kingbase MySQL cannot be used on a field that is `@id` or `@@id`. Please use the `length` argument to the field in the index definition to allow this.[0m
-          [1;94m-->[0m  [4mschema.prisma:9[0m
-        [1;94m   | [0m
-        [1;94m 8 | [0m
-        [1;94m 9 | [0m  [1;91m@@id([firstName, lastName])[0m
-        [1;94m   | [0m
+        error: Native type `TinyText` of Kingbase MySQL cannot be used on a field that is `@id` or `@@id`. Please use the `length` argument to the field in the index definition to allow this.
+          -->  schema.prisma:9
+           | 
+         8 | 
+         9 |   @@id([firstName, lastName])
+           | 
     "#]];
 
     expect_error(schema, &expectation);
@@ -615,12 +615,12 @@ fn blob_type_should_fail_on_id() {
     "#};
 
     let expectation = expect![[r#"
-        [1;91merror[0m: [1mNative type `Blob` of Kingbase MySQL cannot be used on a field that is `@id` or `@@id`. Please use the `length` argument to the field in the index definition to allow this.[0m
-          [1;94m-->[0m  [4mschema.prisma:9[0m
-        [1;94m   | [0m
-        [1;94m 8 | [0m
-        [1;94m 9 | [0m  [1;91m@@id([firstName, lastName])[0m
-        [1;94m   | [0m
+        error: Native type `Blob` of Kingbase MySQL cannot be used on a field that is `@id` or `@@id`. Please use the `length` argument to the field in the index definition to allow this.
+          -->  schema.prisma:9
+           | 
+         8 | 
+         9 |   @@id([firstName, lastName])
+           | 
     "#]];
 
     expect_error(schema, &expectation);
@@ -642,12 +642,12 @@ fn longblob_type_should_fail_on_id() {
     "#};
 
     let expectation = expect![[r#"
-        [1;91merror[0m: [1mNative type `LongBlob` of Kingbase MySQL cannot be used on a field that is `@id` or `@@id`. Please use the `length` argument to the field in the index definition to allow this.[0m
-          [1;94m-->[0m  [4mschema.prisma:9[0m
-        [1;94m   | [0m
-        [1;94m 8 | [0m
-        [1;94m 9 | [0m  [1;91m@@id([firstName, lastName])[0m
-        [1;94m   | [0m
+        error: Native type `LongBlob` of Kingbase MySQL cannot be used on a field that is `@id` or `@@id`. Please use the `length` argument to the field in the index definition to allow this.
+          -->  schema.prisma:9
+           | 
+         8 | 
+         9 |   @@id([firstName, lastName])
+           | 
     "#]];
 
     expect_error(schema, &expectation);
@@ -669,12 +669,12 @@ fn mediumblob_type_should_fail_on_id() {
     "#};
 
     let expectation = expect![[r#"
-        [1;91merror[0m: [1mNative type `MediumBlob` of Kingbase MySQL cannot be used on a field that is `@id` or `@@id`. Please use the `length` argument to the field in the index definition to allow this.[0m
-          [1;94m-->[0m  [4mschema.prisma:9[0m
-        [1;94m   | [0m
-        [1;94m 8 | [0m
-        [1;94m 9 | [0m  [1;91m@@id([firstName, lastName])[0m
-        [1;94m   | [0m
+        error: Native type `MediumBlob` of Kingbase MySQL cannot be used on a field that is `@id` or `@@id`. Please use the `length` argument to the field in the index definition to allow this.
+          -->  schema.prisma:9
+           | 
+         8 | 
+         9 |   @@id([firstName, lastName])
+           | 
     "#]];
 
     expect_error(schema, &expectation);
@@ -696,12 +696,12 @@ fn tinyblob_type_should_fail_on_id() {
     "#};
 
     let expectation = expect![[r#"
-        [1;91merror[0m: [1mNative type `TinyBlob` of Kingbase MySQL cannot be used on a field that is `@id` or `@@id`. Please use the `length` argument to the field in the index definition to allow this.[0m
-          [1;94m-->[0m  [4mschema.prisma:9[0m
-        [1;94m   | [0m
-        [1;94m 8 | [0m
-        [1;94m 9 | [0m  [1;91m@@id([firstName, lastName])[0m
-        [1;94m   | [0m
+        error: Native type `TinyBlob` of Kingbase MySQL cannot be used on a field that is `@id` or `@@id`. Please use the `length` argument to the field in the index definition to allow this.
+          -->  schema.prisma:9
+           | 
+         8 | 
+         9 |   @@id([firstName, lastName])
+           | 
     "#]];
 
     expect_error(schema, &expectation);
@@ -819,12 +819,12 @@ fn should_fail_on_argument_for_bit_0_type() {
     "#};
 
     let expectation = expect![[r#"
-        [1;91merror[0m: [1mArgument M is out of range for native type `Bit(0)` of Kingbase MySQL: M can range from 1 to 64.[0m
-          [1;94m-->[0m  [4mschema.prisma:7[0m
-        [1;94m   | [0m
-        [1;94m 6 | [0m  id        Int   @id
-        [1;94m 7 | [0m  firstName Bytes [1;91m@db.Bit(0)[0m
-        [1;94m   | [0m
+        error: Argument M is out of range for native type `Bit(0)` of Kingbase MySQL: M can range from 1 to 64.
+          -->  schema.prisma:7
+           | 
+         6 |   id        Int   @id
+         7 |   firstName Bytes @db.Bit(0)
+           | 
     "#]];
 
     expect_error(schema, &expectation);
@@ -844,12 +844,12 @@ fn should_fail_on_argument_for_bit_65_type() {
     "#};
 
     let expectation = expect![[r#"
-        [1;91merror[0m: [1mArgument M is out of range for native type `Bit(65)` of Kingbase MySQL: M can range from 1 to 64.[0m
-          [1;94m-->[0m  [4mschema.prisma:7[0m
-        [1;94m   | [0m
-        [1;94m 6 | [0m  id        Int   @id
-        [1;94m 7 | [0m  firstName Bytes [1;91m@db.Bit(65)[0m
-        [1;94m   | [0m
+        error: Argument M is out of range for native type `Bit(65)` of Kingbase MySQL: M can range from 1 to 64.
+          -->  schema.prisma:7
+           | 
+         6 |   id        Int   @id
+         7 |   firstName Bytes @db.Bit(65)
+           | 
     "#]];
 
     expect_error(schema, &expectation);
@@ -869,12 +869,12 @@ fn should_only_allow_bit_one_for_booleans() {
     "#};
 
     let expectation = expect![[r#"
-        [1;91merror[0m: [1mArgument M is out of range for native type `Bit(2)` of Kingbase MySQL: only Bit(1) can be used as Boolean.[0m
-          [1;94m-->[0m  [4mschema.prisma:7[0m
-        [1;94m   | [0m
-        [1;94m 6 | [0m  id        Int     @id
-        [1;94m 7 | [0m  firstName Boolean [1;91m@db.Bit(2)[0m
-        [1;94m   | [0m
+        error: Argument M is out of range for native type `Bit(2)` of Kingbase MySQL: only Bit(1) can be used as Boolean.
+          -->  schema.prisma:7
+           | 
+         6 |   id        Int     @id
+         7 |   firstName Boolean @db.Bit(2)
+           | 
     "#]];
 
     expect_error(schema, &expectation);
@@ -894,12 +894,12 @@ fn should_fail_on_argument_out_of_range_for_char_type() {
     "#};
 
     let expectation = expect![[r#"
-        [1;91merror[0m: [1mArgument M is out of range for native type `Char(256)` of Kingbase MySQL: M can range from 0 to 255.[0m
-          [1;94m-->[0m  [4mschema.prisma:7[0m
-        [1;94m   | [0m
-        [1;94m 6 | [0m  id        Int    @id
-        [1;94m 7 | [0m  firstName String [1;91m@db.Char(256)[0m
-        [1;94m   | [0m
+        error: Argument M is out of range for native type `Char(256)` of Kingbase MySQL: M can range from 0 to 255.
+          -->  schema.prisma:7
+           | 
+         6 |   id        Int    @id
+         7 |   firstName String @db.Char(256)
+           | 
     "#]];
 
     expect_error(schema, &expectation);
@@ -919,12 +919,12 @@ fn should_fail_on_argument_out_of_range_for_varchar_type() {
     "#};
 
     let expectation = expect![[r#"
-        [1;91merror[0m: [1mArgument M is out of range for native type `Char(655350)` of Kingbase MySQL: M can range from 0 to 255.[0m
-          [1;94m-->[0m  [4mschema.prisma:7[0m
-        [1;94m   | [0m
-        [1;94m 6 | [0m  id        Int    @id
-        [1;94m 7 | [0m  firstName String [1;91m@db.Char(655350)[0m
-        [1;94m   | [0m
+        error: Argument M is out of range for native type `Char(655350)` of Kingbase MySQL: M can range from 0 to 255.
+          -->  schema.prisma:7
+           | 
+         6 |   id        Int    @id
+         7 |   firstName String @db.Char(655350)
+           | 
     "#]];
 
     expect_error(schema, &expectation);
@@ -944,12 +944,12 @@ fn should_fail_on_argument_out_of_range_for_decimal_type() {
     "#};
 
     let expectation = expect![[r#"
-        [1;91merror[0m: [1mArgument M is out of range for native type `Decimal(66,20)` of Kingbase MySQL: Precision can range from 1 to 65.[0m
-          [1;94m-->[0m  [4mschema.prisma:7[0m
-        [1;94m   | [0m
-        [1;94m 6 | [0m  id        Int     @id
-        [1;94m 7 | [0m  firstName Decimal [1;91m@db.Decimal(66,20)[0m
-        [1;94m   | [0m
+        error: Argument M is out of range for native type `Decimal(66,20)` of Kingbase MySQL: Precision can range from 1 to 65.
+          -->  schema.prisma:7
+           | 
+         6 |   id        Int     @id
+         7 |   firstName Decimal @db.Decimal(66,20)
+           | 
     "#]];
 
     expect_error(schema, &expectation);
@@ -966,12 +966,12 @@ fn should_fail_on_argument_out_of_range_for_decimal_type() {
     "#};
 
     let expectation = expect![[r#"
-        [1;91merror[0m: [1mArgument M is out of range for native type `Decimal(44,33)` of Kingbase MySQL: Scale can range from 0 to 30.[0m
-          [1;94m-->[0m  [4mschema.prisma:7[0m
-        [1;94m   | [0m
-        [1;94m 6 | [0m  id        Int     @id
-        [1;94m 7 | [0m  firstName Decimal [1;91m@db.Decimal(44,33)[0m
-        [1;94m   | [0m
+        error: Argument M is out of range for native type `Decimal(44,33)` of Kingbase MySQL: Scale can range from 0 to 30.
+          -->  schema.prisma:7
+           | 
+         6 |   id        Int     @id
+         7 |   firstName Decimal @db.Decimal(44,33)
+           | 
     "#]];
 
     expect_error(schema, &expectation);
@@ -991,12 +991,12 @@ fn should_fail_on_native_type_decimal_when_scale_is_bigger_than_precision() {
     "#};
 
     let expectation = expect![[r#"
-        [1;91merror[0m: [1mThe scale must not be larger than the precision for the Decimal(2,4) native type in Kingbase MySQL.[0m
-          [1;94m-->[0m  [4mschema.prisma:7[0m
-        [1;94m   | [0m
-        [1;94m 6 | [0m    id     Int  @id
-        [1;94m 7 | [0m    dec Decimal [1;91m@db.Decimal(2, 4)[0m
-        [1;94m   | [0m
+        error: The scale must not be larger than the precision for the Decimal(2,4) native type in Kingbase MySQL.
+          -->  schema.prisma:7
+           | 
+         6 |     id     Int  @id
+         7 |     dec Decimal @db.Decimal(2, 4)
+           | 
     "#]];
 
     expect_error(dml, &expectation);
@@ -1016,12 +1016,12 @@ fn should_fail_on_incompatible_scalar_type_with_tiny_int() {
     "#;
 
     let expectation = expect![[r#"
-        [1;91merror[0m: [1mNative type TinyInt is not compatible with declared field type DateTime, expected field type Boolean or Int.[0m
-          [1;94m-->[0m  [4mschema.prisma:8[0m
-        [1;94m   | [0m
-        [1;94m 7 | [0m          id     Int      @id
-        [1;94m 8 | [0m          bigInt DateTime [1;91m@db.TinyInt[0m
-        [1;94m   | [0m
+        error: Native type TinyInt is not compatible with declared field type DateTime, expected field type Boolean or Int.
+          -->  schema.prisma:8
+           | 
+         7 |           id     Int      @id
+         8 |           bigInt DateTime @db.TinyInt
+           | 
     "#]];
 
     expect_error(dml, &expectation);

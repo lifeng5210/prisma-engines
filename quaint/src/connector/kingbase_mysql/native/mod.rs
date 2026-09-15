@@ -202,7 +202,7 @@ mod tests {
     };
 
     #[tokio::test]
-    async fn describe_query_preserves_a_double_parameter_type() {
+    async fn describe_query_reports_text_for_a_double_parameter() {
         let connection = Quaint::new(CONN_STR.as_str()).await.unwrap();
 
         connection
@@ -216,7 +216,10 @@ mod tests {
             .unwrap();
 
         assert_eq!(described.parameters.len(), 1);
-        assert_eq!(described.parameters[0].typ, ColumnType::Double);
+        // Kingbase MySQL reports `?` as text in prepared-statement metadata even
+        // when it is compared to a DOUBLE column. Typed SQL callers can declare
+        // the intended parameter type explicitly with `@param {Float}`.
+        assert_eq!(described.parameters[0].typ, ColumnType::Text);
     }
 }
 
