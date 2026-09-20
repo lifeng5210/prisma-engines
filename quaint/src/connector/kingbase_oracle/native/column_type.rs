@@ -5,7 +5,7 @@ use kingbase_tokio_postgres::types::Type;
 pub(crate) fn column_type_from_type(typ: &Type) -> ColumnType {
     if typ == &Type::BOOL {
         ColumnType::Boolean
-    } else if matches!(typ, &Type::INT2 | &Type::INT4 | &Type::ORACLE_TINYINT) {
+    } else if matches!(typ, &Type::INT2 | &Type::INT4) {
         ColumnType::Int32
     } else if matches!(typ, &Type::INT8 | &Type::OID) {
         ColumnType::Int64
@@ -58,7 +58,6 @@ pub(crate) fn is_oracle_text_type(typ: &Type) -> bool {
             | &Type::BPCHAR
             | &Type::NAME
             | &Type::UNKNOWN
-            | &Type::ORACLE_ROWID
             | &Type::ORACLE_UROWID
             | &Type::ORACLE_CLOB
             | &Type::ORACLE_NCLOB
@@ -77,7 +76,6 @@ mod tests {
     #[test]
     fn maps_oracle_mode_scalar_oids() {
         assert_eq!(column_type_from_type(&Type::NUMERIC), ColumnType::Numeric);
-        assert_eq!(column_type_from_type(&Type::ORACLE_TINYINT), ColumnType::Int32);
         assert_eq!(column_type_from_type(&Type::ORACLE_BLOB), ColumnType::Bytes);
         assert_eq!(column_type_from_type(&Type::ORACLE_CLOB), ColumnType::Text);
         assert_eq!(column_type_from_type(&Type::ORACLE_NCLOB), ColumnType::Text);
@@ -88,7 +86,6 @@ mod tests {
     #[test]
     fn recognises_oracle_character_types() {
         assert!(is_oracle_text_type(&Type::ORACLE_UROWID));
-        assert!(is_oracle_text_type(&Type::ORACLE_ROWID));
         assert!(is_oracle_text_type(&Type::ORACLE_BPCHARBYTE));
         assert!(is_oracle_text_type(&Type::ORACLE_VARCHARBYTE));
         assert!(!is_oracle_text_type(&Type::ORACLE_BLOB));

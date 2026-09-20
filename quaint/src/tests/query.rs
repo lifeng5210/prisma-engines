@@ -129,22 +129,6 @@ async fn kingbase_oracle_transactions_with_supported_isolation_levels(api: &mut 
     Ok(())
 }
 
-#[cfg(feature = "kingbase-oracle-native")]
-#[test_each_connector(tags("kingbase-oracle"))]
-async fn kingbase_oracle_rowid_is_returned_as_text(api: &mut dyn TestApi) -> crate::Result<()> {
-    let result = api.conn().query_raw("SELECT nextrowid() AS \"rowId\"", &[]).await?;
-
-    assert_eq!(result.types, vec![crate::connector::ColumnType::Text]);
-
-    let row = result.into_single()?;
-    let row_id = row["rowId"].as_str().expect("ROWID must be decoded as text");
-
-    assert_eq!(row_id.len(), 23);
-    assert!(row_id.is_ascii());
-
-    Ok(())
-}
-
 #[test_each_connector(tags("mssql"))]
 async fn mssql_transaction_isolation_level(api: &mut dyn TestApi) -> crate::Result<()> {
     let table = api.create_temp_table("id int, value int").await?;
