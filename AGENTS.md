@@ -33,6 +33,25 @@ Supporting infra:
 ---
 
 ## 3. Current Domain Knowledge
+### Kingbase MySQL Compatibility
+- Kingbase's MySQL compatibility mode should follow the existing MySQL connector's type semantics and test expectations. The underlying database driver is different, but that alone must not change the exposed `ColumnType` behavior; only genuine Kingbase wire-codec differences should be handled in the Kingbase connector.
+- Before making a Kingbase compatibility change, verify the behavior against Kingbase's official documentation or the installed Kingbase extension definitions. Use that evidence to distinguish a SQL dialect difference, a server capability difference, and a wire-codec difference.
+- The Kingbase MySQL compatibility manual documents `information_schema` views for tables, columns, views, key usage, referential constraints, and routines. Treat those as separate describer contracts; metadata definition text is database-native and must not be asserted as byte-for-byte MySQL output.
+- `information_schema.referential_constraints.delete_rule` and `.update_rule` are documented as enum columns and arrive through Quaint as `ValueType::Enum`, not `Text`. In Kingbase-only describer SQL, cast them to `TEXT` before using the shared string-to-`ForeignKeyAction` mapping.
+- Kingbase MySQL documents `INT` and `INTEGER` as aliases for the MySQL `INT` type. Its catalog can report the latter, so normalize both to `ColumnTypeFamily::Int` / `KingbaseMySqlType::Int` in the Kingbase-only describer.
+- Unlike MySQL/InnoDB, Kingbase does not automatically create an index on foreign-key columns. Describer tests must not expect non-unique child-column indexes unless the test DDL creates them explicitly; preserve the actual catalog rather than synthesizing MySQL-only indexes.
+- Kingbase's catalog can report a MySQL `DECIMAL` column as `number`, with `numeric(...)` in the full type; normalize `decimal`, `numeric`, and `number` to the Kingbase MySQL decimal family in the describer.
+- For Kingbase MySQL `BIT(1)`, `information_schema` may omit `numeric_precision`; determine the width from `full_data_type` before falling back to metadata, so `BIT(1)` remains `Boolean` and `BIT(n > 1)` is `Binary`.
+- Kingbase may expose extension-owned views in the same schema as user views (for example `sys_stat_statements`). `pg_depend.deptype = 'e'` denotes an extension member in Kingbase's catalog, so the Kingbase MySQL describer filters those rows from user-view introspection.
+- Kingbase MySQL does not accept MySQL `FULLTEXT INDEX` or `MATCH ... AGAINST` SQL. Render Prisma `@@fulltext` as a standalone GIN index over immutable `to_tsvector('simple', textcat(COALESCE(...), ...))`, identify that exact expression during introspection, and rewrite Query Compiler `MATCH ... AGAINST (... IN BOOLEAN MODE)` output to `websearch_to_tsquery('simple', ...)` / `ts_rank`; unlike `to_tsquery`, it accepts ordinary multi-word MySQL searches and `+` / `-` operators. In MySQL mode `||` is logical OR rather than string concatenation, so never use it in the `to_tsvector` document expression.
+- Kingbase MySQL accepts `sslmode` through the PostgreSQL-wire driver. Parse Quaint's `sslaccept`: the default remains `accept_invalid_certs` for parity with MySQL/PostgreSQL, while `sslaccept=strict` enables certificate and hostname validation. `sslcert`, `sslidentity`, and `sslpassword` configure the native TLS root certificate or client identity.
+- KingbaseES defaults to TCP port 54321, whereas `kingbase_tokio_postgres` inherits PostgreSQL's 5432 fallback. When a Kingbase URL omits its port, insert 54321 into the driver URL before parsing it into `Config`; adding a port afterwards merely appends a second value, leaving 5432 selected for the first host.
+- Kingbase MySQL SQL rendering shares `SqlFamily::Mysql`, but its PostgreSQL-wire prepared-statement parameter count is a signed 16-bit value. Clamp both native and external Kingbase connection info to 32,767 bind values so batch planning never emits an unexecutable statement.
+
+### Kingbase Oracle Compatibility
+- Oracle `TINYINT` has OID 8100 and is a signed 8-bit wire value. PSL, rendering, migration, and introspection support it as `Int @db.TinyInt`; the Node adapter converts the driver's text result to a number. Do not add native Quaint raw-result support until the Kingbase Rust driver supplies an `ORACLE_TINYINT` codec.
+- Oracle `ROWID` has OID 6123, but its binary wire representation is a compact internal value rather than UTF-8. Do not expose it through native Quaint raw results until the Kingbase Rust driver can request its textual representation or decode the wire value; the Node adapter's public text form is 23 characters.
+
 ### Datasource URLs
 - PSL rejects `directUrl`/`shadowDatabaseUrl` with targeted diagnostics (`DatamodelError::new_datasource_*_removed_error`).
 - Parser still records `url` (and uses span for override fallbacks).
@@ -124,6 +143,8 @@ Ensure diffs make sense and rerun without `UPDATE_EXPECT` to confirm.
 ---
 
 ## 6. Common Gotchas
+- Quaint's `quaint-test-setup` dev-dependency enables `quaint/all-native`, so `--no-default-features --features kingbase-mysql-native` does not prevent other native connector test wrappers from compiling. Cargo test filters are substring matches: `on_kingbase_mysql` can also match `test_type_json_kingbase_mysql` because `json_kingbase_mysql` contains that substring. Use a fully qualified generated test name (with `--exact`) or add an explicit `--skip test_type_` when selecting Kingbase query wrappers.
+- Kingbase MySQL `JSON_EXTRACT` path arguments are inferred as the binary `jsonpath` type. Binding the MySQL text payload directly makes the first byte (`$`, 36) look like a JSONPATH version and fails with `unsupported jsonpath version number: 36`; build Kingbase queries with JSONPATH metadata and use the driver's `MySqlJsonPath` codec.
 - Running prisma-fmt tests after updating diagnostics **without** refreshing expect files will cause failures. Always run with `UPDATE_EXPECT=1`.
 - Some fixtures expect **CRLF** endings (`create_missing_block_composite_type_crlf`). Avoid rewriting line endings when not necessary. If Git warns, restore file from `HEAD`.
 - Integration tests bail with “Missing TEST_DATABASE_URL”. Set env vars or skip running them locally.
@@ -174,5 +195,131 @@ Prefer using Makefile targets that take care of setting up the environment corre
 
 ---
 
-**When modifying anything involving diagnostics or fixtures:** run relevant tests, refresh expectations, and ensure Git diffs are readable (no accidental CRLF/encoding swaps). Keep this file updated whenever we discover new traps.***
-s, and ensure Git diffs are readable (no accidental CRLF/encoding swaps). Keep this file updated whenever we discover new traps.***
+**When modifying anything involving diagnostics or fixtures:** run relevant tests, refresh expectations, and ensure Git diffs are readable (no accidental CRLF/encoding swaps). Keep this file updated whenever we discover new traps.
+
+### Kingbase MySQL migration-test notes
+
+- `sql-migration-tests` must create Kingbase MySQL databases with
+  `TestApiArgs::create_kingbase_mysql_database()` and construct the engine with
+  `SqlSchemaConnector::new_kingbase_mysql()`. It cannot use the MySQL test
+  database helper or connector constructor.
+- A Kingbase renderer cannot wholly delegate `MysqlRenderer`: MySQL's create
+  table SQL includes `DEFAULT CHARACTER SET utf8mb4 COLLATE ...`, which
+  Kingbase rejects, and MySQL renderer downcasts native types to `MySqlType`.
+  Render tables/columns/alterations with `KingbaseMySqlType` instead.
+- Kingbase accepts MySQL-compatible integer type names but not the `UNSIGNED`
+  modifier. Render Kingbase unsigned native types as their signed SQL names and
+  make the schema differ consider signed/unsigned pairs equivalent, otherwise
+  every schema push reports drift after introspection.
+- The generic `apply_migrations::migrations_should_fail_when_the_script_is_invalid`
+  test also runs on Kingbase. Kingbase returns PostgreSQL SQLSTATE `42601`, but
+  its parser message is localized; assert the stable `ERROR:` prefix rather than
+  an English error string.
+- `sql-migration-tests` now has 20 dedicated `migrations::kingbase_mysql` tests,
+  plus Kingbase branches in `apply_migrations`, `create_migration`, `errors`,
+  and `existing_data`. The full `migration_tests` binary passes 1034 tests
+  (1 intentionally ignored) against the Kingbase URL.
+- Kingbase information_schema adds `::varchar`/`::numeric` casts to literal
+  defaults; the Kingbase describer strips those catalog decorations. A reported
+  datetime precision of `0` is treated as equivalent to unspecified precision.
+- Kingbase primary-key constraints are physically named `<table>_pkey`, while
+  the MySQL-compatible describer keeps the primary-key name empty. The Kingbase
+  renderer falls back to `<table>_pkey` when dropping such a primary key.
+- MySQL-only migration scenarios that Kingbase cannot express (descending
+  indexes, selected schema-filter fixtures, named-PK rebuilds and some identity
+  rebuilds) are explicitly excluded with `KingbaseMysql`; they are not silently
+  reported as passing.
+
+### Kingbase Oracle PSL notes
+
+- Kingbase Oracle mode must be verified against both the Oracle compatibility baseline and the
+  actual Kingbase instance. The tested V009R001C010 instance accepts `VARCHAR2(4000)` with character
+  length semantics, while Kingbase's `VARCHAR2(*)` is a non-Oracle extension and is not the default.
+- The server warns and normalizes `NUMBER(2,3)` to `NUMBER(3,3)`, and warns and reduces
+  `TIMESTAMP(9)` to precision 6. PSL rejects scale greater than precision and timestamp precision
+  greater than 6 to prevent schema drift.
+- The default Oracle-mode installation exposes `kdb_oracle_datatype` but does not install the
+  optional `kdb_raw` extension. Do not advertise `RAW` or `LONG RAW` as built-in native types until
+  extension configuration and prerequisite validation are implemented.
+- On the tested instance, `BLOB`, `CLOB`, and `NCLOB` can back unique constraints, but JSON and XML
+  have no default B-tree operator class. Key validation must also resolve the default `Json -> JSON`
+  mapping rather than checking only explicit `@db.Json` annotations.
+- Keep `kingbase-oracle://` as a distinct public URL scheme and normalize it to the driver's
+  `kingbase://` scheme only inside the URL-to-driver configuration boundary. The wire protocol does
+  not justify reporting the connection as PostgreSQL or Kingbase MySQL.
+- The tested Oracle-mode instance uses `public` as `current_schema()` and listens on a locally
+  configured port 54325. The connector default remains Kingbase's 54321; deployment-specific ports
+  must stay explicit in the URL. New Oracle-mode TLS URLs default to `sslaccept=strict`.
+- A new `SqlFamily` variant must compile both as a standalone Quaint feature and under Cargo feature
+  unification. Downstream exhaustive matches must return an explicit unsupported-family error until
+  the dialect visitor exists; never route Oracle-mode SQL through the PostgreSQL visitor merely to compile.
+- Match Kingbase URL schemes exactly. A broad `starts_with("kingbase")` sends `kingbase-oracle://`
+  through the MySQL-mode connector. URL wrapper `Debug` implementations must omit the database password
+  and keep TLS identity passwords hidden.
+- Keep Kingbase Oracle native conversion and error handling under `connector/kingbase_oracle`; do not move
+  the established `connector/kingbase_mysql/native` files into a shared directory merely because both modes
+  use the same wire driver. Protocol reuse does not imply shared type semantics.
+- Kingbase Oracle scalar binds use Oracle-compatible target types (`NUMBER`, `VARCHAR`, `BLOB`, and temporal
+  types). The tested instance accepts PostgreSQL-wire `$1` placeholders. Cover single-connection and pooled
+  behavior through the integration-test matrix; do not add connector-local `#[ignore]` database tests that are
+  skipped by the normal test command.
+- Kingbase Oracle AST SQL is rendered by the independent `visitor::KingbaseOracle`, not by the PostgreSQL visitor.
+  It uses `OFFSET … ROWS FETCH NEXT … ROWS ONLY`, `DEFAULT VALUES`, `RETURNING`, `NUMBER`-compatible Boolean
+  literals (`1`/`0`) and `VARCHAR2` stringification. Oracle SQL/JSON functions operate on `JSONB` in the tested
+  instance even when the public column type is `JSON`; the visitor must cast JSON expressions to `JSONB`, including
+  both operands of JSON equality/inequality, bind JSON values as `Type::JSONB`, and use
+  `JSON_VALUE` / `JSON_QUERY` / `JSON_ARRAYAGG` / `JSON_OBJECT` with JSONB results. `JSON_VALUE` only handles
+  scalar values: `JsonUnquote` must use the PostgreSQL-compatible `#>> ARRAY[]::text[]` operation on a JSONB cast,
+  so object and array values retain their JSON text while JSON strings are unquoted.
+  `TimestampTz` and `TimestampLocalTz` must bind as `Type::TIMESTAMPTZ`, not plain `TIMESTAMP`, so non-UTC sessions
+  preserve the instant. Oracle `MERGE` now implements `OnConflict::DoNothing` and an `OnConflict::Update` that does
+  not modify its conflict columns. Kingbase rejects `MERGE ... RETURNING` and updating a column named by the `ON`
+  condition, so those cases must fail before SQL is sent. SQL array parameters remain explicit unsupported errors:
+  although the server accepts PostgreSQL array syntax, the Oracle schema describer and the Oracle visitor do not
+  implement Prisma scalar-list schema or parameter semantics. Native full-text filtering uses the verified
+  `to_tsvector(concat_ws(...)) @@ to_tsquery(...)` / `ts_rank(...)` form without a Prisma-managed full-text index;
+  do not advertise `FullTextIndex` until its fixed text-configuration lifecycle is implemented.
+- Keep real-connection Oracle type coverage in `quaint/src/tests/types/kingbase_oracle.rs`; do not reuse the
+  MySQL or PostgreSQL type suites. The Oracle-mode test API creates an `INTEGER GENERATED BY DEFAULT AS IDENTITY`
+  key because Kingbase rejects identity declarations on `NUMBER`; `NCHAR(n)` values are fixed-width and return
+  server-added trailing spaces, which the tests must assert as an input/output conversion.
+- Prisma `Int`/`BigInt` fields in Oracle mode default to `NUMBER(10,0)`/`NUMBER(19,0)`. Do not render their
+  `autoincrement()` defaults as `SERIAL`/`BIGSERIAL`: those aliases create PostgreSQL integer types and make a
+  normal Oracle `NUMBER` relation scalar incompatible with its referenced key. Keep the `NUMBER` type and create
+  an explicit owned sequence plus `nextval()` default; migration coverage must include both Int and BigInt
+  autoincrementing primary keys referenced by foreign keys.
+- The tested Oracle-mode server accepts `FLOAT(p)` only for `1 <= p <= 53`, despite Oracle documentation commonly
+  allowing 126. PSL must reject `Float(54+)` so migrations cannot generate server-rejected DDL. `String @db.Uuid`
+  values must bind as PostgreSQL-wire `UUID` after parsing the string, not as `VARCHAR`. `TIMESTAMP WITH LOCAL TIME
+  ZONE` is returned as wire `TIMESTAMP` (OID 1114) localized to the session time zone; every Oracle connection must
+  initialize `SET TIME ZONE 'UTC'` before decoding it as a Prisma UTC DateTime.
+- Register Kingbase Oracle in `quaint-test-setup::connector_names()` so compatible `quaint/src/tests/query.rs` and
+  `query/error.rs` cases run through `#[test_each_connector]`. Do not register it by pretending it has every generic
+  capability: Oracle `MERGE` covers the shared `ON CONFLICT DO NOTHING` cases and safe non-key update cases, while
+  `MERGE RETURNING` and updates of conflict columns have dedicated rejection cases; SQL arrays remain explicitly
+  rejected, while full-text query filters are supported without a Prisma-managed full-text index. Oracle supports
+  only `READ COMMITTED` and `SERIALIZABLE` transaction isolation
+  levels. Its `NUMBER` CTE literals decode as `Numeric`, `REAL` division as `Float`, and multi-expression
+  concatenation must render with `||`, not the unavailable `sys.concat` function.
+- The local Kingbase MySQL test instance on port 54321 must use the `prisma` database for the full Quaint matrix.
+  That database has the MySQL-compatible JSON functions used by the visitor and passes all 147 Kingbase MySQL tests;
+  `test_connect` on the same instance lacks `JSON_EXTRACT`, `sys.JSON_CONTAINS`, and the required JSON path operator,
+  causing 11 environment-specific JSON failures with the same code.
+- `sql-schema-describer` integration tests share one Test API that compiles the SQLite in-memory branch even when a
+  test filter selects Kingbase Oracle. Run its Oracle describer suite with `--all-features`; enabling only
+  `kingbase-oracle-native` leaves `Quaint::new_in_memory()` unavailable at compile time.
+- In the tested Kingbase Oracle catalog, `NCHAR`/`NVARCHAR2` are exposed as `bpchar`/`varchar`, and
+  `TIMESTAMP WITH LOCAL TIME ZONE` as `timestamp`. The describer must therefore emit the canonical
+  `Char`/`VarChar2`/`Timestamp` forms rather than infer source spellings the catalog no longer retains.
+- `sql-introspection-tests` must create an isolated Oracle database with
+  `TestApiArgs::create_kingbase_oracle_database()` and construct `SqlSchemaConnector::new_kingbase_oracle()`.
+  `barrel` has no Oracle SQL variant, so Kingbase Oracle runs only explicitly tagged
+  `tags(KingbaseOracle)` tests whose DDL and expected PSL have been verified against Oracle mode; do not run
+  generic Barrel-based suites by pretending they are PostgreSQL tests.
+- Kingbase Oracle's PostgreSQL-compatible catalog can expose extension-owned views (for example
+  `sys_stat_statements`). Filter `pg_depend.deptype = 'e'` view members before rendering Prisma views, so
+  `db pull` returns user views only.
+- Kingbase Oracle schema calculation creates Prisma implicit many-to-many join tables with a primary key on
+  `(A, B)`. Its introspection flavour must return `true` from `uses_pk_in_m2m_join_tables()`; otherwise a
+  `"_ModelAToModelB"` table is incorrectly emitted as an explicit model instead of being restored as an
+  implicit many-to-many relation.

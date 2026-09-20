@@ -9,6 +9,15 @@ use std::str::FromStr;
 
 use crate::bigdecimal::BigDecimal;
 
+test_type!(tinyint(
+    kingbase_oracle,
+    "TINYINT",
+    ColumnType::Int32,
+    Value::null_int32(),
+    Value::int32(-128),
+    Value::int32(127)
+));
+
 test_type!(number_integer(
     kingbase_oracle,
     "NUMBER(10,0)",

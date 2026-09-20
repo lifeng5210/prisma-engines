@@ -46,9 +46,9 @@ impl SqlSchemaCalculatorFlavour for KingbaseOracleSchemaCalculatorFlavour {
     }
 
     fn column_default_value_for_autoincrement(&self) -> Option<sql::DefaultValue> {
-        // The renderer emits SERIAL/BIGSERIAL for supported Prisma integer
-        // fields. Kingbase records their implicit sequences as nextval()
-        // defaults in its PostgreSQL-compatible catalog.
+        // The renderer keeps the Oracle NUMBER type and creates an explicit
+        // sequence. Kingbase records nextval() defaults in its
+        // PostgreSQL-compatible catalog.
         Some(sql::DefaultValue::sequence(""))
     }
 

@@ -141,7 +141,7 @@ impl KingbaseOracle {
         let converted = conversion::convert_params(params);
         let parameter_refs = conversion::as_params(&converted);
         let mut rows = Box::pin(
-            self.perform_io(self.client.query_raw(&statement, parameter_refs))
+            self.perform_io(self.client.query_text_raw(&statement, parameter_refs))
                 .await?,
         );
 
@@ -204,6 +204,15 @@ fn convert_row(row: &Row) -> crate::Result<Vec<Value<'static>>> {
             ValueType::Int32(value.map(i32::from)).into()
         } else if typ == &Type::INT4 {
             ValueType::Int32(driver_result(row.try_get(index))?).into()
+        } else if typ == &Type::ORACLE_TINYINT {
+            let value: Option<String> = driver_result(row.try_get(index))?;
+            let value = value.map(|value| value.parse::<i32>()).transpose().map_err(|error| {
+                Error::builder(ErrorKind::ConversionError(
+                    format!("Failed to decode Oracle TINYINT value: {error}").into(),
+                ))
+                .build()
+            })?;
+            ValueType::Int32(value).into()
         } else if typ == &Type::INT8 {
             ValueType::Int64(driver_result(row.try_get(index))?).into()
         } else if typ == &Type::OID {

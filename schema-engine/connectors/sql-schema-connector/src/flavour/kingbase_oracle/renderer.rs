@@ -110,7 +110,7 @@ impl SqlRenderer for KingbaseOracleRenderer {
                 }
                 TableChange::AddColumn { column_id, .. } => {
                     let column = tables.next.walk(*column_id);
-                    statements.push(format!("ALTER TABLE {table} ADD ({})", render_column(column)));
+                    statements.extend(render_add_column(&table, column));
                 }
                 TableChange::DropColumn { column_id } => {
                     let column = tables.previous.walk(*column_id);
@@ -126,7 +126,7 @@ impl SqlRenderer for KingbaseOracleRenderer {
                         "ALTER TABLE {table} DROP COLUMN {}",
                         self.quote(columns.previous.name())
                     ));
-                    statements.push(format!("ALTER TABLE {table} ADD ({})", render_column(columns.next)));
+                    statements.extend(render_add_column(&table, columns.next));
                 }
             }
         }
@@ -169,21 +169,11 @@ impl SqlRenderer for KingbaseOracleRenderer {
     }
 
     fn render_create_table(&self, table: TableWalker<'_>) -> String {
-        self.render_create_table_as(table, quoted_table(table))
+        render_create_table_with_sequences(table, quoted_table(table), table.name())
     }
 
     fn render_create_table_as(&self, table: TableWalker<'_>, table_name: QuotedWithPrefix<&str>) -> String {
-        let mut definitions = table.columns().map(render_column).collect::<Vec<_>>();
-
-        if let Some(primary_key) = table.primary_key() {
-            let columns = primary_key.columns().map(|column| self.quote(column.name())).join(", ");
-            definitions.push(format!(
-                "CONSTRAINT {} PRIMARY KEY ({columns})",
-                self.quote(primary_key.name())
-            ));
-        }
-
-        format!("CREATE TABLE {table_name} (\n    {}\n)", definitions.join(",\n    "))
+        render_create_table_with_sequences(table, table_name, table.name())
     }
 
     fn render_drop_and_recreate_index(&self, indexes: MigrationPair<IndexWalker<'_>>) -> Vec<String> {
@@ -218,7 +208,11 @@ impl SqlRenderer for KingbaseOracleRenderer {
             let tables = schemas.walk(redefine_table.table_ids);
             let temporary_name = format!("_prisma_new_{}", tables.next.name());
             let temporary_table = QuotedWithPrefix::pg_new(tables.next.explicit_namespace(), temporary_name.as_str());
-            statements.push(self.render_create_table_as(tables.next, temporary_table));
+            statements.push(render_create_table_with_sequences(
+                tables.next,
+                temporary_table,
+                &temporary_name,
+            ));
 
             let columns = redefine_table
                 .column_pairs
@@ -338,7 +332,65 @@ fn render_alter_column(
     statements
 }
 
-fn render_column(column: TableColumnWalker<'_>) -> String {
+fn render_create_table_with_sequences(
+    table: TableWalker<'_>,
+    table_name: QuotedWithPrefix<&str>,
+    sequence_table_name: &str,
+) -> String {
+    let mut definitions = table
+        .columns()
+        .map(|column| render_column(column, sequence_table_name))
+        .collect::<Vec<_>>();
+
+    if let Some(primary_key) = table.primary_key() {
+        let columns = primary_key
+            .columns()
+            .map(|column| Quoted::postgres_ident(column.name()))
+            .join(", ");
+        definitions.push(format!(
+            "CONSTRAINT {} PRIMARY KEY ({columns})",
+            Quoted::postgres_ident(primary_key.name())
+        ));
+    }
+
+    let create_table = format!("CREATE TABLE {table_name} (\n    {}\n)", definitions.join(",\n    "));
+    let mut statements = table
+        .columns()
+        .filter(|column| column.is_autoincrement())
+        .map(|column| render_create_sequence(column, sequence_table_name))
+        .collect::<Vec<_>>();
+
+    statements.push(create_table);
+    statements.extend(
+        table
+            .columns()
+            .filter(|column| column.is_autoincrement())
+            .map(|column| render_own_sequence(column, &table_name, sequence_table_name)),
+    );
+
+    statements.join(";\n")
+}
+
+fn render_add_column(table: &QuotedWithPrefix<&str>, column: TableColumnWalker<'_>) -> Vec<String> {
+    let mut statements = Vec::new();
+
+    if column.is_autoincrement() {
+        statements.push(render_create_sequence(column, column.table().name()));
+    }
+
+    statements.push(format!(
+        "ALTER TABLE {table} ADD ({})",
+        render_column(column, column.table().name())
+    ));
+
+    if column.is_autoincrement() {
+        statements.push(render_own_sequence(column, table, column.table().name()));
+    }
+
+    statements
+}
+
+fn render_column(column: TableColumnWalker<'_>, sequence_table_name: &str) -> String {
     let mut output = format!(
         "{} {}",
         Quoted::postgres_ident(column.name()),
@@ -349,7 +401,10 @@ fn render_column(column: TableColumnWalker<'_>) -> String {
         output.push_str(" NOT NULL");
     }
 
-    if let Some(default) = column
+    if column.is_autoincrement() {
+        let sequence = quoted_sequence(column, sequence_table_name);
+        write!(output, " DEFAULT nextval({})", Quoted::postgres_string(&sequence)).unwrap();
+    } else if let Some(default) = column
         .default()
         .filter(|default| !matches!(default.kind(), DefaultKind::DbGenerated(None)))
         && !matches!(default.kind(), DefaultKind::Sequence(_))
@@ -375,14 +430,6 @@ fn render_column_type(column: TableColumnWalker<'_>) -> Cow<'static, str> {
     let native_type = column
         .column_native_type::<KingbaseOracleType>()
         .expect("missing Kingbase Oracle native type in renderer");
-
-    if column.is_autoincrement() {
-        return match native_type {
-            KingbaseOracleType::Number(KingbaseOracleNumberArguments::Precision(19))
-            | KingbaseOracleType::Number(KingbaseOracleNumberArguments::PrecisionAndScale(19, 0)) => "BIGSERIAL".into(),
-            _ => "SERIAL".into(),
-        };
-    }
 
     optional_argument_type(native_type)
 }
@@ -472,6 +519,27 @@ fn quoted_index(index: IndexWalker<'_>) -> QuotedWithPrefix<&str> {
 
 fn sequence_name(table_name: &str, column_name: &str) -> String {
     format!("{table_name}_{column_name}_seq").to_lowercase()
+}
+
+fn quoted_sequence(column: TableColumnWalker<'_>, table_name: &str) -> String {
+    let sequence_name = sequence_name(table_name, column.name());
+    QuotedWithPrefix::pg_new(column.table().explicit_namespace(), &sequence_name).to_string()
+}
+
+fn render_create_sequence(column: TableColumnWalker<'_>, table_name: &str) -> String {
+    format!("CREATE SEQUENCE {}", quoted_sequence(column, table_name))
+}
+
+fn render_own_sequence(
+    column: TableColumnWalker<'_>,
+    table_name: &QuotedWithPrefix<&str>,
+    sequence_table_name: &str,
+) -> String {
+    format!(
+        "ALTER SEQUENCE {} OWNED BY {table_name}.{}",
+        quoted_sequence(column, sequence_table_name),
+        Quoted::postgres_ident(column.name())
+    )
 }
 
 #[cfg(test)]

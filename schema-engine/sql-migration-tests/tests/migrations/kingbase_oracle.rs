@@ -234,13 +234,73 @@ fn oracle_autoincrement_columns_round_trip_through_schema_push(api: TestApi) {
     });
 
     api.insert("Event").value("name", "created").result_raw();
-    api.dump_table("Event")
-        .assert_single_row(|row| row.assert_int_value("id", 1));
+    api.query_raw(r#"SELECT CAST("id" AS VARCHAR2(32)) AS "id" FROM "Event""#, &[])
+        .assert_single_row(|row| row.assert_text_value("id", "1"));
 
     api.schema_push_w_datasource(schema)
         .send()
         .assert_green()
         .assert_no_steps();
+}
+
+#[test_connector(tags(KingbaseOracle))]
+fn oracle_autoincrement_primary_keys_can_be_referenced_by_foreign_keys(api: TestApi) {
+    let migrations_directory = api.create_migrations_directory();
+    let schema = api.datamodel_with_provider(
+        r#"
+            model IntParent {
+                id       Int        @id @default(autoincrement())
+                children IntChild[]
+            }
+
+            model IntChild {
+                id       Int       @id @default(autoincrement())
+                parentId Int
+                parent   IntParent @relation(fields: [parentId], references: [id])
+            }
+
+            model BigIntParent {
+                id       BigInt        @id @default(autoincrement())
+                children BigIntChild[]
+            }
+
+            model BigIntChild {
+                id       BigInt       @id @default(autoincrement())
+                parentId BigInt
+                parent   BigIntParent @relation(fields: [parentId], references: [id])
+            }
+        "#,
+    );
+
+    api.create_migration("init", &schema, &migrations_directory).send_sync();
+    api.apply_migrations(&migrations_directory)
+        .send_sync()
+        .assert_applied_migrations(&["init"]);
+
+    api.assert_schema()
+        .assert_table("IntParent", |table| {
+            table
+                .assert_column("id", |column| column.assert_type_family(ColumnTypeFamily::Int))
+                .assert_pk(|pk| pk.assert_columns(&["id"]).assert_has_autoincrement())
+        })
+        .assert_table("IntChild", |table| table.assert_foreign_keys_count(1))
+        .assert_table("BigIntParent", |table| {
+            table
+                .assert_column("id", |column| column.assert_type_family(ColumnTypeFamily::BigInt))
+                .assert_pk(|pk| pk.assert_columns(&["id"]).assert_has_autoincrement())
+        })
+        .assert_table("BigIntChild", |table| table.assert_foreign_keys_count(1));
+
+    api.apply_migrations(&migrations_directory)
+        .send_sync()
+        .assert_applied_migrations(&[]);
+
+    assert!(
+        api.diagnose_migration_history(&migrations_directory)
+            .send_sync()
+            .into_output()
+            .is_empty()
+    );
 }
 
 #[test_connector(tags(KingbaseOracle))]
