@@ -157,7 +157,9 @@ fn diagnose_migration_history_without_opt_in_to_shadow_database_does_not_calcula
     assert!(error_in_unapplied_migration.is_none());
 }
 
-#[test_connector(exclude(Postgres, Mssql, KingbaseMysql))]
+// Requires nontransactional partial DDL. Oracle's atomic failure has its own
+// migration-history regression test, as with PostgreSQL's exclusion here.
+#[test_connector(exclude(Postgres, Mssql, KingbaseMysql, KingbaseOracle))]
 fn diagnose_migration_history_calculates_drift_in_presence_of_failed_migrations(api: TestApi) {
     let directory = api.create_migrations_directory();
 

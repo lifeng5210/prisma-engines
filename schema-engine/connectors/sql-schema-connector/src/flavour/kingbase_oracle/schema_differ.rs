@@ -1,7 +1,7 @@
 use crate::{
     migration_pair::MigrationPair,
     sql_migration::{AlterEnum, SqlMigrationStep},
-    sql_schema_differ::{SqlSchemaDifferFlavour, all_match, column::ColumnTypeChange, differ_database::DifferDatabase},
+    sql_schema_differ::{SqlSchemaDifferFlavour, column::ColumnTypeChange, differ_database::DifferDatabase},
 };
 use psl::builtin_connectors::{KingbaseOracleNumberArguments, KingbaseOracleType};
 use sql_schema_describer::walkers::{IndexWalker, TableColumnWalker};
@@ -21,7 +21,10 @@ impl SqlSchemaDifferFlavour for KingbaseOracleSchemaDifferFlavour {
             columns.next.column_type_family_as_enum(),
         ) {
             (Some(previous), Some(next)) => {
-                if all_match(previous.values(), next.values()) {
+                // Variant changes are applied by AlterEnum; they do not cast
+                // every referencing column (which may not exist in the live DB
+                // when evaluating pending migrations against the shadow DB).
+                if previous.name() == next.name() && previous.namespace() == next.namespace() {
                     return None;
                 }
 
@@ -78,10 +81,6 @@ impl SqlSchemaDifferFlavour for KingbaseOracleSchemaDifferFlavour {
 
     fn index_should_be_renamed(&self, indexes: MigrationPair<IndexWalker<'_>>) -> bool {
         indexes.previous.name() != indexes.next.name()
-    }
-
-    fn should_ignore_json_defaults(&self) -> bool {
-        true
     }
 
     fn should_recreate_fks_covered_by_deleted_indexes(&self) -> bool {
@@ -143,6 +142,20 @@ fn oracle_type_change(previous: KingbaseOracleType, next: KingbaseOracleType) ->
     }
 
     match (previous, next) {
+        (
+            KingbaseOracleType::Number(
+                KingbaseOracleNumberArguments::Precision(precision)
+                | KingbaseOracleNumberArguments::PrecisionAndScale(precision, 0),
+            ),
+            KingbaseOracleType::VarChar2(Some(length)),
+        ) if length > precision => Some(SafeCast),
+        (
+            KingbaseOracleType::Date
+            | KingbaseOracleType::Timestamp(_)
+            | KingbaseOracleType::TimestampTz(_)
+            | KingbaseOracleType::TimestampLocalTz(_),
+            KingbaseOracleType::BinaryFloat | KingbaseOracleType::BinaryDouble | KingbaseOracleType::Float(_),
+        ) => Some(NotCastable),
         (KingbaseOracleType::Number(previous), KingbaseOracleType::Number(next)) => {
             Some(if number_can_represent(next, previous) {
                 SafeCast
@@ -274,6 +287,44 @@ fn is_character_or_lob(native_type: KingbaseOracleType) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn integer_to_string_requires_room_for_all_digits_and_sign() {
+        let integer = KingbaseOracleType::Number(KingbaseOracleNumberArguments::PrecisionAndScale(10, 0));
+        assert_eq!(
+            oracle_type_change(integer, KingbaseOracleType::VarChar2(Some(11))),
+            Some(ColumnTypeChange::SafeCast)
+        );
+        assert_eq!(
+            oracle_type_change(integer, KingbaseOracleType::VarChar2(Some(10))),
+            Some(ColumnTypeChange::RiskyCast)
+        );
+        assert_eq!(
+            oracle_type_change(
+                KingbaseOracleType::Number(KingbaseOracleNumberArguments::PrecisionAndScale(10, 2)),
+                KingbaseOracleType::VarChar2(Some(4000)),
+            ),
+            Some(ColumnTypeChange::RiskyCast)
+        );
+    }
+
+    #[test]
+    fn temporal_values_cannot_be_implicitly_cast_to_floats() {
+        for previous in [
+            KingbaseOracleType::Date,
+            KingbaseOracleType::Timestamp(Some(3)),
+            KingbaseOracleType::TimestampTz(Some(3)),
+            KingbaseOracleType::TimestampLocalTz(Some(3)),
+        ] {
+            for next in [
+                KingbaseOracleType::BinaryFloat,
+                KingbaseOracleType::BinaryDouble,
+                KingbaseOracleType::Float(None),
+            ] {
+                assert_eq!(oracle_type_change(previous, next), Some(ColumnTypeChange::NotCastable));
+            }
+        }
+    }
 
     #[test]
     fn only_widening_number_and_character_changes_are_safe() {

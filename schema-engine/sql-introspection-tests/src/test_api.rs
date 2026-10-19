@@ -362,13 +362,11 @@ impl TestApi {
             schema_name: self.schema_name().to_owned(),
             database: self.database.clone(),
             sql_variant: match self.sql_family() {
-                SqlFamily::Mysql => barrel::SqlVariant::Mysql,
-                SqlFamily::Postgres => barrel::SqlVariant::Pg,
-                SqlFamily::Sqlite => barrel::SqlVariant::Sqlite,
-                SqlFamily::Mssql => barrel::SqlVariant::Mssql,
-                SqlFamily::KingbaseOracle => {
-                    panic!("Barrel does not provide an Oracle-compatible SQL variant; use raw Oracle DDL")
-                }
+                SqlFamily::Mysql => Some(barrel::SqlVariant::Mysql),
+                SqlFamily::Postgres => Some(barrel::SqlVariant::Pg),
+                SqlFamily::Sqlite => Some(barrel::SqlVariant::Sqlite),
+                SqlFamily::Mssql => Some(barrel::SqlVariant::Mssql),
+                SqlFamily::KingbaseOracle => None,
             },
             tags: self.tags(),
         }
@@ -548,7 +546,11 @@ impl TestApi {
         let schema = parse_datamodels(datamodels);
         let reintrospected = self.test_introspect_force_internal(schema, false).await.unwrap_err();
 
-        expectation.assert_eq(&reintrospected.to_string());
+        // Diagnostic colors depend on the terminal and environment, not on
+        // the connector. Compare the complete diagnostic without ANSI styling.
+        let diagnostic = strip_ansi_escapes::strip(reintrospected.to_string()).unwrap();
+        let diagnostic = String::from_utf8(diagnostic).unwrap();
+        expectation.assert_eq(&diagnostic);
     }
 
     pub async fn expect_re_introspected_datamodels_with_config(

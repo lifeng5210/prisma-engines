@@ -6,10 +6,23 @@ use crate::{
 };
 use bigdecimal::{BigDecimal, FromPrimitive};
 use bytes::BytesMut;
-use kingbase_postgres_types::{IsNull, ToSql};
-use kingbase_tokio_postgres::types::Type;
+use kingbase_postgres_types::{FromSql, IsNull, ToSql};
+use kingbase_tokio_postgres::types::{Kind, Type};
 
 pub(crate) use decimal::DecimalWrapper;
+
+/// PostgreSQL-wire enum binary values contain the UTF-8 variant label.
+pub(crate) struct EnumString(pub String);
+
+impl<'a> FromSql<'a> for EnumString {
+    fn from_sql(_: &Type, raw: &'a [u8]) -> Result<Self, Box<dyn std::error::Error + Sync + Send>> {
+        Ok(Self(std::str::from_utf8(raw)?.to_owned()))
+    }
+
+    fn accepts(ty: &Type) -> bool {
+        matches!(ty.kind(), Kind::Enum(_))
+    }
+}
 
 #[derive(Debug)]
 pub(crate) struct OracleParam<'value, 'data>(&'value Value<'data>);
@@ -54,7 +67,8 @@ pub(crate) fn params_to_types(params: &[Value<'_>]) -> Vec<Type> {
                     Type::NUMERIC
                 }
                 ValueType::Float(_) | ValueType::Double(_) => Type::FLOAT8,
-                ValueType::Text(_) | ValueType::Enum(_, _) => Type::VARCHAR,
+                ValueType::Text(_) => Type::VARCHAR,
+                ValueType::Enum(_, _) => Type::UNKNOWN,
                 ValueType::Bytes(_) => Type::ORACLE_BLOB,
                 ValueType::Json(_) => Type::JSONB,
                 ValueType::Xml(_) => Type::XML,

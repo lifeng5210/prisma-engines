@@ -1,9 +1,11 @@
 use crate::connector::ColumnType;
-use kingbase_tokio_postgres::types::Type;
+use kingbase_tokio_postgres::types::{Kind, Type};
 
 /// Maps Kingbase Oracle-mode PostgreSQL-wire OIDs to Quaint result types.
 pub(crate) fn column_type_from_type(typ: &Type) -> ColumnType {
-    if typ == &Type::BOOL {
+    if matches!(typ.kind(), Kind::Enum(_)) {
+        ColumnType::Enum
+    } else if typ == &Type::BOOL {
         ColumnType::Boolean
     } else if matches!(typ, &Type::INT2 | &Type::INT4) {
         ColumnType::Int32

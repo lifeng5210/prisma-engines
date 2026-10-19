@@ -125,7 +125,7 @@ fn adding_unique_to_an_existing_field_must_work(api: TestApi) {
         .force(true)
         .send()
         .assert_executable()
-        .assert_warnings(&["A unique constraint covering the columns `[field]` on the table `A` will be added. If there are existing duplicate values, this will fail.".into()])
+        .assert_warnings(&[format!("A unique constraint covering the columns `[field]` on the table `{}` will be added. If there are existing duplicate values, this will fail.", api.normalize_identifier("A")).into()])
         .assert_has_executed_steps();
 
     api.assert_schema().assert_table("A", |table| {

@@ -23,7 +23,10 @@ use async_trait::async_trait;
 use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, Utc};
 use futures::{Future, StreamExt, future::FutureExt};
 use kingbase_postgres_native_tls::MakeTlsConnector;
-use kingbase_tokio_postgres::{Client, Row, types::Type};
+use kingbase_tokio_postgres::{
+    Client, Row,
+    types::{Kind, Type},
+};
 use native_tls::{Certificate, Identity, TlsConnector};
 use std::{
     borrow::Cow,
@@ -197,7 +200,10 @@ fn convert_row(row: &Row) -> crate::Result<Vec<Value<'static>>> {
 
     for (index, column) in row.columns().iter().enumerate() {
         let typ = column.type_();
-        let value = if typ == &Type::BOOL {
+        let value = if matches!(typ.kind(), Kind::Enum(_)) {
+            let value: Option<conversion::EnumString> = driver_result(row.try_get(index))?;
+            ValueType::Enum(value.map(|value| crate::prelude::EnumVariant::new(value.0)), None).into()
+        } else if typ == &Type::BOOL {
             ValueType::Boolean(driver_result(row.try_get(index))?).into()
         } else if typ == &Type::INT2 {
             let value: Option<i16> = driver_result(row.try_get(index))?;

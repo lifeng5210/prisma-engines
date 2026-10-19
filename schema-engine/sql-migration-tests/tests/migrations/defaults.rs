@@ -17,7 +17,7 @@ fn datetime_defaults_work(api: TestApi) {
 
     let expected_default = if api.is_cockroach() {
         DefaultValue::db_generated("'2018-01-27 08:00:00'::TIMESTAMP")
-    } else if api.is_postgres() {
+    } else if api.is_postgres() || api.is_kingbase_oracle() {
         DefaultValue::db_generated("'2018-01-27 08:00:00'::timestamp without time zone")
     } else if api.is_mssql() {
         let mut df = DefaultValue::db_generated("2018-01-27 08:00:00 +00:00");

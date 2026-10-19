@@ -187,7 +187,30 @@ fn from_unique_index_to_pk(mut api: TestApi) {
     })
     .unwrap();
 
-    let expected_printed_messages = if api.is_mysql() {
+    let expected_printed_messages = if api.is_kingbase_oracle() {
+        expect![[r#"
+            [
+                [
+                    "-- DropIndex",
+                    "ALTER TABLE \"c\" DROP CONSTRAINT \"C_secondary_key\";",
+                    "",
+                    "-- AlterTable",
+                    "ALTER TABLE \"a\" DROP COLUMN \"name\";",
+                    "ALTER TABLE \"a\" ADD CONSTRAINT \"A_pkey\" PRIMARY KEY (\"id\");",
+                    "",
+                    "-- DropIndex",
+                    "ALTER TABLE \"a\" DROP CONSTRAINT \"A_id_key\";",
+                    "",
+                    "-- AlterTable",
+                    "ALTER TABLE \"b\" ADD CONSTRAINT \"B_pkey\" PRIMARY KEY (\"x\", \"y\");",
+                    "",
+                    "-- DropIndex",
+                    "ALTER TABLE \"b\" DROP CONSTRAINT \"B_x_y_key\";",
+                    "",
+                ],
+            ]
+        "#]]
+    } else if api.is_mysql() {
         expect![[r#"
             [
                 [

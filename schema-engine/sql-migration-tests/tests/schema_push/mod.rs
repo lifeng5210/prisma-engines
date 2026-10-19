@@ -518,7 +518,7 @@ fn schema_push_with_invalid_schema_filters(api: TestApi) {
     }
     "#;
 
-    let (expected_error_code, table_name) = if api.is_postgres() || api.is_mssql() {
+    let (expected_error_code, table_name) = if api.is_postgres() || api.is_mssql() || api.is_kingbase_oracle() {
         ("P3023", "ExternalTable")
     } else {
         ("P3024", "public.ExternalTable")

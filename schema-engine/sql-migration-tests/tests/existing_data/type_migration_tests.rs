@@ -33,6 +33,8 @@ fn altering_the_type_of_a_column_in_a_non_empty_table_warns(api: TestApi) {
             "You are about to alter the column `dogs` on the `User` table, which contains 1 non-null values. The data in that column will be cast from `Int8` to `Int4`.".into()
         } else if api.is_postgres() {
             "You are about to alter the column `dogs` on the `User` table, which contains 1 non-null values. The data in that column will be cast from `BigInt` to `Integer`.".into()
+        } else if api.is_kingbase_oracle() {
+            "You are about to alter the column `dogs` on the `User` table, which contains 1 non-null values. The data in that column will be cast from `Number(19,0)` to `Number(10,0)`.".into()
         } else if api.lower_cases_table_names() {
             "You are about to alter the column `dogs` on the `user` table, which contains 1 non-null values. The data in that column will be cast from `BigInt` to `Int`.".into()
         } else {

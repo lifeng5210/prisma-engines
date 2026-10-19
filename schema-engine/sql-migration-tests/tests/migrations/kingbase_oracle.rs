@@ -2,6 +2,40 @@ use schema_core::schema_connector::Namespaces;
 use sql_migration_tests::test_api::*;
 use sql_schema_describer::{ColumnTypeFamily, DefaultValue, ForeignKeyAction};
 
+#[test_connector(tags(KingbaseOracle))]
+fn oracle_failed_migration_rolls_back_ddl_without_schema_drift(api: TestApi) {
+    let directory = api.create_migrations_directory();
+    let initial = api.datamodel_with_provider("model Cat {\n id Int @id\n}");
+    api.create_migration("initial", &initial, &directory).send_sync();
+    api.apply_migrations(&directory).send_sync();
+
+    let changed = api.datamodel_with_provider("model Cat {\n id Int @id\n}\nmodel Dog {\n id Int @id\n}");
+    let mut original = String::new();
+    let migration_path = api
+        .create_migration("add_dog", &changed, &directory)
+        .send_sync()
+        .modify_migration(|script| {
+            original.push_str(script);
+            script.push_str("\nSELECT YOLO;");
+        })
+        .migration_script_path();
+
+    let error = api.apply_migrations(&directory).send_unwrap_err().to_string();
+    assert!(error.to_ascii_lowercase().contains("yolo"), "{error}");
+    api.assert_schema().assert_has_table("Cat").assert_has_no_table("Dog");
+
+    std::fs::write(migration_path, original).unwrap();
+    let history = api
+        .diagnose_migration_history(&directory)
+        .opt_in_to_shadow_database(true)
+        .send_sync()
+        .into_output();
+    assert!(history.drift.is_none());
+    assert_eq!(history.failed_migration_names.len(), 1);
+    assert_eq!(history.edited_migration_names.len(), 1);
+    assert!(history.error_in_unapplied_migration.is_none());
+}
+
 #[test_connector(tags(KingbaseOracle), namespaces("one", "two"))]
 fn schema_push_tracks_all_configured_namespaces(mut api: TestApi) {
     let datasource = api.datasource_block_with(&[("schemas", r#"["one", "two"]"#)]);

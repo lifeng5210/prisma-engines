@@ -184,6 +184,8 @@ fn altering_a_column_with_non_null_values_should_warn(api: TestApi) {
             }
         } else if api.tags().contains(Tags::KingbaseMysql) {
             "You are about to alter the column `age` on the `Test` table, which contains 2 non-null values. The data in that column will be cast from `VarChar(191)` to `Int`.".into()
+        } else if api.is_kingbase_oracle() {
+            "You are about to alter the column `age` on the `Test` table, which contains 2 non-null values. The data in that column will be cast from `VarChar2(4000)` to `Number(10,0)`.".into()
         } else {
              "You are about to alter the column `age` on the `Test` table, which contains 2 non-null values. The data in that column will be cast from `String` to `Int`.".into()
 
@@ -359,7 +361,7 @@ fn changing_a_column_from_required_to_optional_should_work(api: TestApi) {
         assert_eq!(data.len(), 2);
         let ages: Vec<i64> = data
             .into_iter()
-            .map(|row| row.get("age").unwrap().as_integer().unwrap())
+            .map(|row| integer_value(row.get("age").unwrap()).unwrap())
             .collect();
 
         assert_eq!(ages, &[12, 22]);
@@ -410,7 +412,7 @@ fn changing_a_column_from_optional_to_required_is_unexecutable(api: TestApi) {
         assert_eq!(data.len(), 3);
         let ages: Vec<Option<i64>> = data
             .into_iter()
-            .map(|row| row.get("age").unwrap().as_integer())
+            .map(|row| integer_value(row.get("age").unwrap()))
             .collect();
 
         assert_eq!(ages, &[Some(12), Some(22), None]);

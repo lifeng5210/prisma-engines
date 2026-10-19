@@ -32,7 +32,9 @@ async fn remapping_fields_with_invalid_characters(api: &mut TestApi) -> TestResu
         })
         .await?;
 
-    let native_string = if api.sql_family().is_mssql() || api.sql_family().is_mysql() {
+    let native_string = if api.sql_family().is_kingbase_oracle() {
+        "@db.Clob"
+    } else if api.sql_family().is_mssql() || api.sql_family().is_mysql() {
         "@db.Text"
     } else {
         ""
@@ -266,7 +268,7 @@ async fn remapping_fields_in_compound_relations(api: &mut TestApi) -> TestResult
 async fn remapping_enum_values(api: &mut TestApi) -> TestResult {
     let sql_family = api.sql_family();
 
-    if sql_family.is_postgres() {
+    if sql_family.is_postgres() || sql_family.is_kingbase_oracle() {
         api.database()
             .execute_raw("CREATE TYPE color AS ENUM ('b lack', 'w hite')", &[])
             .await?;
@@ -314,7 +316,7 @@ async fn remapping_enum_values(api: &mut TestApi) -> TestResult {
 async fn remapping_enum_default_values(api: &mut TestApi) -> TestResult {
     let sql_family = api.sql_family();
 
-    if sql_family.is_postgres() {
+    if sql_family.is_postgres() || sql_family.is_kingbase_oracle() {
         api.database()
             .execute_raw("CREATE TYPE color AS ENUM ('b lack', 'white')", &[])
             .await?;

@@ -211,6 +211,8 @@ fn making_an_existing_id_field_autoincrement_works(api: TestApi) {
         for (i, content) in ["A", "B", "C"].iter().enumerate() {
             let insert = Insert::single_into(api.render_table_name("Post"))
                 .value("content", *content)
+                // Oracle stores the empty-string title default as NULL.
+                .value("title", "Test post")
                 .value("id", i);
 
             api.query(insert.into());
@@ -281,7 +283,9 @@ fn removing_autoincrement_from_an_existing_field_works(api: TestApi) {
 
     // Data to see we don't lose anything in the translation.
     for content in &["A", "B", "C"] {
-        let insert = Insert::single_into(api.render_table_name("Post")).value("content", *content);
+        let insert = Insert::single_into(api.render_table_name("Post"))
+            .value("content", *content)
+            .value("title", "Test post");
         api.query(insert.into());
     }
 

@@ -189,7 +189,10 @@ fn models_with_enum_values_can_be_dropped(api: TestApi) {
 
     api.assert_schema().assert_tables_count(1);
 
-    api.insert("Cat").value("id", 1).value("mood", "HAPPY").result_raw();
+    api.insert("Cat")
+        .value("id", 1)
+        .value("mood", quaint::Value::enum_variant("HAPPY"))
+        .result_raw();
 
     let warn = if api.lower_cases_table_names() {
         "You are about to drop the `cat` table, which is not empty (1 rows)."
@@ -232,7 +235,10 @@ fn enum_field_to_string_field_works(api: TestApi) {
         })
     });
 
-    api.insert("Cat").value("id", 1).value("mood", "HAPPY").result_raw();
+    api.insert("Cat")
+        .value("id", 1)
+        .value("mood", quaint::Value::enum_variant("HAPPY"))
+        .result_raw();
 
     let dm2 = r#"
         model Cat {
@@ -277,7 +283,7 @@ fn string_field_to_enum_field_works(api: TestApi) {
         }
     "#;
 
-    let warnings: &[Cow<'_, str>] = if api.is_postgres() {
+    let warnings: &[Cow<'_, str>] = if api.is_postgres() || api.is_kingbase_oracle() {
         &["The `mood` column on the `Cat` table would be dropped and recreated. This will lead to data loss.".into()]
     } else if api.is_sqlite() {
         &[]
@@ -385,7 +391,7 @@ fn enums_used_in_default_can_be_changed(api: TestApi) {
         }
     "#;
 
-    let warnings: &[Cow<'_, str>] = if api.is_postgres() {
+    let warnings: &[Cow<'_, str>] = if api.is_postgres() || api.is_kingbase_oracle() {
         &["The values [HUNGRY] on the enum `CatMood` will be removed. If these variants are still used in the database, this will fail.".into()]
     } else if api.is_sqlite() {
         &[]

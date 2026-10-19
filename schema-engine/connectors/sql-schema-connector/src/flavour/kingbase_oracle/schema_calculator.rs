@@ -55,4 +55,27 @@ impl SqlSchemaCalculatorFlavour for KingbaseOracleSchemaCalculatorFlavour {
     fn m2m_join_table_constraint(&self) -> JoinTableUniquenessConstraint {
         JoinTableUniquenessConstraint::PrimaryKey
     }
+
+    fn push_connector_data(&self, context: &mut Context<'_>) {
+        use sql::postgres::{Constraint, ConstraintOption, PostgresSchemaExt};
+        let schema = &mut context.schema.describer_schema;
+        sql::kingbase_oracle::normalize_schema_identifiers(schema);
+        sql::kingbase_oracle::normalize_empty_string_defaults(schema);
+        let mut ext = PostgresSchemaExt::default();
+        for index in schema
+            .table_walkers()
+            .flat_map(|table| table.indexes())
+            .filter(|index| {
+                index.is_primary_key()
+                    || index.is_unique()
+                        && !index
+                            .columns()
+                            .any(|column| column.sort_order() == Some(sql::SQLSortOrder::Desc))
+            })
+        {
+            ext.constraint_options
+                .insert(Constraint::Index(index.id), ConstraintOption::IsConstraint.into());
+        }
+        schema.set_connector_data(Box::new(ext));
+    }
 }

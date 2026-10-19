@@ -104,6 +104,8 @@ pub enum Circumstances {
     Cockroach,
     CockroachWithPostgresNativeTypes, // TODO: this is a temporary workaround
     CanPartitionTables,
+    /// Preserve whether a unique index is backed by a catalog constraint.
+    TrackIndexConstraints,
 }
 
 pub struct SqlSchemaDescriber<'a> {
@@ -137,6 +139,8 @@ pub enum Constraint {
 pub enum ConstraintOption {
     Deferred,
     Deferrable,
+    /// The index backs a catalog constraint, rather than a standalone index.
+    IsConstraint,
 }
 
 #[derive(Default, Debug, Clone)]
@@ -1474,6 +1478,12 @@ fn index_from_row(
 
             if is_primary_key || is_unique {
                 let mut constraint_options = BitFlags::empty();
+
+                if circumstances.contains(Circumstances::TrackIndexConstraints)
+                    && row.get_bool("condeferrable").is_some()
+                {
+                    constraint_options |= ConstraintOption::IsConstraint;
+                }
 
                 if let Some(true) = row.get_bool("condeferrable") {
                     constraint_options |= ConstraintOption::Deferrable;

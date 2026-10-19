@@ -20,6 +20,43 @@ use quaint::{
 };
 use std::borrow::Cow;
 
+/// Kingbase Oracle folds an ASCII all-uppercase quoted identifier to lowercase,
+/// while preserving mixed-case quoted identifiers. Keep the calculated schema
+/// consistent with the physical catalog before comparing migration schemas.
+pub fn normalize_schema_identifiers(schema: &mut SqlSchema) {
+    for table in &mut schema.tables {
+        normalize_identifier(&mut table.name);
+    }
+    for (_, column) in &mut schema.table_columns {
+        normalize_identifier(&mut column.name);
+    }
+    for index in &mut schema.indexes {
+        normalize_identifier(&mut index.index_name);
+    }
+    for foreign_key in &mut schema.foreign_keys {
+        if let Some(name) = &mut foreign_key.constraint_name {
+            normalize_identifier(name);
+        }
+    }
+    for enm in &mut schema.enums {
+        normalize_identifier(&mut enm.name);
+    }
+}
+
+fn normalize_identifier(name: &mut str) {
+    if name.is_ascii() && !name.bytes().any(|byte| byte.is_ascii_lowercase()) {
+        name.make_ascii_lowercase();
+    }
+}
+
+/// Oracle stores the empty character string as NULL. A default of '' is
+/// therefore indistinguishable from an absent default in its catalog.
+pub fn normalize_empty_string_defaults(schema: &mut SqlSchema) {
+    schema.table_default_values.retain(
+        |(_, default)| !matches!(default.kind(), DefaultKind::Value(PrismaValue::String(value)) if value.is_empty()),
+    );
+}
+
 /// A schema describer for KingbaseES running in Oracle compatibility mode.
 pub struct SqlSchemaDescriber<'a> {
     conn: &'a dyn Queryable,
@@ -42,9 +79,12 @@ impl SqlSchemaDescriberBackend for SqlSchemaDescriber<'_> {
         // This does not enable scalar lists, array fields or array parameters
         // in the Prisma query surface.
         let catalog_connection = OracleCatalogConnection::new(self.conn);
-        let mut schema = postgres::SqlSchemaDescriber::new(&catalog_connection, Default::default())
-            .describe(schemas)
-            .await?;
+        let mut schema = postgres::SqlSchemaDescriber::new(
+            &catalog_connection,
+            postgres::Circumstances::TrackIndexConstraints.into(),
+        )
+        .describe(schemas)
+        .await?;
 
         for (_, column) in &mut schema.table_columns {
             rewrite_column_type(&mut column.tpe);
@@ -391,6 +431,23 @@ fn timestamp_precision(native_type: Option<&PostgresType>) -> Option<u32> {
 mod tests {
     use super::*;
     use crate::{ColumnArity, ColumnType};
+
+    #[test]
+    fn identifier_folding_preserves_mixed_case_and_non_ascii_names() {
+        for (input, expected) in [
+            ("A", "a"),
+            ("USER_ID", "user_id"),
+            ("_A_123", "_a_123"),
+            ("ModelA", "ModelA"),
+            ("A_pkey", "A_pkey"),
+            ("already_lower", "already_lower"),
+            ("ÉTAT", "ÉTAT"),
+        ] {
+            let mut actual = input.to_owned();
+            normalize_identifier(&mut actual);
+            assert_eq!(actual, expected);
+        }
+    }
 
     fn postgres_column(full_data_type: &str, family: ColumnTypeFamily, native_type: PostgresType) -> ColumnType {
         ColumnType {

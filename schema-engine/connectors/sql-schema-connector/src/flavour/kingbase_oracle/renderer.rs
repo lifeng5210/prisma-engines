@@ -146,6 +146,20 @@ impl SqlRenderer for KingbaseOracleRenderer {
         );
 
         let unique = if index.is_unique() { "UNIQUE " } else { "" };
+        // Oracle foreign keys may reference UNIQUE constraints, but not a
+        // standalone unique index. Descending indexes cannot back constraints.
+        if index.is_unique()
+            && !index
+                .columns()
+                .any(|column| column.sort_order() == Some(SQLSortOrder::Desc))
+        {
+            let columns = index.column_names().map(|name| self.quote(name)).join(", ");
+            return format!(
+                "ALTER TABLE {} ADD CONSTRAINT {} UNIQUE ({columns})",
+                quoted_table(index.table()),
+                self.quote(index.name()),
+            );
+        }
         let columns = index
             .columns()
             .map(|column| {
@@ -197,6 +211,19 @@ impl SqlRenderer for KingbaseOracleRenderer {
     }
 
     fn render_drop_index(&self, namespace: Option<&str>, index: IndexWalker<'_>) -> String {
+        use sql::postgres::{Constraint, ConstraintOption, PostgresSchemaExt};
+        let ext: &PostgresSchemaExt = index.schema.downcast_connector_data();
+        if ext
+            .constraint_options
+            .get(&Constraint::Index(index.id))
+            .is_some_and(|options| options.contains(ConstraintOption::IsConstraint))
+        {
+            return format!(
+                "ALTER TABLE {} DROP CONSTRAINT {}",
+                quoted_table(index.table()),
+                self.quote(index.name())
+            );
+        }
         let index_name = QuotedWithPrefix::pg_new(namespace, index.name());
         format!("DROP INDEX {index_name}")
     }
@@ -322,7 +349,11 @@ fn render_alter_column(
             ));
         } else {
             let previous_sequence = columns.previous.default().and_then(|default| default.as_sequence());
-            statements.push(format!("ALTER TABLE {table} ALTER COLUMN {column_name} DROP DEFAULT"));
+            // A simultaneous SET DEFAULT (e.g. autoincrement() -> 3) above
+            // must survive removing the old sequence.
+            if !changes.default_changed() {
+                statements.push(format!("ALTER TABLE {table} ALTER COLUMN {column_name} DROP DEFAULT"));
+            }
             if let Some(sequence) = previous_sequence.filter(|sequence| !sequence.is_empty()) {
                 statements.push(format!("DROP SEQUENCE {}", Quoted::postgres_ident(sequence)));
             }
@@ -485,7 +516,7 @@ fn render_default(default: &DefaultValue) -> Cow<'_, str> {
         DefaultKind::Now => Cow::Borrowed("CURRENT_TIMESTAMP"),
         DefaultKind::UniqueRowid => unreachable!("Kingbase Oracle does not support unique_rowid()"),
         DefaultKind::Value(PrismaValue::String(value) | PrismaValue::Enum(value) | PrismaValue::Json(value)) => {
-            Quoted::postgres_string(value).to_string().into()
+            format!("'{}'", value.replace('\'', "''")).into()
         }
         DefaultKind::Value(PrismaValue::DateTime(value)) => Quoted::postgres_string(value).to_string().into(),
         DefaultKind::Value(PrismaValue::Bytes(value)) => {
@@ -565,6 +596,14 @@ mod tests {
         assert_eq!(
             render_default(&DefaultValue::value(PrismaValue::Bytes(vec![0xab, 0xcd]))),
             "decode('abcd', 'hex')"
+        );
+    }
+
+    #[test]
+    fn string_defaults_escape_quotes_without_changing_backslashes() {
+        assert_eq!(
+            render_default(&DefaultValue::value(PrismaValue::String("'potassium'\\path".into()))),
+            "'''potassium''\\path'"
         );
     }
 }

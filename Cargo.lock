@@ -5094,6 +5094,7 @@ dependencies = [
  "schema-core",
  "sql-schema-connector",
  "sql-schema-describer",
+ "strip-ansi-escapes",
  "test-macros",
  "test-setup",
  "tokio",

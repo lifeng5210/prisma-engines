@@ -204,7 +204,7 @@ fn using_unsupported_and_ignore_should_work(api: TestApi) {
         "some random string"
     } else if api.is_cockroach() {
         "interval"
-    } else if api.is_postgres() {
+    } else if api.is_postgres() || api.is_kingbase_oracle() {
         "macaddr"
     } else if api.is_mysql() {
         "point"

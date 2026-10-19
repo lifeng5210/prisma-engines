@@ -51,7 +51,7 @@ enum Status {
 // );
 //
 // -- CreateIndex
-// CREATE UNIQUE INDEX "Account_code_key" ON "Account" ("code");
+// ALTER TABLE "Account" ADD CONSTRAINT "Account_code_key" UNIQUE ("code");
 //
 // -- CreateIndex
 // CREATE INDEX "Post_accountId_idx" ON "Post" ("accountId");

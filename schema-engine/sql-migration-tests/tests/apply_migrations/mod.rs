@@ -335,7 +335,7 @@ fn migrations_should_fail_when_the_script_is_invalid(api: TestApi) {
             error_code = match api.tags() {
                 t if t.contains(Tags::Vitess) => 1105,
                 t if t.contains(Tags::Mysql) => 1064,
-                t if t.contains(Tags::KingbaseMysql) => 42601,
+                t if t.intersects(Tags::KingbaseMysql | Tags::KingbaseOracle) => 42601,
                 t if t.contains(Tags::Mssql) => 102,
                 t if t.contains(Tags::Postgres) => 42601,
                 t if t.contains(Tags::Sqlite) => 1,
@@ -356,7 +356,7 @@ fn migrations_should_fail_when_the_script_is_invalid(api: TestApi) {
                     "You have an error in your SQL syntax; check the manual that corresponds to your MySQL server version for the right syntax to use near \'^.^)_n\' at line 1",
                 // Kingbase localizes the PostgreSQL parser message according to the server locale.
                 // Assert the stable prefix instead of assuming an English translation.
-                t if t.contains(Tags::KingbaseMysql) => "ERROR:",
+                t if t.intersects(Tags::KingbaseMysql | Tags::KingbaseOracle) => "ERROR:",
                 t if t.contains(Tags::Mssql) => "Incorrect syntax near \'^\'.",
                 t if t.contains(Tags::Postgres) => "ERROR: syntax error at or near \"^\"",
                 t if t.contains(Tags::Sqlite) => "unrecognized token: \"^\" in \n\nSELECT (^.^)_n;\n at offset 10",
@@ -365,7 +365,7 @@ fn migrations_should_fail_when_the_script_is_invalid(api: TestApi) {
         );
 
         assert_eq!(error.error_code, ApplyMigrationError::ERROR_CODE);
-        if api.tags().contains(Tags::KingbaseMysql) {
+        if api.tags().intersects(Tags::KingbaseMysql | Tags::KingbaseOracle) {
             let expected_prefix = expected_error_message
                 .strip_suffix("ERROR:\n")
                 .expect("Kingbase expectation must end with the stable error prefix");

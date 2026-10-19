@@ -195,11 +195,7 @@ fn make_tls_connector(ssl_params: &SslParams) -> crate::Result<MakeTlsConnector>
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{
-        connector::Queryable,
-        single::Quaint,
-        tests::test_api::kingbase_mysql::CONN_STR,
-    };
+    use crate::{connector::Queryable, single::Quaint, tests::test_api::kingbase_mysql::CONN_STR};
 
     #[tokio::test]
     async fn describe_query_reports_text_for_a_double_parameter() {

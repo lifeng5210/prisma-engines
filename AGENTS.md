@@ -49,6 +49,10 @@ Supporting infra:
 - Kingbase MySQL SQL rendering shares `SqlFamily::Mysql`, but its PostgreSQL-wire prepared-statement parameter count is a signed 16-bit value. Clamp both native and external Kingbase connection info to 32,767 bind values so batch planning never emits an unexecutable statement.
 
 ### Kingbase Oracle Compatibility
+- A local V009R001C010 probe confirmed that quoted ASCII all-uppercase identifiers are stored lowercase (`"A"` -> `a`), while mixed-case quoted names are preserved. Migration schema calculation must account for that fold without making all mixed-case names case-insensitive. Oracle foreign keys require a primary/unique constraint; a standalone unique index is not a valid referenced key. Preserve the catalog distinction when dropping indexes versus constraints.
+- Oracle stores `''` as NULL (`pg_get_expr` reports `NULL::varchar`), so schema calculation normalizes empty-string defaults to the absent default. Required-string fixtures must insert a nonempty value when testing unrelated behavior. SQL string defaults escape apostrophes by doubling them; the tested instance has `ora_escape_compatible_pg=off`.
+- Oracle migration scripts sent as one batch roll back their DDL on a later error. Shared tests that assume partially committed DDL exclude Oracle just as they exclude PostgreSQL; `oracle_failed_migration_rolls_back_ddl_without_schema_drift` verifies the Oracle rollback and migration-history behavior directly.
+- Oracle `NUMBER` raw query results are Numeric even for Prisma Int/BigInt. Migration test assertions compare integer values without truncating decimals. Enum parameters use an inferred wire type, and native enum results decode their UTF-8 variant labels as Quaint Enum values.
 - Oracle `TINYINT` has OID 8100 and is a signed 8-bit wire value. PSL, rendering, migration, and introspection support it as `Int @db.TinyInt`; the Node adapter converts the driver's text result to a number. Do not add native Quaint raw-result support until the Kingbase Rust driver supplies an `ORACLE_TINYINT` codec.
 - Oracle `ROWID` has OID 6123, but its binary wire representation is a compact internal value rather than UTF-8. Do not expose it through native Quaint raw results until the Kingbase Rust driver can request its textual representation or decode the wire value; the Node adapter's public text form is 23 characters.
 
@@ -66,6 +70,7 @@ Supporting infra:
 
 ### Diagnostics / Tests
 - Many tests assert on colored output via `expect!`. Always regenerate expectations when diagnostics wording changes.
+- `reintrospect_force_invalid_config` compares plain diagnostic text after stripping ANSI escapes in its test helper. Diagnostic colors depend on TTY/`NO_COLOR`/`CLICOLOR_FORCE`, not database provider; do not select colored versus plain snapshots by Kingbase tags or change global color state in concurrent tests.
 - Integration tests around multi-schema migrations still need real DB URLs; without them they skip/fail early.
 - Query compiler tests use insta snapshots (`query-compiler/tests`). Regenerate with `UPDATE_EXPECT=1 cargo test -p query-compiler`.
 - The connector test kit (`query-engine-tests`) relies on `cargo insta` snapshots too (see `connector-test-kit-rs` README).
@@ -313,9 +318,14 @@ Prefer using Makefile targets that take care of setting up the environment corre
   `Char`/`VarChar2`/`Timestamp` forms rather than infer source spellings the catalog no longer retains.
 - `sql-introspection-tests` must create an isolated Oracle database with
   `TestApiArgs::create_kingbase_oracle_database()` and construct `SqlSchemaConnector::new_kingbase_oracle()`.
-  `barrel` has no Oracle SQL variant, so Kingbase Oracle runs only explicitly tagged
-  `tags(KingbaseOracle)` tests whose DDL and expected PSL have been verified against Oracle mode; do not run
-  generic Barrel-based suites by pretending they are PostgreSQL tests.
+  `barrel` has no built-in Oracle variant: the independent test backend in
+  `sql-introspection-tests/src/oracle_ddl.rs` renders portable fixtures with Oracle native types and owned sequences.
+  Unsupported fixture types fail explicitly. Do not render Oracle fixtures through PostgreSQL's backend or the production renderer under test.
+- Oracle now uses normal shared `test_setup::should_skip_test()` tag/exclusion/capability selection; the previous requirement for an explicit Oracle tag is removed. Provider-specific SQL snapshots and native-type assertions still need explicit Oracle expectations. MySQL-mode schema-engine tags contain `KingbaseMysql`, not `Mysql`, and its test-setup capability set is empty. Inspect tags, exclusions, capabilities, and test-body guards before counting shared tests as Kingbase database coverage. Cargo reports a successful early return as a pass; use `--nocapture --test-threads=1` to distinguish `Test skipped` from actual execution.
+- A local Oracle introspection run after shared-suite integration executed 120 cases (44 dedicated, 76 shared) successfully, while 572 other-provider/capability entries returned `Test skipped`. These counts describe the current Rust integration binary, not the separate SQL fixtures or the Cargo headline alone. Shared migration eligibility differs from MySQL; do not copy its 229 shared migration / 70 shared introspection count onto Oracle.
+- Oracle shared migration integration now passes 291 connector cases (23 dedicated, 268 shared), plus 28 ordinary Rust tests; 744 wrappers skip internally and 1 case is ignored. Module filters match substrings and can repeat names across groups, so deduplicate full test paths and inspect source attributes before counting database coverage. `schema-engine/kingbase-oracle-shared-tests.md` records commands and the verified scope. MySQL regression remains 255 migration connector cases (26 dedicated, 229 shared) and 134 introspection cases (64 dedicated, 70 shared).
+- Source inventories must include the MySQL-mode `test_type_tinyint1_kingbase_bool` Quaint case: filtering only `kingbase_mysql` misses it. Existing test binaries may also predate source changes (for example, removed Oracle native ROWID/TINYINT tests), so `target/debug/deps/* --list` alone is not authoritative for the current source.
+- A source/registration inventory on 2026-10-16 counted 604 MySQL-mode and 613 Oracle-mode related tests/fixtures across PSL, Quaint, schema-engine, and query compiler/Wasm modules. These are inventory counts, not a fresh full run; the 28 ordinary migration-entry Rust tests are listed separately rather than credited as Kingbase database coverage. Quaint selects 149 per mode at this baseline: the MySQL `kingbase_mysql` name filter selects 148 and needs the separate Boolean TINYINT(1) case; its new DOUBLE-parameter metadata test requires a real connection. Include Oracle describer identifier-folding unit coverage from the newer binary when checking current source registrations.
 - Kingbase Oracle's PostgreSQL-compatible catalog can expose extension-owned views (for example
   `sys_stat_statements`). Filter `pg_depend.deptype = 'e'` view members before rendering Prisma views, so
   `db pull` returns user views only.

@@ -121,7 +121,23 @@ async fn remapping_field_names_to_empty(api: &mut TestApi) -> TestResult {
         })
         .await?;
 
-    let dm = if api.tags().contains(Tags::KingbaseMysql) {
+    let dm = if api.tags().contains(Tags::KingbaseOracle) {
+        expect![[r#"
+        generator client {
+          provider = "prisma-client"
+        }
+
+        datasource db {
+          provider = "kingbase-oracle"
+        }
+
+        model User {
+          /// This field was commented out because of an invalid name. Please provide a valid one that matches [a-zA-Z][a-zA-Z0-9_]*
+          // 1 String @map("1") @db.Clob
+          last Int @id @default(autoincrement())
+        }
+    "#]]
+    } else if api.tags().contains(Tags::KingbaseMysql) {
         expect![[r#"
         generator client {
           provider = "prisma-client"

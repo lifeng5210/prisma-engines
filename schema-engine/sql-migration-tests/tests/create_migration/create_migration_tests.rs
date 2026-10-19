@@ -17,6 +17,7 @@ fn basic_create_migration_works(mut api: TestApi) {
     let dir = api.create_migrations_directory();
 
     let is_postgres = api.is_postgres();
+    let is_kingbase_oracle = api.is_kingbase_oracle();
     let is_mysql = api.is_mysql();
     let is_sqlite = api.is_sqlite();
     let is_cockroach = api.is_cockroach();
@@ -27,7 +28,16 @@ fn basic_create_migration_works(mut api: TestApi) {
         .send_sync()
         .assert_migration_directories_count(1)
         .assert_migration("create-cats", move |migration| {
-            let expected_script = if is_cockroach {
+            let expected_script = if is_kingbase_oracle {
+                expect![[r#"
+                    -- CreateTable
+                    CREATE TABLE "Cat" (
+                        "id" NUMBER(10,0) NOT NULL,
+                        "name" VARCHAR2(4000) NOT NULL,
+                        CONSTRAINT "Cat_pkey" PRIMARY KEY ("id")
+                    );
+                "#]]
+            } else if is_cockroach {
                 expect![[r#"
                     -- CreateTable
                     CREATE TABLE "Cat" (
@@ -130,6 +140,7 @@ fn basic_create_migration_multi_file_works(api: TestApi) {
     let dir = api.create_migrations_directory();
 
     let is_postgres = api.is_postgres();
+    let is_kingbase_oracle = api.is_kingbase_oracle();
     let is_mysql = api.is_mysql();
     let is_sqlite = api.is_sqlite();
     let is_cockroach = api.is_cockroach();
@@ -140,7 +151,23 @@ fn basic_create_migration_multi_file_works(api: TestApi) {
         .send_sync()
         .assert_migration_directories_count(1)
         .assert_migration("create-cats", move |migration| {
-            let expected_script = if is_cockroach {
+            let expected_script = if is_kingbase_oracle {
+                expect![[r#"
+                    -- CreateTable
+                    CREATE TABLE "Cat" (
+                        "id" NUMBER(10,0) NOT NULL,
+                        "name" VARCHAR2(4000) NOT NULL,
+                        CONSTRAINT "Cat_pkey" PRIMARY KEY ("id")
+                    );
+
+                    -- CreateTable
+                    CREATE TABLE "Dog" (
+                        "id" NUMBER(10,0) NOT NULL,
+                        "name" VARCHAR2(4000) NOT NULL,
+                        CONSTRAINT "Dog_pkey" PRIMARY KEY ("id")
+                    );
+                "#]]
+            } else if is_cockroach {
                 expect![[r#"
                     -- CreateTable
                     CREATE TABLE "Cat" (
@@ -299,6 +326,7 @@ fn creating_a_second_migration_should_have_the_previous_sql_schema_as_baseline(a
     );
 
     let is_postgres = api.is_postgres();
+    let is_kingbase_oracle = api.is_kingbase_oracle();
     let is_cockroach = api.is_cockroach();
     let is_mysql = api.is_mysql();
     let is_sqlite = api.is_sqlite();
@@ -308,7 +336,16 @@ fn creating_a_second_migration_should_have_the_previous_sql_schema_as_baseline(a
         .send_sync()
         .assert_migration_directories_count(2)
         .assert_migration("create-dogs", |migration| {
-            let expected_script = if is_cockroach {
+            let expected_script = if is_kingbase_oracle {
+                expect![[r#"
+                    -- CreateTable
+                    CREATE TABLE "Dog" (
+                        "id" NUMBER(10,0) NOT NULL,
+                        "name" VARCHAR2(4000) NOT NULL,
+                        CONSTRAINT "Dog_pkey" PRIMARY KEY ("id")
+                    );
+                "#]]
+            } else if is_cockroach {
                 expect![[r#"
                     -- CreateTable
                     CREATE TABLE "Dog" (
@@ -743,6 +780,7 @@ fn create_constraint_name_tests_w_implicit_names(api: TestApi) {
 
     let is_mssql = api.is_mssql();
     let is_postgres = api.is_postgres();
+    let is_kingbase_oracle = api.is_kingbase_oracle();
     let is_mysql = api.is_mysql();
     let is_sqlite = api.is_sqlite();
     let is_cockroach = api.is_cockroach();
@@ -750,7 +788,41 @@ fn create_constraint_name_tests_w_implicit_names(api: TestApi) {
         .send_sync()
         .assert_migration_directories_count(1)
         .assert_migration("setup", |migration| {
-            let expected_script = if is_mssql {
+            let expected_script = if is_kingbase_oracle {
+                expect![[r#"
+                    -- CreateTable
+                    CREATE TABLE "a" (
+                        "id" NUMBER(10,0) NOT NULL,
+                        "name" VARCHAR2(4000) NOT NULL,
+                        "a" VARCHAR2(4000) NOT NULL,
+                        "b" VARCHAR2(4000) NOT NULL,
+                        CONSTRAINT "A_pkey" PRIMARY KEY ("id")
+                    );
+
+                    -- CreateTable
+                    CREATE TABLE "b" (
+                        "a" VARCHAR2(4000) NOT NULL,
+                        "b" VARCHAR2(4000) NOT NULL,
+                        "aId" NUMBER(10,0) NOT NULL,
+                        CONSTRAINT "B_pkey" PRIMARY KEY ("a", "b")
+                    );
+
+                    -- CreateIndex
+                    ALTER TABLE "a" ADD CONSTRAINT "A_name_key" UNIQUE ("name");
+
+                    -- CreateIndex
+                    CREATE INDEX "A_a_idx" ON "a" ("a");
+
+                    -- CreateIndex
+                    ALTER TABLE "a" ADD CONSTRAINT "A_a_b_key" UNIQUE ("a", "b");
+
+                    -- CreateIndex
+                    CREATE INDEX "B_a_b_idx" ON "b" ("a", "b");
+
+                    -- AddForeignKey
+                    ALTER TABLE "b" ADD CONSTRAINT "B_aId_fkey" FOREIGN KEY ("aId") REFERENCES "a" ("id") ON DELETE RESTRICT ON UPDATE CASCADE;
+                "#]]
+            } else if is_mssql {
                 expect![[r#"
                     BEGIN TRY
 
@@ -973,12 +1045,50 @@ fn create_constraint_name_tests_w_explicit_names(api: TestApi) {
     let is_mssql = api.is_mssql();
     let is_mysql = api.is_mysql();
     let is_postgres = api.is_postgres();
+    let is_kingbase_oracle = api.is_kingbase_oracle();
     let is_cockroach = api.is_cockroach();
     api.create_migration("setup", &dm, &dir)
         .send_sync()
         .assert_migration_directories_count(1)
         .assert_migration("setup", move |migration| {
-            let expected_script = if is_mssql {
+            let expected_script = if is_kingbase_oracle {
+                expect![[r#"
+                    -- CreateTable
+                    CREATE TABLE "a" (
+                        "id" NUMBER(10,0) NOT NULL,
+                        "name" VARCHAR2(4000) NOT NULL,
+                        "a" VARCHAR2(4000) NOT NULL,
+                        "b" VARCHAR2(4000) NOT NULL,
+                        CONSTRAINT "A_pkey" PRIMARY KEY ("id")
+                    );
+
+                    -- CreateTable
+                    CREATE TABLE "b" (
+                        "a" VARCHAR2(4000) NOT NULL,
+                        "b" VARCHAR2(4000) NOT NULL,
+                        "aId" NUMBER(10,0) NOT NULL,
+                        CONSTRAINT "B_pkey" PRIMARY KEY ("a", "b")
+                    );
+
+                    -- CreateIndex
+                    ALTER TABLE "a" ADD CONSTRAINT "SingleUnique" UNIQUE ("name");
+
+                    -- CreateIndex
+                    CREATE INDEX "SingleIndex" ON "a" ("a");
+
+                    -- CreateIndex
+                    ALTER TABLE "a" ADD CONSTRAINT "NamedCompoundUnique" UNIQUE ("a", "b");
+
+                    -- CreateIndex
+                    ALTER TABLE "a" ADD CONSTRAINT "UnNamedCompoundUnique" UNIQUE ("a", "b");
+
+                    -- CreateIndex
+                    CREATE INDEX "CompoundIndex" ON "b" ("a", "b");
+
+                    -- AddForeignKey
+                    ALTER TABLE "b" ADD CONSTRAINT "ForeignKey" FOREIGN KEY ("aId") REFERENCES "a" ("id") ON DELETE RESTRICT ON UPDATE CASCADE;
+                "#]]
+            } else if is_mssql {
                 expect![[r#"
                     BEGIN TRY
 
@@ -1204,6 +1314,7 @@ fn alter_constraint_name(mut api: TestApi) {
 
     let is_mssql = api.is_mssql();
     let is_postgres = api.is_postgres();
+    let is_kingbase_oracle = api.is_kingbase_oracle();
     let is_postgres15 = api.is_postgres_15();
     let is_postgres16 = api.is_postgres_16();
     let is_cockroach = api.is_cockroach();
@@ -1213,7 +1324,30 @@ fn alter_constraint_name(mut api: TestApi) {
         .send_sync()
         .assert_migration_directories_count(2)
         .assert_migration("custom", move |migration| {
-            let expected_script = if is_mssql {
+            let expected_script = if is_kingbase_oracle {
+                expect![[r#"
+                    -- AlterTable
+                    ALTER TABLE "public"."a" RENAME CONSTRAINT "A_pkey" TO "CustomId";
+
+                    -- AlterTable
+                    ALTER TABLE "public"."b" RENAME CONSTRAINT "B_pkey" TO "CustomCompoundId";
+
+                    -- RenameForeignKey
+                    ALTER TABLE "b" RENAME CONSTRAINT "B_aId_fkey" TO "CustomFK";
+
+                    -- RenameIndex
+                    ALTER INDEX "public"."A_a_b_key" RENAME TO "CustomCompoundUnique";
+
+                    -- RenameIndex
+                    ALTER INDEX "public"."A_a_idx" RENAME TO "CustomIndex";
+
+                    -- RenameIndex
+                    ALTER INDEX "public"."A_name_key" RENAME TO "CustomUnique";
+
+                    -- RenameIndex
+                    ALTER INDEX "public"."B_a_b_idx" RENAME TO "AnotherCustomIndex";
+                "#]]
+            } else if is_mssql {
                 expect![[r#"
                     BEGIN TRY
 
@@ -1373,13 +1507,20 @@ fn alter_constraint_name_and_alter_columns_at_same_time(mut api: TestApi) {
     );
 
     let is_postgres = api.is_postgres();
+    let is_kingbase_oracle = api.is_kingbase_oracle();
     let is_cockroach = api.is_cockroach();
 
     api.create_migration("custom_migration", &custom_dm, &dir)
         .send_sync()
         .assert_migration_directories_count(2)
         .assert_migration("custom_migration", move |migration| {
-            let expected_script = if is_cockroach {
+            let expected_script = if is_kingbase_oracle {
+                expect![[r#"
+                    -- AlterTable
+                    ALTER TABLE "public"."a" RENAME CONSTRAINT "A_pkey" TO "CustomId";
+                    ALTER TABLE "public"."a" ADD ("b" VARCHAR2(4000));
+                "#]]
+            } else if is_cockroach {
                 expect![[r#"
                     -- AlterTable
                     ALTER TABLE "A" ADD COLUMN     "b" STRING;
