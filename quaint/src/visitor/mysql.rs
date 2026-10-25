@@ -163,6 +163,10 @@ impl<'a> Visitor<'a> for Mysql<'a> {
         Ok(this.query_template)
     }
 
+    fn surround_with_backticks(&mut self, part: &str) -> visitor::Result {
+        self.write(format!("`{}`", part.replace('`', "``")))
+    }
+
     fn write(&mut self, value: impl fmt::Display) -> visitor::Result {
         self.query_template.write_string_chunk(value.to_string());
         Ok(())

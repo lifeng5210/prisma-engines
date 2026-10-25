@@ -49,6 +49,44 @@ pub enum Circumstances {
     CheckConstraints,
 }
 
+/// Constraint ownership and physical names that are not represented by the
+/// MySQL-compatible index metadata.
+#[derive(Debug, Default, Clone)]
+pub struct KingbaseMysqlSchemaExt {
+    /// Physical index identifiers, separate from table-scoped logical names.
+    pub physical_index_names: HashMap<IndexId, String>,
+    /// The owning unique constraint's name, keyed by its supporting index.
+    pub unique_constraint_names: HashMap<IndexId, String>,
+    /// The actual primary-key constraint's name, keyed by its supporting index.
+    pub primary_key_constraint_names: HashMap<IndexId, String>,
+}
+
+pub const UNSIGNED_AUTO_GUARD_BODY: &str = "DECLARE v bigint; BEGIN v := jsonb_extract_path_text(to_jsonb(NEW),TG_ARGV[0])::bigint; IF v < 0 OR v > TG_ARGV[1]::bigint THEN RAISE EXCEPTION 'Value out of range for small unsigned integer' USING ERRCODE='23514'; END IF; RETURN NEW; END;";
+
+pub fn unsigned_domain_spec(native: &KingbaseMySqlType) -> Option<(&'static str, u32)> {
+    match native {
+        KingbaseMySqlType::UnsignedTinyInt => Some(("__prisma_uint8", 255)),
+        KingbaseMySqlType::UnsignedSmallInt => Some(("__prisma_uint16", 65535)),
+        KingbaseMySqlType::UnsignedMediumInt => Some(("__prisma_uint24", 16777215)),
+        _ => None,
+    }
+}
+
+pub const INDEX_LOGICAL_NAME_PREFIX: &str = "prisma:logical-index:";
+
+/// Stable, schema-wide physical name for a custom, table-scoped MySQL name.
+/// FNV-1a is deliberately fixed rather than Rust's version-dependent hasher.
+pub fn physical_index_name(table: &str, logical_name: &str) -> String {
+    let hash = table
+        .bytes()
+        .chain([0])
+        .chain(logical_name.bytes())
+        .fold(0xcbf29ce484222325u64, |hash, byte| {
+            (hash ^ u64::from(byte)).wrapping_mul(0x100000001b3)
+        });
+    format!("_prisma_idx_{hash:016x}")
+}
+
 pub struct SqlSchemaDescriber<'a> {
     conn: &'a dyn Queryable,
     circumstances: BitFlags<Circumstances>,
@@ -96,30 +134,49 @@ async fn push_indexes(
     conn: &dyn Queryable,
 ) -> DescriberResult<()> {
     // Kingbase MySQL does not expose MySQL's information_schema.statistics view.
-    // Read the equivalent metadata from the PostgreSQL-compatible system catalogs.
+    // Read the equivalent metadata from Kingbase's native system views.
     let sql = r#"
         SELECT
             tableinfo.relname AS table_name,
             indexinfo.relname AS index_name,
+            indexdescription.description AS index_description,
             columninfo.attname AS column_name,
             NULL::INT AS partial,
             keys.ordinality::INT AS seq_in_index,
-            NULL::TEXT AS column_order,
+            CASE
+                WHEN sys_catalog.sys_index_column_has_property(rawindex.indexrelid, keys.ordinality::INT, 'desc')
+                    THEN 'D'
+                WHEN sys_catalog.sys_index_column_has_property(rawindex.indexrelid, keys.ordinality::INT, 'asc')
+                    THEN 'A'
+                ELSE NULL
+            END AS column_order,
             NOT rawindex.indisunique AS non_unique,
             indexaccess.amname AS index_type,
             rawindex.indisprimary AS is_primary,
-            pg_catalog.pg_get_expr(rawindex.indexprs, rawindex.indrelid) AS index_expression
-        FROM pg_catalog.pg_index AS rawindex
-        INNER JOIN pg_catalog.pg_class AS tableinfo
+            indexconstraint.conname AS constraint_name,
+            sys_catalog.sys_get_expr(rawindex.indexprs, rawindex.indrelid) AS index_expression
+        FROM sys_catalog.sys_index AS rawindex
+        INNER JOIN sys_catalog.sys_class AS tableinfo
             ON tableinfo.oid = rawindex.indrelid
-        INNER JOIN pg_catalog.pg_class AS indexinfo
+        INNER JOIN sys_catalog.sys_class AS indexinfo
             ON indexinfo.oid = rawindex.indexrelid
-        INNER JOIN pg_catalog.pg_namespace AS schemainfo
+        LEFT JOIN sys_catalog.sys_description AS indexdescription
+            ON indexdescription.objoid = indexinfo.oid AND indexdescription.objsubid = 0
+            AND indexdescription.classoid = (
+                SELECT classid FROM sys_catalog.sys_get_object_address(
+                    'view', ARRAY['sys_catalog', 'sys_class'], ARRAY[]::text[]
+                )
+            )
+        INNER JOIN sys_catalog.sys_namespace AS schemainfo
             ON schemainfo.oid = tableinfo.relnamespace
-        INNER JOIN pg_catalog.pg_am AS indexaccess
+        INNER JOIN sys_catalog.sys_am AS indexaccess
             ON indexaccess.oid = indexinfo.relam
+        LEFT JOIN sys_catalog.sys_constraint AS indexconstraint
+            ON indexconstraint.conindid = rawindex.indexrelid
+            AND indexconstraint.conrelid = rawindex.indrelid
+            AND indexconstraint.contype IN ('p', 'u')
         CROSS JOIN LATERAL unnest(rawindex.indkey) WITH ORDINALITY AS keys(attnum, ordinality)
-        LEFT JOIN pg_catalog.pg_attribute AS columninfo
+        LEFT JOIN sys_catalog.sys_attribute AS columninfo
             ON columninfo.attrelid = tableinfo.oid
             AND columninfo.attnum = keys.attnum
         WHERE schemainfo.nspname = ?
@@ -150,10 +207,14 @@ async fn push_indexes(
             .then_with(|| index_a.cmp(index_b))
             .then_with(|| seq_a.cmp(seq_b))
     });
+    let mut ext = KingbaseMysqlSchemaExt::default();
     let mut current_index_id: Option<IndexId> = None;
     let mut skip_current_index = false;
 
-    let remove_last_index = |schema: &mut SqlSchema, index_id: IndexId| {
+    let remove_last_index = |schema: &mut SqlSchema, ext: &mut KingbaseMysqlSchemaExt, index_id: IndexId| {
+        ext.unique_constraint_names.remove(&index_id);
+        ext.physical_index_names.remove(&index_id);
+        ext.primary_key_constraint_names.remove(&index_id);
         schema.indexes.pop().unwrap();
         loop {
             match schema.index_columns.last() {
@@ -166,7 +227,12 @@ async fn push_indexes(
     };
 
     for (table_id, _, _, row) in rows {
-        let index_name = row.get_expect_string("index_name");
+        let physical_name = row.get_expect_string("index_name");
+        let index_name = row
+            .get_string("index_description")
+            .and_then(|comment| comment.strip_prefix(INDEX_LOGICAL_NAME_PREFIX).map(str::to_owned))
+            .filter(|logical| !logical.is_empty() && physical_name.starts_with("_prisma_idx_"))
+            .unwrap_or_else(|| physical_name.clone());
         let length = row.get_u32("partial");
 
         let sort_order = row.get_string("column_order").map(|v| match v.as_ref() {
@@ -187,6 +253,7 @@ async fn push_indexes(
             && let Some(columns) = fulltext_index_columns(row.get_string("index_expression").as_deref())
         {
             let index_id = sql_schema.push_fulltext_index(table_id, index_name);
+            ext.physical_index_names.insert(index_id, physical_name);
 
             for column_name in columns {
                 let column_id = sql_schema
@@ -213,7 +280,7 @@ async fn push_indexes(
             // whole index, including any later ordinary columns, rather than
             // attaching those columns to the previous index.
             if let Some(index_id) = current_index_id.take() {
-                remove_last_index(sql_schema, index_id);
+                remove_last_index(sql_schema, &mut ext, index_id);
             }
             skip_current_index = true;
             continue;
@@ -245,6 +312,16 @@ async fn push_indexes(
                 sql_schema.push_index(table_id, index_name)
             };
 
+            if !is_pk {
+                ext.physical_index_names.insert(index_id, physical_name);
+            }
+            if is_pk {
+                ext.primary_key_constraint_names
+                    .insert(index_id, row.get_expect_string("constraint_name"));
+            } else if is_unique && let Some(name) = row.get_string("constraint_name") {
+                ext.unique_constraint_names.insert(index_id, name);
+            }
+
             current_index_id = Some(index_id);
         }
 
@@ -255,6 +332,8 @@ async fn push_indexes(
             length,
         });
     }
+
+    sql_schema.set_connector_data(Box::new(ext));
 
     Ok(())
 }
@@ -463,17 +542,23 @@ impl<'a> SqlSchemaDescriber<'a> {
         let sql = indoc! {r#"
             SELECT views.TABLE_NAME AS view_name, views.VIEW_DEFINITION AS view_sql
             FROM INFORMATION_SCHEMA.VIEWS AS views
-            INNER JOIN pg_catalog.pg_namespace AS namespace
+            INNER JOIN sys_catalog.sys_namespace AS namespace
                 ON namespace.nspname = views.TABLE_SCHEMA
-            INNER JOIN pg_catalog.pg_class AS relation
+            INNER JOIN sys_catalog.sys_class AS relation
                 ON relation.relnamespace = namespace.oid
                 AND relation.relname = views.TABLE_NAME
             WHERE views.TABLE_SCHEMA = ?
                 -- Do not expose views installed by database extensions as user views.
                 AND NOT EXISTS (
                     SELECT 1
-                    FROM pg_catalog.pg_depend AS dependency
-                    WHERE dependency.classid = 'pg_catalog.pg_class'::regclass
+                    FROM sys_catalog.sys_depend AS dependency
+                    -- sys_class is a view; its own OID is not the relation classid.
+                    WHERE dependency.classid = (
+                        SELECT classid
+                        FROM sys_catalog.sys_get_object_address(
+                            'view', ARRAY['sys_catalog', 'sys_class'], ARRAY[]::text[]
+                        )
+                    )
                         AND dependency.objid = relation.oid
                         AND dependency.deptype = 'e'
                 );
@@ -580,6 +665,88 @@ impl<'a> SqlSchemaDescriber<'a> {
         flavour: &Flavour,
     ) -> DescriberResult<()> {
         let user_defined_enum_variants = Self::get_user_defined_enum_variants(conn, schema_name).await?;
+        let domain_columns = conn
+            .query_raw(
+                "SELECT relation.relname AS table_name, attribute.attname AS column_name,
+            t.typname AS domain_name, sys_catalog.sys_get_expr(co.conbin,0) AS range_expression
+            FROM sys_catalog.sys_attribute attribute
+            JOIN sys_catalog.sys_class relation ON relation.oid=attribute.attrelid
+            JOIN sys_catalog.sys_namespace rn ON rn.oid=relation.relnamespace
+            JOIN sys_catalog.sys_type t ON t.oid=attribute.atttypid
+            JOIN sys_catalog.sys_type base ON base.oid=t.typbasetype
+            JOIN sys_catalog.sys_namespace bn ON bn.oid=base.typnamespace
+            JOIN sys_catalog.sys_constraint co ON co.contypid=t.oid
+            WHERE rn.nspname=? AND t.typtype='d' AND NOT t.typnotnull AND t.typdefault IS NULL
+            AND bn.nspname='sys' AND base.typname='uint4' AND co.contype='c' AND co.convalidated
+            AND (SELECT count(*) FROM sys_catalog.sys_constraint other WHERE other.contypid=t.oid)=1",
+                &[schema_name.into()],
+            )
+            .await?;
+        let mut managed_unsigned: HashMap<_, _> = domain_columns
+            .into_iter()
+            .filter_map(|row| {
+                let native = match row.get_string("domain_name")?.as_str() {
+                    "__prisma_uint8" => KingbaseMySqlType::UnsignedTinyInt,
+                    "__prisma_uint16" => KingbaseMySqlType::UnsignedSmallInt,
+                    "__prisma_uint24" => KingbaseMySqlType::UnsignedMediumInt,
+                    _ => return None,
+                };
+                let (_, maximum) = unsigned_domain_spec(&native).unwrap();
+                let expression = row
+                    .get_string("range_expression")?
+                    .replace("OPERATOR(sys.<=)", "<=")
+                    .replace(' ', "");
+                (expression == format!("(VALUE<={maximum})")).then(|| {
+                    (
+                        (
+                            row.get_expect_string("table_name"),
+                            row.get_expect_string("column_name"),
+                        ),
+                        native,
+                    )
+                })
+            })
+            .collect();
+
+        let auto_columns = conn
+            .query_raw(
+                "SELECT relation.relname AS table_name, attribute.attname AS column_name,
+            trigger.tgargs AS trigger_arguments, procedure.prosrc AS body
+            FROM sys_catalog.sys_trigger trigger JOIN sys_catalog.sys_class relation ON relation.oid=trigger.tgrelid
+            JOIN sys_catalog.sys_namespace rn ON rn.oid=relation.relnamespace
+            JOIN sys_catalog.sys_proc procedure ON procedure.oid=trigger.tgfoid
+            JOIN sys_catalog.sys_namespace pn ON pn.oid=procedure.pronamespace
+            JOIN sys_catalog.sys_attribute attribute ON attribute.attrelid=relation.oid
+            WHERE rn.nspname=? AND pn.nspname=rn.nspname AND procedure.proname='__prisma_unsigned_auto_guard'
+            AND trigger.tgname='__prisma_unsigned_auto' AND trigger.tgnargs=2 AND trigger.tgtype=21
+            AND trigger.tgenabled IN ('O','A') AND NOT trigger.tgisinternal
+            AND attribute.attidentity IN ('a','d','i') AND attribute.atttypid='integer'::regtype",
+                &[schema_name.into()],
+            )
+            .await?;
+        for row in auto_columns {
+            if row.get_expect_string("body") != UNSIGNED_AUTO_GUARD_BODY {
+                continue;
+            }
+            let Some(arguments) = row.get("trigger_arguments").and_then(|value| value.as_bytes()) else {
+                continue;
+            };
+            let arguments: Vec<_> = arguments.split(|byte| *byte == 0).collect();
+            if arguments.len() != 3 || !arguments[2].is_empty() {
+                continue;
+            }
+            let name = row.get_expect_string("column_name");
+            if arguments[0] != name.as_bytes() {
+                continue;
+            }
+            let native = match arguments[1] {
+                b"255" => KingbaseMySqlType::UnsignedTinyInt,
+                b"65535" => KingbaseMySqlType::UnsignedSmallInt,
+                b"16777215" => KingbaseMySqlType::UnsignedMediumInt,
+                _ => continue,
+            };
+            managed_unsigned.insert((row.get_expect_string("table_name"), name), native);
+        }
 
         // We alias all the columns because MySQL column names are case-insensitive in queries, but the
         // information schema column names became upper-case in MySQL 8, causing the code fetching
@@ -599,10 +766,10 @@ impl<'a> SqlSchemaDescriber<'a> {
                     WHEN extra = 'auto_increment' THEN extra
                     WHEN EXISTS (
                         SELECT 1
-                        FROM pg_catalog.pg_attribute AS identity_column
-                        INNER JOIN pg_catalog.pg_class AS identity_table
+                        FROM sys_catalog.sys_attribute AS identity_column
+                        INNER JOIN sys_catalog.sys_class AS identity_table
                             ON identity_table.oid = identity_column.attrelid
-                        INNER JOIN pg_catalog.pg_namespace AS identity_schema
+                        INNER JOIN sys_catalog.sys_namespace AS identity_schema
                             ON identity_schema.oid = identity_table.relnamespace
                         WHERE identity_schema.nspname = column_info.table_schema
                             AND identity_table.relname = column_info.table_name
@@ -666,7 +833,7 @@ impl<'a> SqlSchemaDescriber<'a> {
 
             let default_value = col.get("column_default");
 
-            let tpe = Self::get_column_type(
+            let mut tpe = Self::get_column_type(
                 (&table_name, &name),
                 &data_type,
                 &full_data_type,
@@ -676,6 +843,10 @@ impl<'a> SqlSchemaDescriber<'a> {
                 sql_schema,
                 &user_defined_enum_variants,
             );
+            if let Some(native) = managed_unsigned.get(&(table_name.clone(), name.clone())) {
+                tpe.family = ColumnTypeFamily::Int;
+                tpe.native_type = Some(NativeTypeInstance::new(*native));
+            }
             let extra = col.get_string("extra").unwrap_or_default().to_lowercase();
             let auto_increment = matches!(extra.as_str(), "auto_increment");
 
@@ -854,17 +1025,17 @@ impl<'a> SqlSchemaDescriber<'a> {
         conn: &dyn Queryable,
         schema_name: &str,
     ) -> DescriberResult<HashMap<String, Vec<String>>> {
-        // Kingbase exposes MySQL ENUM columns through PostgreSQL-compatible user-defined
+        // Kingbase exposes MySQL ENUM columns through user-defined
         // types. The information_schema COLUMNS view only contains the generated type name,
-        // so fetch the labels from pg_enum separately.
+        // so fetch the labels from sys_enum separately.
         let sql = "
             SELECT
                 t.typname AS type_name,
                 e.enumlabel AS enum_label
-            FROM pg_catalog.pg_type AS t
-            INNER JOIN pg_catalog.pg_enum AS e
+            FROM sys_catalog.sys_type AS t
+            INNER JOIN sys_catalog.sys_enum AS e
                 ON e.enumtypid = t.oid
-            INNER JOIN pg_catalog.pg_namespace AS n
+            INNER JOIN sys_catalog.sys_namespace AS n
                 ON n.oid = t.typnamespace
             WHERE n.nspname = ?
             ORDER BY t.oid, e.enumsortorder

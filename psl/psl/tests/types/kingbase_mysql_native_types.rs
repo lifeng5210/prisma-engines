@@ -6,6 +6,31 @@ use psl::{
 };
 
 #[test]
+fn kingbase_mysql_rejects_index_length_prefixes() {
+    for attribute in [
+        "@@index([value(length: 8)])",
+        "@@unique([value(length: 8)])",
+        "@@id([id, value(length: 8)])",
+        "@unique(length: 8)",
+        "@id(length: 8)",
+    ] {
+        let field_attribute = if attribute.starts_with("@@") { "" } else { attribute };
+        let model_attribute = if attribute.starts_with("@@") { attribute } else { "" };
+        let id_attribute = if attribute.contains("@id") { "" } else { "@id" };
+        let schema = format!(
+            "datasource db {{\n provider = \"kingbase-mysql\"\n }}\n \
+             model Test {{\n id Int {id_attribute}\n value String @db.VarChar(32) {field_attribute}\n \
+             {model_attribute}\n }}"
+        );
+        let error = parse_unwrap_err(&schema);
+        assert!(
+            error.contains("length argument is not supported"),
+            "{attribute}: {error}"
+        );
+    }
+}
+
+#[test]
 fn constraint_names_are_limited_to_sixty_three_bytes() {
     let valid_name = "a".repeat(63);
     let invalid_name = "a".repeat(64);
@@ -44,7 +69,7 @@ fn constraint_names_are_limited_to_sixty_three_bytes() {
 }
 
 #[test]
-fn text_type_should_fail_on_unique() {
+fn text_type_can_be_unique() {
     let schema = indoc! {r#"
         datasource db {
           provider = "kingbase-mysql"
@@ -59,20 +84,11 @@ fn text_type_should_fail_on_unique() {
         }
     "#};
 
-    let expectation = expect![[r#"
-        error: Native type `Text` cannot be unique in Kingbase MySQL. Please use the `length` argument to the field in the index definition to allow this.
-          -->  schema.prisma:10
-           | 
-         9 | 
-        10 |   @@unique([firstName, lastName])
-           | 
-    "#]];
-
-    expect_error(schema, &expectation);
+    assert_valid(schema);
 }
 
 #[test]
-fn longtext_type_should_fail_on_unique() {
+fn longtext_type_can_be_unique() {
     let schema = indoc! {r#"
         datasource db {
           provider = "kingbase-mysql"
@@ -87,20 +103,11 @@ fn longtext_type_should_fail_on_unique() {
         }
     "#};
 
-    let expectation = expect![[r#"
-        error: Native type `LongText` cannot be unique in Kingbase MySQL. Please use the `length` argument to the field in the index definition to allow this.
-          -->  schema.prisma:10
-           | 
-         9 | 
-        10 |   @@unique([firstName, lastName])
-           | 
-    "#]];
-
-    expect_error(schema, &expectation);
+    assert_valid(schema);
 }
 
 #[test]
-fn mediumtext_type_should_fail_on_unique() {
+fn mediumtext_type_can_be_unique() {
     let schema = indoc! {r#"
         datasource db {
           provider = "kingbase-mysql"
@@ -115,20 +122,11 @@ fn mediumtext_type_should_fail_on_unique() {
         }
     "#};
 
-    let expectation = expect![[r#"
-        error: Native type `MediumText` cannot be unique in Kingbase MySQL. Please use the `length` argument to the field in the index definition to allow this.
-          -->  schema.prisma:10
-           | 
-         9 | 
-        10 |   @@unique([firstName, lastName])
-           | 
-    "#]];
-
-    expect_error(schema, &expectation);
+    assert_valid(schema);
 }
 
 #[test]
-fn tinytext_type_should_fail_on_unique() {
+fn tinytext_type_can_be_unique() {
     let schema = indoc! {r#"
         datasource db {
           provider = "kingbase-mysql"
@@ -143,20 +141,11 @@ fn tinytext_type_should_fail_on_unique() {
         }
     "#};
 
-    let expectation = expect![[r#"
-        error: Native type `TinyText` cannot be unique in Kingbase MySQL. Please use the `length` argument to the field in the index definition to allow this.
-          -->  schema.prisma:10
-           | 
-         9 | 
-        10 |   @@unique([firstName, lastName])
-           | 
-    "#]];
-
-    expect_error(schema, &expectation);
+    assert_valid(schema);
 }
 
 #[test]
-fn blob_type_should_fail_on_unique() {
+fn blob_type_can_be_unique() {
     let schema = indoc! {r#"
         datasource db {
           provider = "kingbase-mysql"
@@ -171,20 +160,11 @@ fn blob_type_should_fail_on_unique() {
         }
     "#};
 
-    let expectation = expect![[r#"
-        error: Native type `Blob` cannot be unique in Kingbase MySQL. Please use the `length` argument to the field in the index definition to allow this.
-          -->  schema.prisma:10
-           | 
-         9 | 
-        10 |   @@unique([firstName, lastName])
-           | 
-    "#]];
-
-    expect_error(schema, &expectation);
+    assert_valid(schema);
 }
 
 #[test]
-fn longblob_type_should_fail_on_unique() {
+fn longblob_type_can_be_unique() {
     let schema = indoc! {r#"
         datasource db {
           provider = "kingbase-mysql"
@@ -199,20 +179,11 @@ fn longblob_type_should_fail_on_unique() {
         }
     "#};
 
-    let expectation = expect![[r#"
-        error: Native type `LongBlob` cannot be unique in Kingbase MySQL. Please use the `length` argument to the field in the index definition to allow this.
-          -->  schema.prisma:10
-           | 
-         9 | 
-        10 |   @@unique([firstName, lastName])
-           | 
-    "#]];
-
-    expect_error(schema, &expectation);
+    assert_valid(schema);
 }
 
 #[test]
-fn mediumblob_type_should_fail_on_unique() {
+fn mediumblob_type_can_be_unique() {
     let schema = indoc! {r#"
         datasource db {
           provider = "kingbase-mysql"
@@ -227,20 +198,11 @@ fn mediumblob_type_should_fail_on_unique() {
         }
     "#};
 
-    let expectation = expect![[r#"
-        error: Native type `MediumBlob` cannot be unique in Kingbase MySQL. Please use the `length` argument to the field in the index definition to allow this.
-          -->  schema.prisma:10
-           | 
-         9 | 
-        10 |   @@unique([firstName, lastName])
-           | 
-    "#]];
-
-    expect_error(schema, &expectation);
+    assert_valid(schema);
 }
 
 #[test]
-fn tinyblob_type_should_fail_on_unique() {
+fn tinyblob_type_can_be_unique() {
     let schema = indoc! {r#"
         datasource db {
           provider = "kingbase-mysql"
@@ -255,20 +217,11 @@ fn tinyblob_type_should_fail_on_unique() {
         }
     "#};
 
-    let expectation = expect![[r#"
-        error: Native type `TinyBlob` cannot be unique in Kingbase MySQL. Please use the `length` argument to the field in the index definition to allow this.
-          -->  schema.prisma:10
-           | 
-         9 | 
-        10 |   @@unique([firstName, lastName])
-           | 
-    "#]];
-
-    expect_error(schema, &expectation);
+    assert_valid(schema);
 }
 
 #[test]
-fn text_type_should_fail_on_index() {
+fn text_type_can_be_indexed() {
     let schema = indoc! {r#"
         datasource db {
           provider = "kingbase-mysql"
@@ -283,20 +236,11 @@ fn text_type_should_fail_on_index() {
         }
     "#};
 
-    let expectation = expect![[r#"
-        error: You cannot define an index on fields with native type `Text` of Kingbase MySQL. Please use the `length` argument to the field in the index definition to allow this.
-          -->  schema.prisma:10
-           | 
-         9 | 
-        10 |   @@index([firstName, lastName])
-           | 
-    "#]];
-
-    expect_error(schema, &expectation);
+    assert_valid(schema);
 }
 
 #[test]
-fn longtext_type_should_fail_on_index() {
+fn longtext_type_can_be_indexed() {
     let schema = indoc! {r#"
         datasource db {
           provider = "kingbase-mysql"
@@ -311,20 +255,11 @@ fn longtext_type_should_fail_on_index() {
         }
     "#};
 
-    let expectation = expect![[r#"
-        error: You cannot define an index on fields with native type `LongText` of Kingbase MySQL. Please use the `length` argument to the field in the index definition to allow this.
-          -->  schema.prisma:10
-           | 
-         9 | 
-        10 |   @@index([firstName, lastName])
-           | 
-    "#]];
-
-    expect_error(schema, &expectation);
+    assert_valid(schema);
 }
 
 #[test]
-fn mediumtext_type_should_fail_on_index() {
+fn mediumtext_type_can_be_indexed() {
     let schema = indoc! {r#"
         datasource db {
           provider = "kingbase-mysql"
@@ -339,20 +274,11 @@ fn mediumtext_type_should_fail_on_index() {
         }
     "#};
 
-    let expectation = expect![[r#"
-        error: You cannot define an index on fields with native type `MediumText` of Kingbase MySQL. Please use the `length` argument to the field in the index definition to allow this.
-          -->  schema.prisma:10
-           | 
-         9 | 
-        10 |   @@index([firstName, lastName])
-           | 
-    "#]];
-
-    expect_error(schema, &expectation);
+    assert_valid(schema);
 }
 
 #[test]
-fn tinytext_type_should_fail_on_index() {
+fn tinytext_type_can_be_indexed() {
     let schema = indoc! {r#"
         datasource db {
           provider = "kingbase-mysql"
@@ -367,20 +293,11 @@ fn tinytext_type_should_fail_on_index() {
         }
     "#};
 
-    let expectation = expect![[r#"
-        error: You cannot define an index on fields with native type `TinyText` of Kingbase MySQL. Please use the `length` argument to the field in the index definition to allow this.
-          -->  schema.prisma:10
-           | 
-         9 | 
-        10 |   @@index([firstName, lastName])
-           | 
-    "#]];
-
-    expect_error(schema, &expectation);
+    assert_valid(schema);
 }
 
 #[test]
-fn blob_type_should_fail_on_index() {
+fn blob_type_can_be_indexed() {
     let schema = indoc! {r#"
         datasource db {
           provider = "kingbase-mysql"
@@ -395,20 +312,11 @@ fn blob_type_should_fail_on_index() {
         }
     "#};
 
-    let expectation = expect![[r#"
-        error: You cannot define an index on fields with native type `Blob` of Kingbase MySQL. Please use the `length` argument to the field in the index definition to allow this.
-          -->  schema.prisma:10
-           | 
-         9 | 
-        10 |   @@index([firstName, lastName])
-           | 
-    "#]];
-
-    expect_error(schema, &expectation);
+    assert_valid(schema);
 }
 
 #[test]
-fn longblob_type_should_fail_on_index() {
+fn longblob_type_can_be_indexed() {
     let schema = indoc! {r#"
         datasource db {
           provider = "kingbase-mysql"
@@ -423,20 +331,11 @@ fn longblob_type_should_fail_on_index() {
         }
     "#};
 
-    let expectation = expect![[r#"
-        error: You cannot define an index on fields with native type `LongBlob` of Kingbase MySQL. Please use the `length` argument to the field in the index definition to allow this.
-          -->  schema.prisma:10
-           | 
-         9 | 
-        10 |   @@index([firstName, lastName])
-           | 
-    "#]];
-
-    expect_error(schema, &expectation);
+    assert_valid(schema);
 }
 
 #[test]
-fn mediumblob_type_should_fail_on_index() {
+fn mediumblob_type_can_be_indexed() {
     let schema = indoc! {r#"
         datasource db {
           provider = "kingbase-mysql"
@@ -451,20 +350,11 @@ fn mediumblob_type_should_fail_on_index() {
         }
     "#};
 
-    let expectation = expect![[r#"
-        error: You cannot define an index on fields with native type `MediumBlob` of Kingbase MySQL. Please use the `length` argument to the field in the index definition to allow this.
-          -->  schema.prisma:10
-           | 
-         9 | 
-        10 |   @@index([firstName, lastName])
-           | 
-    "#]];
-
-    expect_error(schema, &expectation);
+    assert_valid(schema);
 }
 
 #[test]
-fn tinyblob_type_should_fail_on_index() {
+fn tinyblob_type_can_be_indexed() {
     let schema = indoc! {r#"
         datasource db {
           provider = "kingbase-mysql"
@@ -479,20 +369,11 @@ fn tinyblob_type_should_fail_on_index() {
         }
     "#};
 
-    let expectation = expect![[r#"
-        error: You cannot define an index on fields with native type `TinyBlob` of Kingbase MySQL. Please use the `length` argument to the field in the index definition to allow this.
-          -->  schema.prisma:10
-           | 
-         9 | 
-        10 |   @@index([firstName, lastName])
-           | 
-    "#]];
-
-    expect_error(schema, &expectation);
+    assert_valid(schema);
 }
 
 #[test]
-fn text_type_should_fail_on_id() {
+fn text_type_can_be_a_primary_key() {
     let schema = indoc! {r#"
         datasource db {
           provider = "kingbase-mysql"
@@ -506,20 +387,11 @@ fn text_type_should_fail_on_id() {
         }
     "#};
 
-    let expectation = expect![[r#"
-        error: Native type `Text` of Kingbase MySQL cannot be used on a field that is `@id` or `@@id`. Please use the `length` argument to the field in the index definition to allow this.
-          -->  schema.prisma:9
-           | 
-         8 | 
-         9 |   @@id([firstName, lastName])
-           | 
-    "#]];
-
-    expect_error(schema, &expectation);
+    assert_valid(schema);
 }
 
 #[test]
-fn longtext_type_should_fail_on_id() {
+fn longtext_type_can_be_a_primary_key() {
     let schema = indoc! {r#"
         datasource db {
           provider = "kingbase-mysql"
@@ -533,20 +405,11 @@ fn longtext_type_should_fail_on_id() {
         }
     "#};
 
-    let expectation = expect![[r#"
-        error: Native type `LongText` of Kingbase MySQL cannot be used on a field that is `@id` or `@@id`. Please use the `length` argument to the field in the index definition to allow this.
-          -->  schema.prisma:9
-           | 
-         8 | 
-         9 |   @@id([firstName, lastName])
-           | 
-    "#]];
-
-    expect_error(schema, &expectation);
+    assert_valid(schema);
 }
 
 #[test]
-fn mediumtext_type_should_fail_on_id() {
+fn mediumtext_type_can_be_a_primary_key() {
     let schema = indoc! {r#"
         datasource db {
           provider = "kingbase-mysql"
@@ -560,20 +423,11 @@ fn mediumtext_type_should_fail_on_id() {
         }
     "#};
 
-    let expectation = expect![[r#"
-        error: Native type `MediumText` of Kingbase MySQL cannot be used on a field that is `@id` or `@@id`. Please use the `length` argument to the field in the index definition to allow this.
-          -->  schema.prisma:9
-           | 
-         8 | 
-         9 |   @@id([firstName, lastName])
-           | 
-    "#]];
-
-    expect_error(schema, &expectation);
+    assert_valid(schema);
 }
 
 #[test]
-fn tinytext_type_should_fail_on_id() {
+fn tinytext_type_can_be_a_primary_key() {
     let schema = indoc! {r#"
         datasource db {
           provider = "kingbase-mysql"
@@ -587,20 +441,11 @@ fn tinytext_type_should_fail_on_id() {
         }
     "#};
 
-    let expectation = expect![[r#"
-        error: Native type `TinyText` of Kingbase MySQL cannot be used on a field that is `@id` or `@@id`. Please use the `length` argument to the field in the index definition to allow this.
-          -->  schema.prisma:9
-           | 
-         8 | 
-         9 |   @@id([firstName, lastName])
-           | 
-    "#]];
-
-    expect_error(schema, &expectation);
+    assert_valid(schema);
 }
 
 #[test]
-fn blob_type_should_fail_on_id() {
+fn blob_type_can_be_a_primary_key() {
     let schema = indoc! {r#"
         datasource db {
           provider = "kingbase-mysql"
@@ -614,20 +459,11 @@ fn blob_type_should_fail_on_id() {
         }
     "#};
 
-    let expectation = expect![[r#"
-        error: Native type `Blob` of Kingbase MySQL cannot be used on a field that is `@id` or `@@id`. Please use the `length` argument to the field in the index definition to allow this.
-          -->  schema.prisma:9
-           | 
-         8 | 
-         9 |   @@id([firstName, lastName])
-           | 
-    "#]];
-
-    expect_error(schema, &expectation);
+    assert_valid(schema);
 }
 
 #[test]
-fn longblob_type_should_fail_on_id() {
+fn longblob_type_can_be_a_primary_key() {
     let schema = indoc! {r#"
         datasource db {
           provider = "kingbase-mysql"
@@ -641,20 +477,11 @@ fn longblob_type_should_fail_on_id() {
         }
     "#};
 
-    let expectation = expect![[r#"
-        error: Native type `LongBlob` of Kingbase MySQL cannot be used on a field that is `@id` or `@@id`. Please use the `length` argument to the field in the index definition to allow this.
-          -->  schema.prisma:9
-           | 
-         8 | 
-         9 |   @@id([firstName, lastName])
-           | 
-    "#]];
-
-    expect_error(schema, &expectation);
+    assert_valid(schema);
 }
 
 #[test]
-fn mediumblob_type_should_fail_on_id() {
+fn mediumblob_type_can_be_a_primary_key() {
     let schema = indoc! {r#"
         datasource db {
           provider = "kingbase-mysql"
@@ -668,20 +495,11 @@ fn mediumblob_type_should_fail_on_id() {
         }
     "#};
 
-    let expectation = expect![[r#"
-        error: Native type `MediumBlob` of Kingbase MySQL cannot be used on a field that is `@id` or `@@id`. Please use the `length` argument to the field in the index definition to allow this.
-          -->  schema.prisma:9
-           | 
-         8 | 
-         9 |   @@id([firstName, lastName])
-           | 
-    "#]];
-
-    expect_error(schema, &expectation);
+    assert_valid(schema);
 }
 
 #[test]
-fn tinyblob_type_should_fail_on_id() {
+fn tinyblob_type_can_be_a_primary_key() {
     let schema = indoc! {r#"
         datasource db {
           provider = "kingbase-mysql"
@@ -695,20 +513,11 @@ fn tinyblob_type_should_fail_on_id() {
         }
     "#};
 
-    let expectation = expect![[r#"
-        error: Native type `TinyBlob` of Kingbase MySQL cannot be used on a field that is `@id` or `@@id`. Please use the `length` argument to the field in the index definition to allow this.
-          -->  schema.prisma:9
-           | 
-         8 | 
-         9 |   @@id([firstName, lastName])
-           | 
-    "#]];
-
-    expect_error(schema, &expectation);
+    assert_valid(schema);
 }
 
 #[test]
-fn text_should_not_fail_on_length_prefixed_index() {
+fn text_should_fail_on_length_prefixed_index() {
     let dml = indoc! {r#"
         datasource db {
           provider = "kingbase-mysql"
@@ -722,11 +531,11 @@ fn text_should_not_fail_on_length_prefixed_index() {
         }
     "#};
 
-    assert_valid(dml)
+    assert!(parse_unwrap_err(dml).contains("length argument is not supported"))
 }
 
 #[test]
-fn text_should_not_fail_on_length_prefixed_unique() {
+fn text_should_fail_on_length_prefixed_unique() {
     let dml = indoc! {r#"
         datasource db {
           provider = "kingbase-mysql"
@@ -738,11 +547,11 @@ fn text_should_not_fail_on_length_prefixed_unique() {
         }
     "#};
 
-    assert_valid(dml)
+    assert!(parse_unwrap_err(dml).contains("length argument is not supported"))
 }
 
 #[test]
-fn text_should_not_fail_on_length_prefixed_pk() {
+fn text_should_fail_on_length_prefixed_pk() {
     let dml = indoc! {r#"
         datasource db {
           provider = "kingbase-mysql"
@@ -753,11 +562,11 @@ fn text_should_not_fail_on_length_prefixed_pk() {
         }
     "#};
 
-    assert_valid(dml)
+    assert!(parse_unwrap_err(dml).contains("length argument is not supported"))
 }
 
 #[test]
-fn bytes_should_not_fail_on_length_prefixed_index() {
+fn bytes_should_fail_on_length_prefixed_index() {
     let dml = indoc! {r#"
         datasource db {
           provider = "kingbase-mysql"
@@ -771,11 +580,11 @@ fn bytes_should_not_fail_on_length_prefixed_index() {
         }
     "#};
 
-    assert_valid(dml)
+    assert!(parse_unwrap_err(dml).contains("length argument is not supported"))
 }
 
 #[test]
-fn bytes_should_not_fail_on_length_prefixed_unique() {
+fn bytes_should_fail_on_length_prefixed_unique() {
     let dml = indoc! {r#"
         datasource db {
           provider = "kingbase-mysql"
@@ -787,11 +596,11 @@ fn bytes_should_not_fail_on_length_prefixed_unique() {
         }
     "#};
 
-    assert_valid(dml)
+    assert!(parse_unwrap_err(dml).contains("length argument is not supported"))
 }
 
 #[test]
-fn bytes_should_not_fail_on_length_prefixed_pk() {
+fn bytes_should_fail_on_length_prefixed_pk() {
     let dml = indoc! {r#"
         datasource db {
           provider = "kingbase-mysql"
@@ -802,7 +611,7 @@ fn bytes_should_not_fail_on_length_prefixed_pk() {
         }
     "#};
 
-    assert_valid(dml)
+    assert!(parse_unwrap_err(dml).contains("length argument is not supported"))
 }
 
 #[test]
@@ -889,16 +698,16 @@ fn should_fail_on_argument_out_of_range_for_char_type() {
 
         model User {
           id        Int    @id
-          firstName String @db.Char(256)
+          firstName String @db.Char(10485761)
         }
     "#};
 
     let expectation = expect![[r#"
-        error: Argument M is out of range for native type `Char(256)` of Kingbase MySQL: M can range from 0 to 255.
+        error: Argument M is out of range for native type `Char(10485761)` of Kingbase MySQL: M can range from 0 to 10,485,760.
           -->  schema.prisma:7
            | 
          6 |   id        Int    @id
-         7 |   firstName String @db.Char(256)
+         7 |   firstName String @db.Char(10485761)
            | 
     "#]];
 
@@ -914,16 +723,16 @@ fn should_fail_on_argument_out_of_range_for_varchar_type() {
 
         model User {
           id        Int    @id
-          firstName String @db.Char(655350)
+          firstName String @db.VarChar(10485761)
         }
     "#};
 
     let expectation = expect![[r#"
-        error: Argument M is out of range for native type `Char(655350)` of Kingbase MySQL: M can range from 0 to 255.
+        error: Argument M is out of range for native type `VarChar(10485761)` of Kingbase MySQL: M can range from 0 to 10,485,760.
           -->  schema.prisma:7
            | 
          6 |   id        Int    @id
-         7 |   firstName String @db.Char(655350)
+         7 |   firstName String @db.VarChar(10485761)
            | 
     "#]];
 
@@ -939,16 +748,16 @@ fn should_fail_on_argument_out_of_range_for_decimal_type() {
 
         model User {
           id        Int     @id
-          firstName Decimal @db.Decimal(66,20)
+          firstName Decimal @db.Decimal(1001,20)
         }
     "#};
 
     let expectation = expect![[r#"
-        error: Argument M is out of range for native type `Decimal(66,20)` of Kingbase MySQL: Precision can range from 1 to 65.
+        error: Argument M is out of range for native type `Decimal(1001,20)` of Kingbase MySQL: Precision can range from 1 to 1000.
           -->  schema.prisma:7
            | 
          6 |   id        Int     @id
-         7 |   firstName Decimal @db.Decimal(66,20)
+         7 |   firstName Decimal @db.Decimal(1001,20)
            | 
     "#]];
 
@@ -961,16 +770,16 @@ fn should_fail_on_argument_out_of_range_for_decimal_type() {
 
         model User {
           id        Int     @id
-          firstName Decimal @db.Decimal(44,33)
+          firstName Decimal @db.Decimal(44,1001)
         }
     "#};
 
     let expectation = expect![[r#"
-        error: Argument M is out of range for native type `Decimal(44,33)` of Kingbase MySQL: Scale can range from 0 to 30.
+        error: Argument M is out of range for native type `Decimal(44,1001)` of Kingbase MySQL: Scale can range from 0 to 1000.
           -->  schema.prisma:7
            | 
          6 |   id        Int     @id
-         7 |   firstName Decimal @db.Decimal(44,33)
+         7 |   firstName Decimal @db.Decimal(44,1001)
            | 
     "#]];
 
@@ -978,28 +787,76 @@ fn should_fail_on_argument_out_of_range_for_decimal_type() {
 }
 
 #[test]
-fn should_fail_on_native_type_decimal_when_scale_is_bigger_than_precision() {
-    let dml = indoc! {r#"
-        datasource db {
-          provider = "kingbase-mysql"
+fn decimal_scale_larger_than_precision_is_normalized() {
+    let mut diagnostics = psl::diagnostics::Diagnostics::new();
+    let native_type = KINGBASE_MYSQL
+        .parse_native_type(
+            "Decimal",
+            &["2".into(), "4".into()],
+            psl::diagnostics::Span::empty(),
+            &mut diagnostics,
+        )
+        .unwrap();
+    assert_eq!(
+        native_type.downcast_ref::<KingbaseMySqlType>(),
+        &KingbaseMySqlType::Decimal(Some((4, 4)))
+    );
+    assert_valid(
+        "datasource db {\n provider = \"kingbase-mysql\"\n }\n model Test {\n id Int @id\n value Decimal @db.Decimal(2, 4)\n }",
+    );
+}
+
+#[test]
+fn kingbase_native_type_ranges_are_accepted() {
+    for native_type in [
+        "Char(0)",
+        "Char(256)",
+        "Char(655350)",
+        "Char(10485760)",
+        "VarChar(0)",
+        "VarChar(655350)",
+        "VarChar(10485760)",
+        "Decimal(66,20)",
+        "Decimal(44,33)",
+        "Decimal(1000,1000)",
+    ] {
+        let scalar = if native_type.starts_with("Decimal") {
+            "Decimal"
+        } else {
+            "String"
+        };
+        assert_valid(&format!(
+            "datasource db {{\n provider = \"kingbase-mysql\"\n }}\n model Test {{\n id Int @id\n value {scalar} @db.{native_type}\n }}"
+        ));
+    }
+}
+
+#[test]
+fn zero_decimal_precision_is_rejected_even_when_scale_is_larger() {
+    for scale in [0, 4] {
+        let schema = format!(
+            "datasource db {{\n provider = \"kingbase-mysql\"\n }}\n model Test {{\n id Int @id\n value Decimal @db.Decimal(0, {scale})\n }}"
+        );
+        assert!(parse_unwrap_err(&schema).contains("Precision can range from 1 to 1000."));
+    }
+}
+
+#[test]
+fn explicit_default_bytes_type_has_the_same_key_validity() {
+    for annotation in ["", "@db.LongBlob"] {
+        for key in ["@id", "@unique", "@@index([value])"] {
+            let (field_key, model_key, id) = if key.starts_with("@@") {
+                ("", key, "id Int @id")
+            } else if key == "@unique" {
+                (key, "", "id Int @id")
+            } else {
+                (key, "", "")
+            };
+            assert_valid(&format!(
+                "datasource db {{\n provider = \"kingbase-mysql\"\n }}\n model Test {{\n {id}\n value Bytes {field_key} {annotation}\n {model_key}\n }}"
+            ));
         }
-
-        model Blog {
-            id     Int  @id
-            dec Decimal @db.Decimal(2, 4)
-        }
-    "#};
-
-    let expectation = expect![[r#"
-        error: The scale must not be larger than the precision for the Decimal(2,4) native type in Kingbase MySQL.
-          -->  schema.prisma:7
-           | 
-         6 |     id     Int  @id
-         7 |     dec Decimal @db.Decimal(2, 4)
-           | 
-    "#]];
-
-    expect_error(dml, &expectation);
+    }
 }
 
 #[test]

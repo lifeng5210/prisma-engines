@@ -2,6 +2,7 @@ mod destructive_change_checker;
 mod renderer;
 mod schema_calculator;
 mod schema_differ;
+mod unsigned;
 
 #[cfg(feature = "kingbase-mysql-native")]
 mod connector;
@@ -15,6 +16,16 @@ use schema_connector::{BoxFuture, ConnectorResult};
 use schema_differ::KingbaseMysqlSchemaDifferFlavour;
 
 pub(crate) use renderer::KingbaseMysqlRenderer;
+
+/// C010 cannot inline a GIN expression or a descending unique index in CREATE
+/// TABLE. Keep rendering, planning and calculated constraint ownership aligned.
+fn index_is_created_separately(index: sql_schema_describer::walkers::IndexWalker<'_>) -> bool {
+    index.index_type() == sql_schema_describer::IndexType::Fulltext
+        || (index.is_unique()
+            && index
+                .columns()
+                .any(|column| column.sort_order() == Some(sql_schema_describer::SQLSortOrder::Desc)))
+}
 
 #[cfg(feature = "kingbase-mysql-native")]
 pub(crate) use connector::KingbaseMysqlConnector;
@@ -47,10 +58,6 @@ impl SqlDialect for KingbaseMysqlDialect {
 
     fn datamodel_connector(&self) -> &'static dyn psl::datamodel_connector::Connector {
         psl::builtin_connectors::KINGBASE_MYSQL
-    }
-
-    fn scan_migration_script(&self, script: &str) {
-        self.mysql.scan_migration_script(script)
     }
 
     #[cfg(any(

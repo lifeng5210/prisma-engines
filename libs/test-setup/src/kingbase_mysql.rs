@@ -3,14 +3,18 @@ use quaint::{prelude::Queryable, single::Quaint};
 use url::Url;
 
 /// Returns a connection string for an isolated Kingbase MySQL-compatible test database.
-pub async fn create_kingbase_mysql_database<'a>(
-    database_url: &str,
-    db_name: &'a str,
-) -> Result<(&'a str, String), AnyError> {
+pub async fn create_kingbase_mysql_database(database_url: &str, db_name: &str) -> Result<(String, String), AnyError> {
     let mut url: Url = database_url.parse()?;
     let mut maintenance_url = url.clone();
     let current_database = url.path().trim_start_matches('/');
-    let db_name = kingbase_safe_identifier(db_name);
+    let prefix = std::env::var("TEST_KINGBASE_DATABASE_PREFIX").unwrap_or_default();
+    if prefix.len() > 16 || !prefix.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'_') {
+        return Err(
+            "TEST_KINGBASE_DATABASE_PREFIX must contain at most 16 ASCII letters, digits or underscores".into(),
+        );
+    }
+    let database_name = format!("{prefix}{db_name}");
+    let db_name = kingbase_safe_identifier(&database_name);
 
     let maintenance_database = if current_database.is_empty() || current_database.eq_ignore_ascii_case("test") {
         "template1"
@@ -34,7 +38,7 @@ pub async fn create_kingbase_mysql_database<'a>(
     conn.raw_cmd(&format!("DROP DATABASE IF EXISTS `{db_name}`")).await?;
     conn.raw_cmd(&format!("CREATE DATABASE `{db_name}`")).await?;
 
-    Ok((db_name, url.to_string()))
+    Ok((db_name.to_owned(), url.to_string()))
 }
 
 fn kingbase_safe_identifier(identifier: &str) -> &str {

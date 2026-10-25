@@ -101,13 +101,13 @@ impl SqlConnector for KingbaseMysqlConnector {
         with_connection(&mut self.state, |_params, connection| async move {
             crosstarget_utils::time::timeout(
                 ADVISORY_LOCK_TIMEOUT,
-                connection.raw_cmd(&format!("SELECT pg_advisory_lock({ADVISORY_LOCK_KEY})")),
+                connection.raw_cmd(&format!("SELECT sys_advisory_lock({ADVISORY_LOCK_KEY})")),
             )
             .await
             .map_err(|_| {
                 ConnectorError::user_facing(user_facing_errors::common::DatabaseTimeout {
                     context: format!(
-                        "Timed out trying to acquire a Kingbase advisory lock (SELECT pg_advisory_lock({ADVISORY_LOCK_KEY})). Timeout: {}ms. See https://pris.ly/d/migrate-advisory-locking for details.",
+                        "Timed out trying to acquire a Kingbase advisory lock (SELECT sys_advisory_lock({ADVISORY_LOCK_KEY})). Timeout: {}ms. See https://pris.ly/d/migrate-advisory-locking for details.",
                         ADVISORY_LOCK_TIMEOUT.as_millis()
                     ),
                 })
@@ -416,7 +416,7 @@ where
         State::Connected(params, connection) => Box::pin(f(params, connection)),
         state @ State::WithParams(_) => Box::pin(async move {
             state
-                .try_connect(|params| Box::pin(async move { Ok(Connection::new(params.raw_url.clone()).await?) }))
+                .try_connect(|params| Box::pin(async move { Connection::new(params.raw_url.clone()).await }))
                 .await?;
             with_connection(state, f).await
         }),

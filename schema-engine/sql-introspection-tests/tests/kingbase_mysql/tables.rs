@@ -41,8 +41,8 @@ async fn descending_indexes_are_introspected(api: &mut TestApi) -> TestResult {
     .await;
 
     let dml = api.introspect_dml().await?;
-    assert!(dml.contains("@@index([a, b])"), "{dml}");
-    assert!(dml.contains("@@unique([a, b])"), "{dml}");
+    assert!(dml.contains("@@index([a, b(sort: Desc)])"), "{dml}");
+    assert!(dml.contains("@@unique([a, b(sort: Desc)])"), "{dml}");
 
     Ok(())
 }

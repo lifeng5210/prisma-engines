@@ -314,18 +314,14 @@ pub trait Visitor<'a> {
                     match &table.typ {
                         TableType::Query(_) | TableType::Values(_) => match table.alias {
                             Some(ref alias) => {
-                                self.surround_with(Self::C_BACKTICK_OPEN, Self::C_BACKTICK_CLOSE, |ref mut s| {
-                                    s.write(alias)
-                                })?;
+                                self.surround_with_backticks(alias)?;
                                 self.write(".*")?;
                             }
                             None => self.write("*")?,
                         },
                         TableType::Table(_) => match table.alias.clone() {
                             Some(ref alias) => {
-                                self.surround_with(Self::C_BACKTICK_OPEN, Self::C_BACKTICK_CLOSE, |ref mut s| {
-                                    s.write(alias)
-                                })?;
+                                self.surround_with_backticks(alias)?;
                                 self.write(".*")?;
                             }
                             None => {
@@ -335,9 +331,7 @@ pub trait Visitor<'a> {
                         },
                         TableType::JoinedTable(jt) => match table.alias.clone() {
                             Some(ref alias) => {
-                                self.surround_with(Self::C_BACKTICK_OPEN, Self::C_BACKTICK_CLOSE, |ref mut s| {
-                                    s.write(alias)
-                                })?;
+                                self.surround_with_backticks(alias)?;
                                 self.write(".*")?;
                             }
                             None => {

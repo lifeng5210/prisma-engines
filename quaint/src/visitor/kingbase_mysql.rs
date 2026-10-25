@@ -82,10 +82,7 @@ fn rewrite_full_text_search(sql: String, parameters: &mut [Value<'_>]) -> crate:
     let mut cursor = 0;
     let mut search_start = 0;
 
-    while let Some(offset) = sql[search_start..].find(MATCH) {
-        let match_start = search_start + offset;
-        let match_open = skip_whitespace(&sql, match_start + MATCH.len());
-
+    while let Some((match_start, match_open)) = find_function(&sql, search_start, MATCH) {
         if sql.as_bytes().get(match_open) != Some(&b'(') {
             search_start = match_start + MATCH.len();
             continue;
@@ -127,19 +124,19 @@ fn rewrite_full_text_search(sql: String, parameters: &mut [Value<'_>]) -> crate:
         let document = fulltext_document(&sql[match_open + 1..columns_end]);
         let query = sql[against_open + 1..mode_start].trim();
         let query_parameter_index = fulltext_query_parameter_index(query, &sql)?;
-        // Query Compiler represents request values as opaque placeholders so a
-        // compiled plan can be reused. The database must parse those values at
-        // execution time. Use `to_tsquery` here, rather than the deliberately
-        // forgiving `websearch_to_tsquery`, so the Kingbase PostgreSQL-style
-        // search syntax (`&`, `|`, `!`) keeps its meaning and invalid tsquery
-        // input is reported to the caller.
-        let tsquery_function = if let Some(query) = fulltext_query_parameter(parameters, query_parameter_index)? {
+        // Concrete values are converted here. Opaque Query Compiler values
+        // retain a bind-time marker so the Kingbase adapter applies the same
+        // MySQL Boolean Mode conversion to each execution of a cached plan.
+        if let Some(query) = fulltext_query_parameter(parameters, query_parameter_index)? {
             let tsquery = mysql_boolean_mode_to_tsquery(query)?;
             set_fulltext_query_parameter(parameters, query_parameter_index, tsquery)?;
-            "to_tsquery"
         } else {
-            "to_tsquery"
-        };
+            parameters[query_parameter_index].native_column_type = Some(NativeColumnType {
+                name: Cow::Borrowed("PRISMA_MYSQL_BOOLEAN_QUERY"),
+                length: None,
+            });
+        }
+        let tsquery_function = "to_tsquery";
 
         output.push_str(&sql[cursor..match_start]);
 
@@ -565,9 +562,7 @@ fn cast_sum_parameters(sql: String, params: &[Value<'_>]) -> String {
     let mut cursor = 0;
     let mut search_start = 0;
 
-    while let Some(offset) = sql[search_start..].find("SUM(") {
-        let function_start = search_start + offset;
-        let open_paren = function_start + "SUM".len();
+    while let Some((_, open_paren)) = find_function(&sql, search_start, "SUM") {
         let Some(function_end) = matching_parenthesis(&sql, open_paren) else {
             break;
         };
@@ -648,9 +643,7 @@ fn cast_json_comparison_expressions(sql: String) -> String {
     let mut cursor = 0;
     let mut search_start = 0;
 
-    while let Some(offset) = sql[search_start..].find("JSON_EXTRACT(") {
-        let function_start = search_start + offset;
-        let open_paren = function_start + "JSON_EXTRACT".len();
+    while let Some((function_start, open_paren)) = find_function(&sql, search_start, "JSON_EXTRACT") {
         let Some(function_end) = matching_parenthesis(&sql, open_paren) else {
             break;
         };
@@ -678,9 +671,7 @@ fn json_numeric_comparison_parameter_indexes(sql: &str) -> Vec<usize> {
     let mut indexes = Vec::new();
     let mut search_start = 0;
 
-    while let Some(offset) = sql[search_start..].find("JSON_EXTRACT(") {
-        let function_start = search_start + offset;
-        let open_paren = function_start + "JSON_EXTRACT".len();
+    while let Some((function_start, open_paren)) = find_function(&sql, search_start, "JSON_EXTRACT") {
         let Some(function_end) = matching_parenthesis(sql, open_paren) else {
             break;
         };
@@ -708,28 +699,17 @@ fn json_numeric_comparison_parameter_indexes(sql: &str) -> Vec<usize> {
 fn parameter_positions(sql: &str) -> Vec<usize> {
     let bytes = sql.as_bytes();
     let mut positions = Vec::new();
-    let mut quoted = None;
     let mut index = 0;
 
     while index < bytes.len() {
         let byte = bytes[index];
 
-        if let Some(quote) = quoted {
-            if byte == b'\\' {
-                index += 2;
-                continue;
-            }
-
-            if byte == quote {
-                quoted = None;
-            }
-
-            index += 1;
+        if let Some(end) = non_code_end(sql, index) {
+            index = end;
             continue;
         }
 
         match byte {
-            b'\'' | b'`' => quoted = Some(byte),
             b'?' => positions.push(index),
             _ => {}
         }
@@ -791,30 +771,17 @@ fn json_extract_path_parameter_indexes(sql: &str) -> Vec<usize> {
     let mut indexes = Vec::new();
     let mut parameter_index = 0;
     let mut pending_json_extract = false;
-    let mut quoted = None;
     let mut index = 0;
 
     while index < bytes.len() {
         let byte = bytes[index];
 
-        if let Some(quote) = quoted {
-            if byte == b'\\' {
-                index += 2;
-                continue;
-            }
-
-            if byte == quote {
-                quoted = None;
-            }
-            index += 1;
+        if let Some(end) = non_code_end(sql, index) {
+            index = end;
             continue;
         }
 
         match byte {
-            b'\'' | b'`' => {
-                quoted = Some(byte);
-                pending_json_extract = false;
-            }
             b'(' => {
                 contexts.push(Context {
                     is_json_extract: pending_json_extract,
@@ -870,9 +837,7 @@ fn cast_dynamic_jsonpaths(sql: String) -> String {
     let mut cursor = 0;
     let mut search_start = 0;
 
-    while let Some(offset) = sql[search_start..].find("JSON_EXTRACT(") {
-        let function_start = search_start + offset;
-        let open_paren = function_start + "JSON_EXTRACT".len();
+    while let Some((_, open_paren)) = find_function(&sql, search_start, "JSON_EXTRACT") {
         let Some(function_end) = matching_parenthesis(&sql, open_paren) else {
             break;
         };
@@ -915,9 +880,7 @@ fn qualify_json_contains(sql: String) -> String {
     let mut cursor = 0;
     let mut search_start = 0;
 
-    while let Some(offset) = sql[search_start..].find("JSON_CONTAINS(") {
-        let function_start = search_start + offset;
-        let open_paren = function_start + "JSON_CONTAINS".len();
+    while let Some((function_start, open_paren)) = find_function(&sql, search_start, "JSON_CONTAINS") {
         let Some(function_end) = matching_parenthesis(&sql, open_paren) else {
             break;
         };
@@ -942,9 +905,7 @@ fn unquote_json_values(sql: String) -> String {
     let mut cursor = 0;
     let mut search_start = 0;
 
-    while let Some(offset) = sql[search_start..].find("JSON_UNQUOTE(") {
-        let function_start = search_start + offset;
-        let open_paren = function_start + "JSON_UNQUOTE".len();
+    while let Some((function_start, open_paren)) = find_function(&sql, search_start, "JSON_UNQUOTE") {
         let Some(function_end) = matching_parenthesis(&sql, open_paren) else {
             break;
         };
@@ -962,7 +923,124 @@ fn unquote_json_values(sql: String) -> String {
 }
 
 fn native_uuid_as_text(sql: String) -> String {
-    sql.replace("uuid()", "CAST(sys_guid() AS text)")
+    let mut output = String::with_capacity(sql.len());
+    let mut cursor = 0;
+    let mut search_start = 0;
+
+    while let Some((start, open)) = find_function(&sql, search_start, "uuid") {
+        let Some(end) = matching_parenthesis(&sql, open) else {
+            break;
+        };
+        if sql[open + 1..end].trim().is_empty() {
+            output.push_str(&sql[cursor..start]);
+            output.push_str("CAST(sys_guid() AS text)");
+            cursor = end + 1;
+        }
+        search_start = end + 1;
+    }
+    output.push_str(&sql[cursor..]);
+    output
+}
+
+/// Find an unqualified function token in SQL code, never inside a quoted
+/// identifier, literal or comment. Callers resume after a complete function.
+fn find_function(sql: &str, start: usize, name: &str) -> Option<(usize, usize)> {
+    let bytes = sql.as_bytes();
+    let mut index = start;
+    while index < bytes.len() {
+        if let Some(end) = non_code_end(sql, index) {
+            index = end;
+        } else if is_identifier_byte(bytes[index]) {
+            let token_start = index;
+            while index < bytes.len() && is_identifier_byte(bytes[index]) {
+                index += 1;
+            }
+            if sql[token_start..index].eq_ignore_ascii_case(name)
+                && !previous_non_whitespace(bytes, token_start).is_some_and(|pos| bytes[pos] == b'.')
+            {
+                let open = skip_whitespace(sql, index);
+                if bytes.get(open) == Some(&b'(') {
+                    return Some((token_start, open));
+                }
+            }
+        } else {
+            index += 1;
+        }
+    }
+    None
+}
+
+fn is_identifier_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'$') || !byte.is_ascii()
+}
+
+/// Return the first byte after a quoted/commented region. Handle both MySQL
+/// quoting and the dollar strings accepted by Kingbase MySQL mode.
+fn non_code_end(sql: &str, start: usize) -> Option<usize> {
+    let bytes = sql.as_bytes();
+    let first = *bytes.get(start)?;
+    if matches!(first, b'\'' | b'"' | b'`') {
+        let mut index = start + 1;
+        while index < bytes.len() {
+            if bytes[index] == b'\\' {
+                index = (index + 2).min(bytes.len());
+            } else if bytes[index] == first {
+                if bytes.get(index + 1) == Some(&first) {
+                    index += 2;
+                } else {
+                    return Some(index + 1);
+                }
+            } else {
+                index += 1;
+            }
+        }
+        return Some(bytes.len());
+    }
+    if first == b'#' || bytes[start..].starts_with(b"--") {
+        return Some(sql[start..].find('\n').map_or(bytes.len(), |offset| start + offset + 1));
+    }
+    if bytes[start..].starts_with(b"/*") {
+        let mut index = start + 2;
+        let mut depth = 1;
+        while index + 1 < bytes.len() {
+            if bytes[index..].starts_with(b"/*") {
+                depth += 1;
+                index += 2;
+            } else if bytes[index..].starts_with(b"*/") {
+                depth -= 1;
+                index += 2;
+                if depth == 0 {
+                    return Some(index);
+                }
+            } else {
+                index += 1;
+            }
+        }
+        return Some(bytes.len());
+    }
+    if first == b'$' {
+        let mut end = start + 1;
+        if bytes
+            .get(end)
+            .is_some_and(|byte| byte.is_ascii_alphabetic() || *byte == b'_')
+        {
+            while bytes
+                .get(end)
+                .is_some_and(|byte| byte.is_ascii_alphanumeric() || *byte == b'_')
+            {
+                end += 1;
+            }
+        }
+        if bytes.get(end) == Some(&b'$') {
+            let tag = &sql[start..=end];
+            return Some(
+                sql[end + 1..]
+                    .find(tag)
+                    .map_or(bytes.len(), |offset| end + 1 + offset + tag.len()),
+            );
+        }
+    }
+    None
 }
 
 #[cfg(test)]
@@ -973,6 +1051,58 @@ mod tests {
         Column, Comparable, Expression, JsonPath, OpaqueType, Select, ValueType, json_extract, json_unquote,
         native_uuid, text_search, text_search_relevance,
     };
+
+    #[test]
+    fn function_shaped_identifiers_are_preserved() {
+        for name in [
+            "uuid()",
+            "JSON_UNQUOTE(v)",
+            "JSON_CONTAINS(a,b)",
+            "JSON_EXTRACT(v,CONCAT(a,b))",
+            "SUM(?)",
+            "MATCH(a) AGAINST (? IN BOOLEAN MODE)",
+            "中文uuid()",
+        ] {
+            let (sql, params) = KingbaseMysql::build(Select::default().column(Column::from(name))).unwrap();
+            assert_eq!(sql, format!("SELECT `{name}`"));
+            assert!(params.is_empty());
+        }
+    }
+
+    #[test]
+    fn uuid_rewrite_skips_quoted_regions_comments_and_other_identifiers() {
+        let protected = r#"`uuid()` 'uuid()' "uuid()" `a``uuid()` 'a''uuid()'
+            $$uuid()$$ $tag$uuid()$tag$ myuuid() sys.uuid() 中文uuid()
+            /* uuid() /* uuid() */ uuid() */ -- uuid()
+            # uuid()
+        "#;
+        let sql = format!("SELECT {protected}, UUID (), uuid()");
+        assert_eq!(
+            super::native_uuid_as_text(sql),
+            format!("SELECT {protected}, CAST(sys_guid() AS text), CAST(sys_guid() AS text)")
+        );
+    }
+
+    #[test]
+    fn json_rewrite_keeps_function_shaped_names_and_bind_positions() {
+        let query = Select::from_table("uuid()")
+            .column(Column::from("JSON_CONTAINS(a,b)"))
+            .value(json_unquote(Column::from("JSON_UNQUOTE(v)")))
+            .value(native_uuid());
+        let (sql, params) = KingbaseMysql::build(query).unwrap();
+        assert_eq!(
+            sql,
+            "SELECT `JSON_CONTAINS(a,b)`, (CAST(`JSON_UNQUOTE(v)` AS jsonb) ->> CAST('$' AS JSONPATH)), \
+             CAST(sys_guid() AS text) FROM `uuid()`"
+        );
+        assert!(params.is_empty());
+
+        let sql = "SELECT `JSON_EXTRACT(?)`, 'SUM(?)', \"uuid(?)\", $$?$$, /* ? */ ? -- ?\n, ?";
+        let positions = super::parameter_positions(sql);
+        assert_eq!(positions.len(), 2);
+        assert_eq!(&sql[positions[0]..positions[0] + 1], "?");
+        assert_eq!(positions[1], sql.len() - 1);
+    }
 
     #[test]
     fn json_unquote_uses_the_unambiguous_jsonpath_operator() {
@@ -1041,7 +1171,7 @@ mod tests {
     }
 
     #[test]
-    fn full_text_filters_accept_dynamic_kingbase_tsquery_parameters() {
+    fn full_text_filters_mark_dynamic_mysql_boolean_parameters() {
         let search: Expression = text_search(&[Column::from("name")]).into();
         let query =
             Select::from_table("User").so_that(search.matches(Value::opaque("search".to_owned(), OpaqueType::Text)));
@@ -1055,6 +1185,10 @@ mod tests {
             params[0].typed,
             ValueType::Opaque(ref opaque) if opaque.typ() == &OpaqueType::Text
         ));
+        assert_eq!(
+            params[0].native_column_type.as_ref().unwrap().name,
+            "PRISMA_MYSQL_BOOLEAN_QUERY"
+        );
     }
 
     #[test]
@@ -1090,28 +1224,17 @@ fn skip_whitespace(sql: &str, mut index: usize) -> usize {
 fn first_function_argument_comma(sql: &str, open_paren: usize, function_end: usize) -> Option<usize> {
     let bytes = sql.as_bytes();
     let mut depth = 1;
-    let mut quoted = None;
     let mut index = open_paren + 1;
 
     while index < function_end {
         let byte = bytes[index];
 
-        if let Some(quote) = quoted {
-            if byte == b'\\' {
-                index += 2;
-                continue;
-            }
-
-            if byte == quote {
-                quoted = None;
-            }
-
-            index += 1;
+        if let Some(end) = non_code_end(sql, index) {
+            index = end;
             continue;
         }
 
         match byte {
-            b'\'' | b'`' => quoted = Some(byte),
             b'(' => depth += 1,
             b')' => depth -= 1,
             b',' if depth == 1 => return Some(index),
@@ -1128,7 +1251,6 @@ fn function_argument_count(sql: &str, open_paren: usize, function_end: usize) ->
     let bytes = sql.as_bytes();
     let mut count = 1;
     let mut depth = 1;
-    let mut quoted = None;
     let mut index = open_paren + 1;
 
     if sql[index..function_end].trim().is_empty() {
@@ -1138,22 +1260,12 @@ fn function_argument_count(sql: &str, open_paren: usize, function_end: usize) ->
     while index < function_end {
         let byte = bytes[index];
 
-        if let Some(quote) = quoted {
-            if byte == b'\\' {
-                index += 2;
-                continue;
-            }
-
-            if byte == quote {
-                quoted = None;
-            }
-
-            index += 1;
+        if let Some(end) = non_code_end(sql, index) {
+            index = end;
             continue;
         }
 
         match byte {
-            b'\'' | b'`' => quoted = Some(byte),
             b'(' => depth += 1,
             b')' => depth -= 1,
             b',' if depth == 1 => count += 1,
@@ -1169,28 +1281,17 @@ fn function_argument_count(sql: &str, open_paren: usize, function_end: usize) ->
 fn matching_parenthesis(sql: &str, open_paren: usize) -> Option<usize> {
     let bytes = sql.as_bytes();
     let mut depth = 0;
-    let mut quoted = None;
     let mut index = open_paren;
 
     while index < bytes.len() {
         let byte = bytes[index];
 
-        if let Some(quote) = quoted {
-            if byte == b'\\' {
-                index += 2;
-                continue;
-            }
-
-            if byte == quote {
-                quoted = None;
-            }
-
-            index += 1;
+        if let Some(end) = non_code_end(sql, index) {
+            index = end;
             continue;
         }
 
         match byte {
-            b'\'' | b'`' => quoted = Some(byte),
             b'(' => depth += 1,
             b')' => {
                 depth -= 1;

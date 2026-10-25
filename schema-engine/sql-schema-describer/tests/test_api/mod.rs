@@ -13,7 +13,7 @@ use std::future::Future;
 use test_setup::*;
 
 pub struct TestApi {
-    db_name: &'static str,
+    db_name: String,
     database: Quaint,
     tags: BitFlags<Tags>,
 }
@@ -23,13 +23,13 @@ impl TestApi {
         let tags = args.tags();
         let (db_name, conn) = if tags.contains(Tags::KingbaseOracle) {
             let (db_name, cs) = tok(args.create_kingbase_oracle_database());
-            (db_name, tok(Quaint::new(&cs)).unwrap())
+            (db_name.to_owned(), tok(Quaint::new(&cs)).unwrap())
         } else if tags.contains(Tags::KingbaseMysql) {
             let (db_name, cs) = tok(args.create_kingbase_mysql_database());
-            (db_name, tok(Quaint::new(&cs)).unwrap())
+            (db_name.to_owned(), tok(Quaint::new(&cs)).unwrap())
         } else if tags.contains(Tags::Mysql) {
             let (db_name, cs) = tok(args.create_mysql_database());
-            (db_name, tok(Quaint::new(&cs)).unwrap())
+            (db_name.to_owned(), tok(Quaint::new(&cs)).unwrap())
         } else if tags.contains(Tags::Postgres) {
             let (db_name, q, _) = tok(args.create_postgres_database());
             if tags.contains(Tags::CockroachDb) {
@@ -41,12 +41,12 @@ impl TestApi {
                 ))
                 .unwrap();
             }
-            (db_name, q)
+            (db_name.to_owned(), q)
         } else if tags.contains(Tags::Mssql) {
             let (q, _cs) = tok(args.create_mssql_database());
-            (args.test_function_name(), q)
+            (args.test_function_name().to_owned(), q)
         } else if tags.contains(Tags::Sqlite) {
-            (args.test_function_name(), Quaint::new_in_memory().unwrap())
+            (args.test_function_name().to_owned(), Quaint::new_in_memory().unwrap())
         } else {
             unreachable!()
         };
@@ -150,8 +150,8 @@ impl TestApi {
         }
     }
 
-    pub(crate) fn db_name(&self) -> &'static str {
-        self.db_name
+    pub(crate) fn db_name(&self) -> &str {
+        &self.db_name
     }
 
     pub(crate) fn database(&self) -> &Quaint {

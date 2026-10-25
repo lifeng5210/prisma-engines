@@ -6,6 +6,34 @@ use sql_schema_describer::ColumnTypeFamily;
 use sql_schema_describer::ForeignKeyAction;
 
 #[test_connector(tags(KingbaseMysql))]
+fn index_column_sort_orders_are_described(api: TestApi) {
+    use sql_schema_describer::SQLSortOrder::{Asc, Desc};
+
+    api.raw_cmd(
+        "CREATE TABLE sort_orders(id INT PRIMARY KEY, a INT NOT NULL, b INT NOT NULL); \
+         CREATE INDEX mixed_order ON sort_orders(a ASC, b DESC); \
+         CREATE UNIQUE INDEX reverse_order ON sort_orders(a DESC, b ASC); \
+         CREATE INDEX hash_order ON sort_orders USING hash(a);",
+    );
+    let schema = api.describe();
+    let table = schema
+        .table_walkers()
+        .find(|table| table.name() == "sort_orders")
+        .unwrap();
+    for (name, expected) in [
+        ("mixed_order", vec![Some(Asc), Some(Desc)]),
+        ("reverse_order", vec![Some(Desc), Some(Asc)]),
+        ("hash_order", vec![None]),
+    ] {
+        let index = table.indexes().find(|index| index.name() == name).unwrap();
+        assert_eq!(
+            index.columns().map(|column| column.sort_order()).collect::<Vec<_>>(),
+            expected
+        );
+    }
+}
+
+#[test_connector(tags(KingbaseMysql))]
 fn all_kingbase_mysql_column_types_must_work(api: TestApi) {
     api.raw_cmd(
         r#"
@@ -365,6 +393,23 @@ fn views_can_be_described(api: TestApi) {
 }
 
 #[test_connector(tags(KingbaseMysql))]
+fn extension_owned_views_are_not_described(api: TestApi) {
+    api.raw_cmd(
+        r#"
+        CREATE TABLE view_source (id INT);
+        CREATE VIEW user_view AS SELECT id FROM view_source;
+        CREATE VIEW extension_view AS SELECT id FROM view_source;
+        ALTER EXTENSION plpgsql ADD VIEW extension_view;
+        "#,
+    );
+
+    let schema = api.describe();
+
+    assert!(schema.get_view("user_view").is_some());
+    assert!(schema.get_view("extension_view").is_none());
+}
+
+#[test_connector(tags(KingbaseMysql))]
 fn procedures_can_be_described(api: TestApi) {
     let sql = format!(
         r#"
@@ -464,6 +509,88 @@ fn join_table_unique_indexes_must_be_inferred(api: TestApi) {
             index.assert_name("cat_and_human_index").assert_is_unique()
         })
     });
+}
+
+#[test_connector(tags(KingbaseMysql))]
+fn actual_primary_key_constraint_names_are_described(api: TestApi) {
+    use sql_schema_describer::kingbase_mysql::KingbaseMysqlSchemaExt;
+
+    api.raw_cmd(
+        r#"
+        CREATE TABLE default_pk_table(id INT NOT NULL PRIMARY KEY);
+        CREATE TABLE custom_pk_table(id INT NOT NULL, CONSTRAINT custom_primary_key PRIMARY KEY(id));
+        CREATE TABLE original_pk_table(id INT NOT NULL PRIMARY KEY);
+        ALTER TABLE original_pk_table RENAME TO renamed_pk_table;
+        "#,
+    );
+
+    let schema = api.describe();
+    let ext: &KingbaseMysqlSchemaExt = schema.downcast_connector_data();
+    assert_eq!(ext.primary_key_constraint_names.len(), 3);
+    assert!(ext.unique_constraint_names.is_empty());
+
+    for (table_name, constraint_name) in [
+        ("default_pk_table", "default_pk_table_pkey"),
+        ("custom_pk_table", "custom_primary_key"),
+        ("renamed_pk_table", "original_pk_table_pkey"),
+    ] {
+        let primary_key = schema
+            .table_walkers()
+            .find(|table| table.name() == table_name)
+            .unwrap()
+            .primary_key()
+            .unwrap();
+        // Preserve MySQL-compatible logical metadata while retaining the
+        // physical constraint name separately for migration rendering.
+        assert_eq!(primary_key.name(), "");
+        assert_eq!(
+            ext.primary_key_constraint_names
+                .get(&primary_key.id)
+                .map(String::as_str),
+            Some(constraint_name),
+        );
+    }
+}
+
+#[test_connector(tags(KingbaseMysql))]
+fn unique_index_constraint_ownership_is_described(api: TestApi) {
+    use sql_schema_describer::kingbase_mysql::KingbaseMysqlSchemaExt;
+
+    api.raw_cmd(
+        r#"
+        CREATE TABLE index_owners (
+            id INT NOT NULL PRIMARY KEY,
+            a INT NOT NULL,
+            b INT NOT NULL,
+            c INT NOT NULL,
+            UNIQUE INDEX inline_unique(a),
+            UNIQUE INDEX compound_unique(a, b)
+        );
+        CREATE UNIQUE INDEX standalone_unique ON index_owners(b, c);
+        CREATE INDEX ordinary_index ON index_owners(c);
+        CREATE TABLE index_reference (
+            id INT NOT NULL PRIMARY KEY,
+            owner_a INT REFERENCES index_owners(a)
+        );
+        "#,
+    );
+
+    let schema = api.describe();
+    let ext: &KingbaseMysqlSchemaExt = schema.downcast_connector_data();
+    let table = schema
+        .table_walkers()
+        .find(|table| table.name() == "index_owners")
+        .unwrap();
+    assert_eq!(table.indexes().count(), 5);
+    assert_eq!(ext.unique_constraint_names.len(), 2);
+
+    for index in table.indexes() {
+        let constraint_name = ext.unique_constraint_names.get(&index.id).map(String::as_str);
+        match index.name() {
+            "inline_unique" | "compound_unique" => assert_eq!(constraint_name, Some(index.name())),
+            _ => assert_eq!(constraint_name, None),
+        }
+    }
 }
 
 #[test_connector(tags(KingbaseMysql))]

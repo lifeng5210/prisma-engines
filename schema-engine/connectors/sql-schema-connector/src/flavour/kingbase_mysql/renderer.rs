@@ -39,30 +39,35 @@ impl SqlRenderer for KingbaseMysqlRenderer {
     }
 
     fn render_rename_index(&self, indexes: MigrationPair<IndexWalker<'_>>) -> Vec<String> {
-        vec![format!(
+        let mut statements = vec![format!(
             "ALTER INDEX {} RENAME TO {}",
-            Quoted::postgres_ident(indexes.previous.name()),
-            Quoted::postgres_ident(indexes.next.name()),
-        )]
+            self.quote(physical_index_name(indexes.previous)),
+            self.quote(physical_index_name(indexes.next)),
+        )];
+        if let Some(comment) = index_logical_name_comment(indexes.next) {
+            statements.push(comment);
+        }
+        statements
     }
 
     fn render_alter_table(&self, alter_table: &AlterTable, schemas: MigrationPair<&SqlSchema>) -> Vec<String> {
         let AlterTable { table_ids, changes } = alter_table;
         let tables = schemas.walk(*table_ids);
         let mut lines = Vec::new();
+        let mut before = Vec::new();
+        let mut after = Vec::new();
 
         for change in changes {
             match change {
                 TableChange::DropPrimaryKey => {
                     let primary_key = tables.previous.primary_key().unwrap();
-                    // Kingbase names an unnamed primary-key constraint `<table>_pkey`,
-                    // while the describer intentionally leaves the MySQL-style name empty.
-                    let name = if primary_key.name().is_empty() {
-                        format!("{}_pkey", tables.previous.name())
-                    } else {
-                        primary_key.name().to_owned()
-                    };
-                    lines.push(format!("DROP CONSTRAINT {}", Quoted::postgres_ident(&name)));
+                    let ext: &sql::kingbase_mysql::KingbaseMysqlSchemaExt =
+                        tables.previous.schema.downcast_connector_data();
+                    let name = ext
+                        .primary_key_constraint_names
+                        .get(&primary_key.id)
+                        .expect("Kingbase MySQL primary key constraint name is missing");
+                    lines.push(format!("DROP CONSTRAINT {}", self.quote(name)));
                 }
                 TableChange::RenamePrimaryKey => unreachable!("Kingbase MySQL does not support renaming primary keys"),
                 TableChange::AddPrimaryKey => lines.push(format!(
@@ -90,19 +95,35 @@ impl SqlRenderer for KingbaseMysqlRenderer {
                 TableChange::AddColumn {
                     column_id,
                     has_virtual_default: _,
-                } => lines.push(format!("ADD COLUMN {}", render_column(tables.next.walk(*column_id)))),
-                TableChange::DropColumn { column_id } => lines.push(
-                    sql_ddl::mysql::AlterTableClause::DropColumn {
-                        column_name: tables.previous.walk(*column_id).name().into(),
+                } => {
+                    let column = tables.next.walk(*column_id);
+                    lines.push(format!("ADD COLUMN {}", render_column(column)));
+                    if let Some(guard) = super::unsigned::create_auto_guard(column) {
+                        after.push(guard);
                     }
-                    .to_string(),
-                ),
+                }
+                TableChange::DropColumn { column_id } => {
+                    let column = tables.previous.walk(*column_id);
+                    if let Some(guard) = super::unsigned::drop_auto_guard(column) {
+                        before.push(guard);
+                    }
+                    lines.push(
+                        sql_ddl::mysql::AlterTableClause::DropColumn {
+                            column_name: column.name().into(),
+                        }
+                        .to_string(),
+                    );
+                }
                 TableChange::AlterColumn(AlterColumn {
                     changes,
                     column_id,
                     type_change,
                 }) => {
                     let columns = schemas.walk(*column_id);
+                    let auto_type_changed = changes.type_changed() || changes.autoincrement_changed();
+                    if auto_type_changed && let Some(name) = super::unsigned::drop_auto_guard(columns.previous) {
+                        before.push(name);
+                    }
 
                     if changes.only_default_changed() && columns.next.default().is_none() {
                         lines.push(format!(
@@ -134,11 +155,20 @@ impl SqlRenderer for KingbaseMysqlRenderer {
                             lines.push(render_modify_column(changes, new_default.as_ref(), columns.next));
                         }
                     }
+                    if auto_type_changed && let Some(guard) = super::unsigned::create_auto_guard(columns.next) {
+                        after.push(guard);
+                    }
                 }
                 TableChange::DropAndRecreateColumn { column_id, changes: _ } => {
                     let columns = schemas.walk(*column_id);
+                    if let Some(guard) = super::unsigned::drop_auto_guard(columns.previous) {
+                        before.push(guard);
+                    }
                     lines.push(format!("DROP COLUMN {}", quote_identifier(columns.previous.name())));
                     lines.push(format!("ADD COLUMN {}", render_column(columns.next)));
+                    if let Some(guard) = super::unsigned::create_auto_guard(columns.next) {
+                        after.push(guard);
+                    }
                 }
             }
         }
@@ -146,11 +176,20 @@ impl SqlRenderer for KingbaseMysqlRenderer {
         if lines.is_empty() {
             Vec::new()
         } else {
-            vec![format!(
+            let mut statements = super::unsigned::initialize(tables.next);
+            let uses_guard = !before.is_empty() || !after.is_empty();
+            statements.extend(before);
+            statements.push(format!(
                 "ALTER TABLE {} {}",
                 self.quote(tables.previous.name()),
                 lines.join(",\n    ")
-            )]
+            ));
+            statements.extend(after);
+            if uses_guard {
+                vec![super::unsigned::atomic(statements)]
+            } else {
+                statements
+            }
         }
     }
 
@@ -159,11 +198,27 @@ impl SqlRenderer for KingbaseMysqlRenderer {
     }
 
     fn render_create_index(&self, index: IndexWalker<'_>) -> String {
-        if index.index_type() == sql::IndexType::Fulltext {
-            return render_fulltext_index(index);
+        let mut rendered = if index.index_type() == sql::IndexType::Fulltext {
+            render_fulltext_index(index)
+        } else {
+            ddl::CreateIndex {
+                r#type: if index.is_unique() {
+                    ddl::IndexType::Unique
+                } else {
+                    ddl::IndexType::Normal
+                },
+                index_name: physical_index_name(index).into(),
+                on: (
+                    index.table().name().into(),
+                    index.columns().map(render_index_column).collect(),
+                ),
+            }
+            .to_string()
+        };
+        if let Some(comment) = index_logical_name_comment(index) {
+            write!(rendered, ";\n{comment}").unwrap();
         }
-
-        MysqlRenderer.render_create_index(index)
+        rendered
     }
 
     fn render_create_table(&self, table: TableWalker<'_>) -> String {
@@ -173,17 +228,16 @@ impl SqlRenderer for KingbaseMysqlRenderer {
     fn render_create_table_as(&self, table: TableWalker<'_>, table_name: QuotedWithPrefix<&str>) -> String {
         // Kingbase accepts the MySQL column and index syntax, but does not
         // accept MySQL's table-level character-set/collation options.
-        ddl::CreateTable {
+        let mut rendered = ddl::CreateTable {
             table_name: &table_name,
             columns: table.columns().map(render_column).collect(),
-            // The GIN expression used by full-text indexes cannot be defined
-            // inline. Normal and unique indexes stay inline so constraints
-            // referenced by foreign keys exist when the table is created.
+            // GIN expressions and descending unique indexes are created by
+            // separate CREATE INDEX steps; other indexes stay inline.
             indexes: table
                 .indexes()
-                .filter(|index| !index.is_primary_key() && index.index_type() != sql::IndexType::Fulltext)
+                .filter(|index| !index.is_primary_key() && !super::index_is_created_separately(*index))
                 .map(|index| ddl::IndexClause {
-                    index_name: Some(Cow::from(index.name())),
+                    index_name: Some(Cow::from(physical_index_name(index))),
                     r#type: match index.index_type() {
                         sql::IndexType::Unique => ddl::IndexType::Unique,
                         sql::IndexType::Normal => ddl::IndexType::Normal,
@@ -201,7 +255,26 @@ impl SqlRenderer for KingbaseMysqlRenderer {
             default_character_set: None,
             collate: None,
         }
-        .to_string()
+        .to_string();
+        for column in table.columns() {
+            if let Some(guard) = super::unsigned::create_auto_guard(column) {
+                write!(rendered, ";\n{guard}").unwrap();
+            }
+        }
+        for index in table
+            .indexes()
+            .filter(|index| !index.is_primary_key() && !super::index_is_created_separately(*index))
+        {
+            if let Some(comment) = index_logical_name_comment(index) {
+                write!(rendered, ";\n{comment}").unwrap();
+            }
+        }
+        let domains = super::unsigned::initialize(table);
+        if domains.is_empty() {
+            rendered
+        } else {
+            format!("{};\n{rendered}", domains.join(";\n"))
+        }
     }
 
     fn render_drop_and_recreate_index(&self, indexes: MigrationPair<IndexWalker<'_>>) -> Vec<String> {
@@ -214,7 +287,13 @@ impl SqlRenderer for KingbaseMysqlRenderer {
             ];
         }
 
-        MysqlRenderer.render_drop_and_recreate_index(indexes)
+        // Keep the replacement available before removing the old index. Use
+        // Kingbase's ownership-aware deletion, including constraint-backed
+        // unique indexes, instead of MySQL's DROP INDEX ... ON table syntax.
+        vec![
+            self.render_create_index(indexes.next),
+            self.render_drop_index(None, indexes.previous),
+        ]
     }
 
     fn render_drop_enum(&self, namespace: Option<&str>, dropped_enum: EnumWalker<'_>) -> Vec<String> {
@@ -232,14 +311,15 @@ impl SqlRenderer for KingbaseMysqlRenderer {
 
     fn render_drop_index(&self, namespace: Option<&str>, index: IndexWalker<'_>) -> String {
         let _ = namespace;
-        if index.is_unique() {
+        let ext: &sql::kingbase_mysql::KingbaseMysqlSchemaExt = index.schema.downcast_connector_data();
+        if let Some(constraint_name) = ext.unique_constraint_names.get(&index.id) {
             format!(
                 "ALTER TABLE {} DROP CONSTRAINT {}",
                 self.quote(index.table().name()),
-                Quoted::postgres_ident(index.name()),
+                self.quote(constraint_name),
             )
         } else {
-            format!("DROP INDEX {}", Quoted::postgres_ident(index.name()))
+            format!("DROP INDEX {}", self.quote(physical_index_name(index)))
         }
     }
 
@@ -272,6 +352,24 @@ impl SqlRenderer for KingbaseMysqlRenderer {
     }
 }
 
+fn physical_index_name(index: IndexWalker<'_>) -> &str {
+    let ext: &sql::kingbase_mysql::KingbaseMysqlSchemaExt = index.schema.downcast_connector_data();
+    ext.physical_index_names
+        .get(&index.id)
+        .map(String::as_str)
+        .unwrap_or_else(|| index.name())
+}
+
+fn index_logical_name_comment(index: IndexWalker<'_>) -> Option<String> {
+    (physical_index_name(index) != index.name()).then(|| {
+        format!(
+            "COMMENT ON INDEX {} IS '{}'",
+            Quoted::mysql_ident(physical_index_name(index)),
+            format!("{}{}", sql::kingbase_mysql::INDEX_LOGICAL_NAME_PREFIX, index.name()).replace('\'', "''"),
+        )
+    })
+}
+
 fn render_fulltext_index(index: IndexWalker<'_>) -> String {
     let document = index
         .columns()
@@ -281,7 +379,7 @@ fn render_fulltext_index(index: IndexWalker<'_>) -> String {
 
     format!(
         "CREATE INDEX {index_name} ON {table_name} USING GIN (to_tsvector('simple', {document}))",
-        index_name = Quoted::mysql_ident(index.name()),
+        index_name = Quoted::mysql_ident(physical_index_name(index)),
         table_name = Quoted::mysql_ident(index.table().name()),
     )
 }
@@ -342,10 +440,16 @@ fn render_column_type(column: TableColumnWalker<'_>) -> Cow<'static, str> {
         input.map_or_else(String::new, |(precision, scale)| format!("({precision}, {scale})"))
     }
 
+    if let Some(domain_type) = super::unsigned::column_type(column) {
+        return domain_type.into();
+    }
+
     match native_type {
         KingbaseMySqlType::Int => "INTEGER".into(),
         KingbaseMySqlType::SmallInt => "SMALLINT".into(),
-        KingbaseMySqlType::TinyInt if column.column_type_family().is_boolean() => "BOOLEAN".into(),
+        KingbaseMySqlType::TinyInt | KingbaseMySqlType::UnsignedTinyInt if column.column_type_family().is_boolean() => {
+            "BOOLEAN".into()
+        }
         KingbaseMySqlType::TinyInt => "TINYINT".into(),
         KingbaseMySqlType::MediumInt => "MEDIUMINT".into(),
         KingbaseMySqlType::BigInt => "BIGINT".into(),
@@ -371,15 +475,14 @@ fn render_column_type(column: TableColumnWalker<'_>) -> Cow<'static, str> {
         KingbaseMySqlType::Timestamp(precision) => format!("TIMESTAMP{}", render(*precision)).into(),
         KingbaseMySqlType::Year => "YEAR".into(),
         KingbaseMySqlType::Json => "JSON".into(),
-        // Kingbase does not accept MySQL's `INT UNSIGNED` modifier. Its MySQL
-        // compatibility layer exposes `sys.uint4` and `sys.uint8` instead.
-        // `TINYINT`, `SMALLINT`, and `MEDIUMINT` would silently truncate or
-        // reject values in their MySQL unsigned ranges, so all 32-bit-or-less
-        // unsigned aliases use `sys.uint4`.
+        // Kingbase exposes unsigned integers as `sys.uint4` and `sys.uint8`.
+        // MySQL mode also accepts INT/BIGINT UNSIGNED, but the tested C010
+        // server rejects TINYINT/SMALLINT/MEDIUMINT UNSIGNED.
+        // Smaller integer types use bounded domains or auto-increment guards.
         KingbaseMySqlType::UnsignedInt => "sys.uint4".into(),
         KingbaseMySqlType::UnsignedSmallInt
         | KingbaseMySqlType::UnsignedTinyInt
-        | KingbaseMySqlType::UnsignedMediumInt => "sys.uint4".into(),
+        | KingbaseMySqlType::UnsignedMediumInt => unreachable!("small unsigned types use validated domains"),
         KingbaseMySqlType::UnsignedBigInt => "sys.uint8".into(),
     }
 }
@@ -471,7 +574,16 @@ fn render_using_expression_for_types(
         return None;
     }
 
-    let expression = if is_datetime(previous) && is_numeric(next) {
+    let expression = if matches!(
+        previous,
+        KingbaseMySqlType::TinyBlob
+            | KingbaseMySqlType::Blob
+            | KingbaseMySqlType::MediumBlob
+            | KingbaseMySqlType::LongBlob
+    ) && let KingbaseMySqlType::Bit(size) = next
+    {
+        render_blob_to_bit_using(column, *size)
+    } else if is_datetime(previous) && is_numeric(next) {
         let format = match previous {
             KingbaseMySqlType::Date => "YYYYMMDD",
             KingbaseMySqlType::Time(_) => "HH24MISS",
@@ -484,9 +596,7 @@ fn render_using_expression_for_types(
         format!("({column})::text::{target_type}")
     } else if is_binary(previous) && !is_binary(next) {
         format!("convert_from(({column})::bytea, 'UTF8')::{target_type}")
-    } else if is_json(previous) && !is_string(next) {
-        format!("({column})::text::{target_type}")
-    } else if is_binary(next) && !is_binary(previous) {
+    } else if (is_json(previous) && !is_string(next)) || (is_binary(next) && !is_binary(previous)) {
         format!("({column})::text::{target_type}")
     } else if is_json(next) && is_numeric(previous) {
         format!("to_json({column})")
@@ -497,6 +607,44 @@ fn render_using_expression_for_types(
     };
 
     Some(expression)
+}
+
+fn render_blob_to_bit_using(column: &str, size: u32) -> String {
+    // MySQL ALTER reads a BLOB's signed decimal prefix, rather than treating its
+    // bytes as a bit string. Escape encoding preserves ASCII digits and safely
+    // terminates the prefix at NUL / non-UTF-8 bytes without decoding the BLOB.
+    let prefix =
+        format!("COALESCE(substring(encode(({column})::bytea, 'escape') FROM '^[[:space:]]*([+-]?[0-9]+)'), '0')");
+    // Remove leading zeros before bounding the decimal input. Twenty-one
+    // characters suffice to detect signed-64 overflow, even with a sign, and
+    // avoid numeric overflow on arbitrarily long decimal prefixes. Construct
+    // backreferences without depending on SQL string backslash settings.
+    let significant_prefix =
+        format!("left(regexp_replace({prefix}, '^([+-]?)0*([0-9])', concat(chr(92), '1', chr(92), '2')), 21)");
+    let integer = format!(
+        "GREATEST(-9223372036854775808::numeric(21,0), \
+         LEAST(9223372036854775807::numeric(21,0), ({significant_prefix})::numeric(21,0)))::bigint"
+    );
+
+    let value = if size == 64 {
+        // A signed bigint cast retains all 64 bits, including negative values.
+        integer
+    } else {
+        let maximum = (1_u64 << size) - 1;
+        // A direct integer-to-BIT cast silently truncates. Match MySQL instead:
+        // strict mode rejects out-of-range values; non-strict mode saturates.
+        // Keep the failing cast dependent on the row, so constant folding cannot
+        // reject a valid migration (including an empty table) at planning time.
+        format!(
+            "CASE WHEN ({integer}) BETWEEN 0 AND {maximum} THEN ({integer}) \
+             WHEN current_setting('sql_mode') LIKE '%STRICT_ALL_TABLES%' \
+             OR current_setting('sql_mode') LIKE '%STRICT_TRANS_TABLES%' \
+             THEN CAST(concat(({integer})::text, ' out of range for BIT({size})') AS bigint) \
+             ELSE {maximum}::bigint END"
+        )
+    };
+
+    format!("CASE WHEN {column} IS NULL THEN NULL ELSE ({value})::BIT({size}) END")
 }
 
 fn is_binary(native_type: &KingbaseMySqlType) -> bool {
@@ -591,8 +739,262 @@ mod tests {
     use super::*;
 
     #[test]
+    fn set_default_foreign_key_actions_are_rendered() {
+        use psl::parser_database::NoExtensionTypes;
+        use schema_connector::SchemaDialect;
+
+        let dialect = crate::SqlSchemaDialect::kingbase_mysql();
+        let source = "datasource db {\n provider = \"kingbase-mysql\"\n }\n";
+        let target = format!(
+            "{source}\nmodel Parent {{\n id Int @id\n children Child[]\n }}\n\
+             model Child {{\n id Int @id\n parentId Int @default(1)\n \
+             parent Parent @relation(fields: [parentId], references: [id], onDelete: SetDefault, onUpdate: SetDefault, map: \"child_parent_fk\")\n }}"
+        );
+        let calculate = |schema: String| {
+            dialect
+                .schema_from_datamodel(
+                    vec![("schema.prisma".into(), schema.into())],
+                    Some("public"),
+                    &NoExtensionTypes,
+                )
+                .unwrap()
+        };
+        let migration = dialect.diff(calculate(source.to_owned()), calculate(target), &Default::default());
+        let script =
+            crate::apply_migration::render_script(&migration, &Default::default(), &KingbaseMysqlRenderer).unwrap();
+        assert!(script.contains(
+            "ALTER TABLE `Child` ADD CONSTRAINT `child_parent_fk` FOREIGN KEY (`parentId`) REFERENCES `Parent`(`id`) ON DELETE SET DEFAULT ON UPDATE SET DEFAULT;"
+        ), "{script}");
+    }
+
+    fn index_schema(name: &str, kind: sql::IndexType, owner: Option<&str>) -> SqlSchema {
+        let mut schema = SqlSchema::default();
+        let namespace = schema.push_namespace("public".into());
+        let table = schema.push_table("items".into(), namespace, None);
+        let column = schema.push_table_column(
+            table,
+            sql::Column {
+                name: "value".into(),
+                tpe: sql::ColumnType::pure(ColumnTypeFamily::String, sql::ColumnArity::Required),
+                auto_increment: false,
+                description: None,
+            },
+        );
+        let index = schema.push_index_of_type(table, name.into(), kind);
+        schema.push_index_column(sql::IndexColumn {
+            index_id: index,
+            column_id: column,
+            sort_order: None,
+            length: None,
+        });
+        let mut ext = sql::kingbase_mysql::KingbaseMysqlSchemaExt::default();
+        if let Some(owner) = owner {
+            ext.unique_constraint_names.insert(index, owner.into());
+        }
+        schema.set_connector_data(Box::new(ext));
+        schema
+    }
+
+    // The regular differ emits RenameIndex. Force the otherwise dormant step
+    // through the real script renderer rather than testing only rename SQL.
+    fn forced_rebuild_script(before: SqlSchema, after: SqlSchema, old: &str, new: &str) -> String {
+        let index = MigrationPair::new(
+            before
+                .table_walkers()
+                .flat_map(|table| table.indexes())
+                .find(|index| index.name() == old)
+                .unwrap()
+                .id,
+            after
+                .table_walkers()
+                .flat_map(|table| table.indexes())
+                .find(|index| index.name() == new)
+                .unwrap()
+                .id,
+        );
+        let migration = schema_connector::Migration::new(crate::sql_migration::SqlMigration {
+            before,
+            after,
+            steps: vec![crate::sql_migration::SqlMigrationStep::RedefineIndex { index }],
+        });
+        crate::apply_migration::render_script(&migration, &Default::default(), &KingbaseMysqlRenderer).unwrap()
+    }
+
+    #[test]
+    fn rebuild_step_uses_kingbase_index_and_constraint_deletion() {
+        for (kind, owner, expected_drop) in [
+            (sql::IndexType::Normal, None, "DROP INDEX `old_index`;"),
+            (sql::IndexType::Unique, None, "DROP INDEX `old_index`;"),
+            (
+                sql::IndexType::Unique,
+                Some("actual_owner"),
+                "ALTER TABLE `items` DROP CONSTRAINT `actual_owner`;",
+            ),
+        ] {
+            let script = forced_rebuild_script(
+                index_schema("old_index", kind, owner),
+                index_schema("new_index", kind, None),
+                "old_index",
+                "new_index",
+            );
+            let create = if kind == sql::IndexType::Unique {
+                "CREATE UNIQUE INDEX `new_index` ON `items`(`value`);"
+            } else {
+                "CREATE INDEX `new_index` ON `items`(`value`);"
+            };
+            assert_eq!(script, format!("-- RedefineIndex\n{create}\n{expected_drop}\n"));
+        }
+    }
+
+    #[test]
+    fn fulltext_rebuild_keeps_drop_before_create() {
+        for (previous, next) in [
+            (sql::IndexType::Fulltext, sql::IndexType::Fulltext),
+            (sql::IndexType::Fulltext, sql::IndexType::Normal),
+            (sql::IndexType::Normal, sql::IndexType::Fulltext),
+        ] {
+            let script = forced_rebuild_script(
+                index_schema("old_index", previous, None),
+                index_schema("new_index", next, None),
+                "old_index",
+                "new_index",
+            );
+            assert_eq!(
+                script.contains("USING GIN"),
+                next == sql::IndexType::Fulltext,
+                "{script}"
+            );
+            assert!(script.find("DROP INDEX `old_index`").unwrap() < script.find("CREATE INDEX `new_index`").unwrap());
+            assert!(!script.contains("DROP INDEX `old_index` ON"), "{script}");
+        }
+    }
+
+    #[cfg(feature = "kingbase-mysql-native")]
+    #[tokio::test]
+    #[ignore = "requires an isolated database in KINGBASE_INDEX_REBUILD_TEST_URL"]
+    async fn forced_index_rebuilds_execute_on_kingbase_mysql() {
+        use quaint::{prelude::Queryable, single::Quaint};
+        use schema_connector::SchemaDialect;
+        use sql_schema_describer::SqlSchemaDescriberBackend;
+
+        let url = std::env::var("KINGBASE_INDEX_REBUILD_TEST_URL").expect("isolated test database URL is required");
+        let conn = Quaint::new(&url).await.unwrap();
+        for ansi_quotes in [false, true] {
+            conn.raw_cmd(if ansi_quotes {
+                "BEGIN; SET sql_mode='ANSI_QUOTES'"
+            } else {
+                "BEGIN; SET sql_mode=''"
+            })
+            .await
+            .unwrap();
+            let mode = conn
+                .query_raw("SELECT current_setting('sql_mode') AS mode", &[])
+                .await
+                .unwrap();
+            assert_eq!(
+                mode.first()
+                    .unwrap()
+                    .get("mode")
+                    .unwrap()
+                    .as_str()
+                    .unwrap()
+                    .contains("ANSI_QUOTES"),
+                ansi_quotes
+            );
+            for (number, kind) in ["normal", "unique", "constraint", "descending", "fulltext"]
+                .into_iter()
+                .enumerate()
+            {
+                let table = format!("rebuild_{number}");
+                let old = format!("old_index_{number}");
+                let new = format!("new_index_{number}");
+                let table_q = KingbaseMysqlRenderer.quote(&table).to_string();
+                let old_q = KingbaseMysqlRenderer.quote(&old).to_string();
+                let new_q = KingbaseMysqlRenderer.quote(&new).to_string();
+                let constraint = if kind == "constraint" {
+                    format!(", CONSTRAINT {old_q} UNIQUE(value)")
+                } else {
+                    String::new()
+                };
+                conn.raw_cmd(&format!("CREATE TABLE {table_q}(id INT PRIMARY KEY,value VARCHAR(32) NOT NULL {constraint}); INSERT INTO {table_q} VALUES (1,'kept')")).await.unwrap();
+                let create = match kind {
+                    "normal" => format!("CREATE INDEX {old_q} ON {table_q}(value)"),
+                    "unique" => format!("CREATE UNIQUE INDEX {old_q} ON {table_q}(value)"),
+                    "descending" => format!("CREATE UNIQUE INDEX {old_q} ON {table_q}(value DESC)"),
+                    "fulltext" => format!(
+                        "CREATE INDEX {old_q} ON {table_q} USING GIN(to_tsvector('simple', COALESCE(value, '')))"
+                    ),
+                    _ => String::new(),
+                };
+                if !create.is_empty() {
+                    conn.raw_cmd(&create).await.unwrap();
+                }
+                let describer = sql::kingbase_mysql::SqlSchemaDescriber::new(&conn, Default::default());
+                let before = describer.describe(&["public"]).await.unwrap();
+                conn.raw_cmd(&format!(
+                    "SAVEPOINT target_schema; ALTER INDEX {old_q} RENAME TO {new_q}"
+                ))
+                .await
+                .unwrap();
+                let target = describer.describe(&["public"]).await.unwrap();
+                conn.raw_cmd("ROLLBACK TO SAVEPOINT target_schema").await.unwrap();
+                let script = forced_rebuild_script(before, target.clone(), &old, &new);
+                assert!(!script.contains(&format!("DROP INDEX {old_q} ON")), "{script}");
+                if kind == "constraint" {
+                    assert!(script.contains("DROP CONSTRAINT"), "{script}");
+                }
+                conn.raw_cmd(&script).await.unwrap();
+                let row = conn
+                    .query_raw(&format!("SELECT value FROM {table_q} WHERE id=1"), &[])
+                    .await
+                    .unwrap();
+                assert_eq!(row.first().unwrap().get("value").unwrap().as_str(), Some("kept"));
+                let actual = describer.describe(&["public"]).await.unwrap();
+                let index = actual
+                    .table_walkers()
+                    .flat_map(|table| table.indexes())
+                    .find(|index| index.name() == new)
+                    .unwrap();
+                assert!(
+                    !actual
+                        .table_walkers()
+                        .flat_map(|table| table.indexes())
+                        .any(|index| index.name() == old)
+                );
+                if matches!(kind, "unique" | "constraint" | "descending") {
+                    let error = conn
+                        .raw_cmd(&format!("INSERT INTO {table_q} VALUES (2,'kept')"))
+                        .await
+                        .unwrap_err();
+                    assert_eq!(error.original_code(), Some("23505"));
+                    // A rejected insert aborts this transaction until rollback.
+                    conn.raw_cmd("ROLLBACK TO SAVEPOINT target_schema").await.unwrap();
+                    // Reapply the exact rebuild after restoring the old index.
+                    conn.raw_cmd(&script).await.unwrap();
+                } else if kind == "fulltext" {
+                    assert_eq!(index.index_type(), sql::IndexType::Fulltext);
+                }
+                let actual = describer.describe(&["public"]).await.unwrap();
+                let diff = crate::SqlSchemaDialect::kingbase_mysql().diff(
+                    crate::SqlDatabaseSchema::from(target).into(),
+                    crate::SqlDatabaseSchema::from(actual).into(),
+                    &Default::default(),
+                );
+                assert!(
+                    diff.downcast_ref::<crate::sql_migration::SqlMigration>()
+                        .steps
+                        .is_empty(),
+                    "{kind}: expected no subsequent migration"
+                );
+            }
+            conn.raw_cmd("ROLLBACK").await.unwrap();
+        }
+    }
+
+    #[test]
     fn starts_with_mysql_identifier_quoting() {
         assert_eq!(KingbaseMysqlRenderer.quote("users").to_string(), "`users`");
+        assert_eq!(KingbaseMysqlRenderer.quote("old`name").to_string(), "`old``name`");
         assert_eq!(quote_identifier("old`name"), "`old``name`");
     }
 

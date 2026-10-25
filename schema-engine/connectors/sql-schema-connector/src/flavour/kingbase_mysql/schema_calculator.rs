@@ -1,4 +1,4 @@
-use psl::parser_database::walkers::EnumWalker;
+use psl::{datamodel_connector::constraint_names::ConstraintNames, parser_database::walkers::EnumWalker};
 
 use sql_schema_describer as sql;
 
@@ -38,5 +38,58 @@ impl SqlSchemaCalculatorFlavour for KingbaseMysqlSchemaCalculatorFlavour {
 
     fn column_type_for_enum(&self, enm: EnumWalker<'_>, ctx: &Context<'_>) -> Option<sql::ColumnTypeFamily> {
         ctx.enum_ids.get(&enm.id).map(|id| sql::ColumnTypeFamily::Enum(*id))
+    }
+
+    fn push_connector_data(&self, context: &mut Context<'_>) {
+        let schema = &mut context.schema.describer_schema;
+        // Only inline unique indexes create constraints. Descending unique
+        // indexes are created separately; described databases use sys_constraint.
+        let physical_index_names: std::collections::HashMap<_, _> = schema
+            .table_walkers()
+            .flat_map(|table| table.indexes())
+            .filter(|index| !index.is_primary_key())
+            .map(|index| {
+                (
+                    index.id,
+                    sql::kingbase_mysql::physical_index_name(index.table().name(), index.name()),
+                )
+            })
+            .collect();
+        let unique_constraint_names = schema
+            .table_walkers()
+            .flat_map(|table| table.indexes())
+            .filter(|index| index.is_unique() && !super::index_is_created_separately(*index))
+            .map(|index| {
+                (
+                    index.id,
+                    physical_index_names
+                        .get(&index.id)
+                        .cloned()
+                        .unwrap_or_else(|| index.name().to_owned()),
+                )
+            })
+            .collect();
+        // A calculated schema represents fresh CREATE TABLE statements, so
+        // its unnamed primary keys use the default name with the connector's
+        // identifier limit. Described schemas always retain the catalog name.
+        let primary_key_constraint_names = schema
+            .table_walkers()
+            .filter_map(|table| {
+                table.primary_key().map(|primary_key| {
+                    let name = if primary_key.name().is_empty() {
+                        ConstraintNames::primary_key_name(table.name(), self.datamodel_connector())
+                    } else {
+                        primary_key.name().to_owned()
+                    };
+                    (primary_key.id, name)
+                })
+            })
+            .collect();
+
+        schema.set_connector_data(Box::new(sql::kingbase_mysql::KingbaseMysqlSchemaExt {
+            physical_index_names,
+            unique_constraint_names,
+            primary_key_constraint_names,
+        }));
     }
 }

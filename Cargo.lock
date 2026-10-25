@@ -3477,7 +3477,7 @@ dependencies = [
 [[package]]
 name = "postgres-native-tls"
 version = "0.5.3"
-source = "git+https://github.com/lifeng5210/rust-kingbase?branch=prisma#2732da19cbedd94bac4665ce64a7876854eec5d3"
+source = "git+https://github.com/lifeng5210/rust-kingbase?rev=da927b91468c446c0527d85461d035c0e5dbc2b0#da927b91468c446c0527d85461d035c0e5dbc2b0"
 dependencies = [
  "native-tls",
  "tokio",
@@ -3505,7 +3505,7 @@ dependencies = [
 [[package]]
 name = "postgres-protocol"
 version = "0.6.11"
-source = "git+https://github.com/lifeng5210/rust-kingbase?branch=prisma#2732da19cbedd94bac4665ce64a7876854eec5d3"
+source = "git+https://github.com/lifeng5210/rust-kingbase?rev=da927b91468c446c0527d85461d035c0e5dbc2b0#da927b91468c446c0527d85461d035c0e5dbc2b0"
 dependencies = [
  "base64 0.22.1",
  "byteorder",
@@ -3537,7 +3537,7 @@ dependencies = [
 [[package]]
 name = "postgres-types"
 version = "0.2.13"
-source = "git+https://github.com/lifeng5210/rust-kingbase?branch=prisma#2732da19cbedd94bac4665ce64a7876854eec5d3"
+source = "git+https://github.com/lifeng5210/rust-kingbase?rev=da927b91468c446c0527d85461d035c0e5dbc2b0#da927b91468c446c0527d85461d035c0e5dbc2b0"
 dependencies = [
  "bigdecimal 0.4.10",
  "bit-vec",
@@ -5751,7 +5751,7 @@ dependencies = [
 [[package]]
 name = "tokio-postgres"
 version = "0.7.17"
-source = "git+https://github.com/lifeng5210/rust-kingbase?branch=prisma#2732da19cbedd94bac4665ce64a7876854eec5d3"
+source = "git+https://github.com/lifeng5210/rust-kingbase?rev=da927b91468c446c0527d85461d035c0e5dbc2b0#da927b91468c446c0527d85461d035c0e5dbc2b0"
 dependencies = [
  "async-trait",
  "byteorder",

@@ -188,7 +188,7 @@ impl TestApiArgs {
             .unwrap()
     }
 
-    pub async fn create_kingbase_mysql_database(&self) -> (&'static str, String) {
+    pub async fn create_kingbase_mysql_database(&self) -> (String, String) {
         kingbase_mysql::create_kingbase_mysql_database(self.database_url(), self.test_function_name)
             .await
             .unwrap()

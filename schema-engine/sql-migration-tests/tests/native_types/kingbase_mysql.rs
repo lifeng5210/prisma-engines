@@ -700,15 +700,22 @@ fn datetime_numeric_cast_supported(previous: &str, next: &str) -> bool {
     };
 
     let capacity = match native_type_base(next) {
-        "TinyInt" => 3,
-        "SmallInt" => 5,
-        "MediumInt" => 7,
-        "Int" | "UnsignedInt" | "UnsignedSmallInt" | "UnsignedTinyInt" | "UnsignedMediumInt" => 10,
+        "TinyInt" | "UnsignedTinyInt" => 3,
+        "SmallInt" | "UnsignedSmallInt" => 5,
+        "MediumInt" | "UnsignedMediumInt" => 7,
+        "Int" | "UnsignedInt" => 10,
         "BigInt" | "UnsignedBigInt" => 19,
         "Decimal" => next
             .split_once('(')
-            .and_then(|(_, precision)| precision.split_once(',').or_else(|| precision.split_once(')')))
-            .and_then(|(precision, _)| precision.parse().ok())
+            .and_then(|(_, arguments)| {
+                let (precision, scale) = arguments.trim_end_matches(')').split_once(',')?;
+                Some(
+                    precision
+                        .parse::<u32>()
+                        .ok()?
+                        .saturating_sub(scale.parse::<u32>().ok()?),
+                )
+            })
             .unwrap_or(10),
         "Float" | "Double" => 38,
         "Year" => 4,
@@ -752,21 +759,7 @@ fn explicit_cast_supported_by_names(previous: &str, next: &str) -> bool {
     true
 }
 
-fn shares_uint4_representation(previous: &str, next: &str) -> bool {
-    matches!(
-        native_type_base(previous),
-        "UnsignedInt" | "UnsignedSmallInt" | "UnsignedTinyInt" | "UnsignedMediumInt"
-    ) && matches!(
-        native_type_base(next),
-        "UnsignedInt" | "UnsignedSmallInt" | "UnsignedTinyInt" | "UnsignedMediumInt"
-    )
-}
-
 fn kingbase_cast_kind(from_type: &str, to_type: &str, cast_kind: CastKind) -> CastKind {
-    if shares_uint4_representation(from_type, to_type) {
-        return CastKind::Safe;
-    }
-
     match cast_kind {
         // Kingbase does not implicitly cast most of the conversions that are
         // safe in MySQL. Keep the matrix entry, but expect the explicit USING
@@ -862,7 +855,6 @@ fn sql_literal(from_type: &str, value: &quaint::ValueType<'_>) -> String {
 
 fn warning_native_type(native_type: &str) -> &str {
     match native_type {
-        "UnsignedMediumInt" | "UnsignedSmallInt" | "UnsignedTinyInt" => "UnsignedInt",
         "Time" => "Time(0)",
         native_type => native_type,
     }
@@ -882,14 +874,11 @@ fn run_casts_with_existing_data(api: &mut TestApi, cases: Cases, cast_kind: Cast
     let mut warnings: Vec<Cow<'_, str>> = Vec::new();
 
     for (from_type, test_value, to_types) in cases {
-        let (no_op, remaining): (Vec<_>, Vec<_>) = to_types.iter().copied().partition(|to_type| {
-            matches!(kingbase_cast_kind(from_type, to_type, cast_kind), CastKind::Safe)
-                && shares_uint4_representation(from_type, to_type)
-        });
+        let (no_op, remaining): (Vec<_>, Vec<_>) = to_types.iter().copied().partition(|to_type| *from_type == *to_type);
         let mut groups = Vec::new();
 
-        // Kingbase represents every <= 32-bit unsigned MySQL alias as
-        // `sys.uint4`, so changes between those aliases are no-op pushes.
+        // Only identical native types are no-ops. Small unsigned domains
+        // retain distinct ranges and must execute an actual type change.
         if !no_op.is_empty() {
             groups.push((no_op, CastKind::Safe));
         }
@@ -980,6 +969,35 @@ fn run_cast_group(
 
     api.schema_push_w_datasource(dm1.clone()).send().assert_green();
     api.raw_cmd(&insert);
+
+    // A cast can exist while this particular source value exceeds the target
+    // range. It must fail and preserve the source, rather than expect success
+    // from the former unbounded uint4 alias.
+    let value = match test_value {
+        quaint::ValueType::Int32(Some(value)) => Some(i64::from(*value)),
+        quaint::ValueType::Int64(Some(value)) => Some(*value),
+        _ => None,
+    };
+    if let Some(value) = value
+        && to_types.iter().any(|target| match *target {
+            "UnsignedTinyInt" => !(0..=255).contains(&value),
+            "UnsignedSmallInt" => !(0..=65535).contains(&value),
+            "UnsignedMediumInt" => !(0..=16777215).contains(&value),
+            _ => false,
+        })
+        && !matches!(cast_kind, CastKind::Impossible)
+    {
+        let error = api.schema_push_w_datasource(dm2.clone()).force(true).send_unwrap_err();
+        assert!(error.to_string().contains("_range"), "{error}");
+        api.schema_push_w_datasource(dm1.clone())
+            .send()
+            .assert_green()
+            .assert_no_steps();
+        api.query_raw(&format!("SELECT `{}`::bigint AS n FROM `Test`", colnames[0]), &[])
+            .assert_single_row(|row| row.assert_int_value("n", value));
+        api.raw_cmd("DROP TABLE `Test`");
+        return;
+    }
 
     match cast_kind {
         CastKind::Safe => api.schema_push_w_datasource(dm2.clone()).send().assert_green(),
@@ -1108,6 +1126,7 @@ fn all_supported_native_types_can_be_created_and_reintrospected(api: TestApi) {
             floatValue         Float?   @db.Float
             doubleValue        Float?   @db.Double
             tinyIntBool        Boolean? @db.TinyInt
+            unsignedTinyBool   Boolean? @db.UnsignedTinyInt
             bitBool            Boolean? @db.Bit(1)
             bitValue           Bytes?   @db.Bit(8)
             charValue          String?  @db.Char(10)
@@ -1142,22 +1161,22 @@ fn all_supported_native_types_can_be_created_and_reintrospected(api: TestApi) {
         let expected_native_types = [
             ("id", Some("Int")),
             ("intValue", Some("Int")),
-            // Kingbase exposes 32- and 64-bit unsigned integers as sys.uint4
-            // and sys.uint8. Narrow MySQL unsigned aliases are represented by
-            // sys.uint4 to preserve their complete value ranges.
+            // uint4/uint8 preserve unsigned values; validated bounded domains
+            // additionally retain the smaller MySQL types and their ranges.
             ("unsignedInt", Some("UnsignedInt")),
             ("smallInt", Some("SmallInt")),
-            ("unsignedSmallInt", Some("UnsignedInt")),
+            ("unsignedSmallInt", Some("UnsignedSmallInt")),
             ("tinyInt", Some("TinyInt")),
-            ("unsignedTinyInt", Some("UnsignedInt")),
+            ("unsignedTinyInt", Some("UnsignedTinyInt")),
             ("mediumInt", Some("MediumInt")),
-            ("unsignedMediumInt", Some("UnsignedInt")),
+            ("unsignedMediumInt", Some("UnsignedMediumInt")),
             ("bigInt", Some("BigInt")),
             ("unsignedBigInt", Some("UnsignedBigInt")),
             ("decimalValue", Some("Decimal(5,3)")),
             ("floatValue", Some("Float")),
             ("doubleValue", Some("Double")),
             ("tinyIntBool", None),
+            ("unsignedTinyBool", None),
             ("bitBool", Some("Bit(1)")),
             ("bitValue", Some("Bit(8)")),
             ("charValue", Some("Char(10)")),
@@ -1182,7 +1201,7 @@ fn all_supported_native_types_can_be_created_and_reintrospected(api: TestApi) {
 
         expected_native_types
             .into_iter()
-            .fold(table.assert_columns_count(35), |table, (name, native_type)| {
+            .fold(table.assert_columns_count(36), |table, (name, native_type)| {
                 table.assert_column(name, |column| match native_type {
                     Some(native_type) => column.assert_native_type(native_type, KINGBASE_MYSQL),
                     None => column.assert_type_family(ColumnTypeFamily::Boolean),

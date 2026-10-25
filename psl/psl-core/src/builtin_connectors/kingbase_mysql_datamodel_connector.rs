@@ -1,5 +1,4 @@
 mod native_types;
-mod validations;
 
 use std::borrow::Cow;
 
@@ -12,22 +11,13 @@ use crate::{
     ValidatedSchema,
     datamodel_connector::{
         Connector, ConnectorCapabilities, ConnectorCapability, ConstraintScope, Flavour, JoinStrategySupport,
-        NativeTypeConstructor, NativeTypeInstance, RelationMode,
+        NativeTypeConstructor, NativeTypeInstance,
     },
     diagnostics::{Diagnostics, Span},
-    parser_database::{ReferentialAction, ScalarType, walkers},
+    parser_database::{ReferentialAction, ScalarType},
 };
 use KingbaseMySqlType::*;
 use enumflags2::BitFlags;
-
-const TINY_BLOB_TYPE_NAME: &str = "TinyBlob";
-const BLOB_TYPE_NAME: &str = "Blob";
-const MEDIUM_BLOB_TYPE_NAME: &str = "MediumBlob";
-const LONG_BLOB_TYPE_NAME: &str = "LongBlob";
-const TINY_TEXT_TYPE_NAME: &str = "TinyText";
-const TEXT_TYPE_NAME: &str = "Text";
-const MEDIUM_TEXT_TYPE_NAME: &str = "MediumText";
-const LONG_TEXT_TYPE_NAME: &str = "LongText";
 
 pub const CAPABILITIES: ConnectorCapabilities = enumflags2::make_bitflags!(ConnectorCapability::{
     Enums |
@@ -49,7 +39,6 @@ pub const CAPABILITIES: ConnectorCapabilities = enumflags2::make_bitflags!(Conne
     AnyId |
     NamedForeignKeys |
     AdvancedJsonNullability |
-    IndexColumnLengthPrefixing |
     FullTextIndex |
     NativeFullTextSearch |
     NativeFullTextSearchWithIndex |
@@ -102,15 +91,17 @@ impl Connector for KingbaseMysqlDatamodelConnector {
     }
 
     fn max_identifier_length(&self) -> usize {
-        // Kingbase uses PostgreSQL's 64-byte identifier storage, including
-        // the terminating NUL byte. Identifiers are therefore limited to 63
-        // bytes, even in MySQL compatibility mode.
+        // Kingbase's max_identifier_length defaults to 63 bytes, including
+        // in the tested MySQL mode. See the V9R3C11 FAQ, parameter section 3.6:
+        // https://help.kingbase.com.cn/v9.3.11/faq/faq-new/parameter.html
         63
     }
 
     fn foreign_key_referential_actions(&self) -> BitFlags<ReferentialAction> {
         use ReferentialAction::*;
 
+        // V9R3C11 MySQL-mode CREATE TABLE documents SET DEFAULT for both
+        // ON DELETE and ON UPDATE. Emulated relations use their own action set.
         Restrict | Cascade | SetNull | NoAction | SetDefault
     }
 
@@ -160,44 +151,25 @@ impl Connector for KingbaseMysqlDatamodelConnector {
         let error = self.native_instance_error(native_type_instance);
 
         match native_type {
-            Decimal(Some((precision, scale))) if scale > precision => {
-                errors.push_error(error.new_scale_larger_than_precision_error(span))
+            // V9R3C11 MySQL SQL reference, data types 2.2.8 (DECIMAL).
+            Decimal(Some((precision, _))) if !(1..=1000).contains(precision) => {
+                errors.push_error(error.new_argument_m_out_of_range_error("Precision can range from 1 to 1000.", span))
             }
-            Decimal(Some((precision, _))) if *precision > 65 => {
-                errors.push_error(error.new_argument_m_out_of_range_error("Precision can range from 1 to 65.", span))
-            }
-            Decimal(Some((_, scale))) if *scale > 30 => {
-                errors.push_error(error.new_argument_m_out_of_range_error("Scale can range from 0 to 30.", span))
+            Decimal(Some((_, scale))) if *scale > 1000 => {
+                errors.push_error(error.new_argument_m_out_of_range_error("Scale can range from 0 to 1000.", span))
             }
             Bit(length) if *length == 0 || *length > 64 => {
                 errors.push_error(error.new_argument_m_out_of_range_error("M can range from 1 to 64.", span))
             }
-            Char(length) if *length > 255 => {
-                errors.push_error(error.new_argument_m_out_of_range_error("M can range from 0 to 255.", span))
-            }
-            VarChar(length) if *length > 65535 => {
-                errors.push_error(error.new_argument_m_out_of_range_error("M can range from 0 to 65,535.", span))
+            // V9R3C11 MySQL SQL reference, data types 2.4.3/2.4.14.
+            // C010 also accepts zero-length CHAR/VARCHAR; keep that existing support.
+            Char(length) | VarChar(length) if *length > 10_485_760 => {
+                errors.push_error(error.new_argument_m_out_of_range_error("M can range from 0 to 10,485,760.", span))
             }
             Bit(n) if *n > 1 && matches!(scalar_type, Some(ScalarType::Boolean)) => {
                 errors.push_error(error.new_argument_m_out_of_range_error("only Bit(1) can be used as Boolean.", span))
             }
             _ => (),
-        }
-    }
-
-    fn validate_model(&self, model: walkers::ModelWalker<'_>, relation_mode: RelationMode, errors: &mut Diagnostics) {
-        for index in model.indexes() {
-            validations::field_types_can_be_used_in_an_index(self, index, errors);
-        }
-
-        if let Some(primary_key) = model.primary_key() {
-            validations::field_types_can_be_used_in_a_primary_key(self, primary_key, errors);
-        }
-
-        if relation_mode.uses_foreign_keys() {
-            for field in model.relation_fields() {
-                validations::uses_native_referential_action_set_default(self, field, errors);
-            }
         }
     }
 
@@ -217,6 +189,13 @@ impl Connector for KingbaseMysqlDatamodelConnector {
         diagnostics: &mut Diagnostics,
     ) -> Option<NativeTypeInstance> {
         match KingbaseMySqlType::from_parts(name, args) {
+            // The server raises precision to scale when scale is larger. Normalize
+            // valid arguments here so schema calculation and query compilation use
+            // the same effective type as introspection, avoiding repeated ALTERs.
+            // Preserve invalid arguments for validate_native_type_arguments().
+            Ok(Decimal(Some((precision, scale)))) if (1..=1000).contains(&precision) && scale <= 1000 => {
+                Some(NativeTypeInstance::new(Decimal(Some((precision.max(scale), scale)))))
+            }
             Ok(native_type) => Some(NativeTypeInstance::new(native_type)),
             Err(error) => {
                 diagnostics.push_error(error.into_datamodel_error(span));

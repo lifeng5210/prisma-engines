@@ -83,7 +83,7 @@ where
         match self {
             Quoted::Double(inner) => write!(f, "\"{inner}\""),
             Quoted::Single(inner) => write!(f, "'{inner}'"),
-            Quoted::Backticks(inner) => write!(f, "`{inner}`"),
+            Quoted::Backticks(inner) => write!(f, "`{}`", inner.to_string().replace('`', "``")),
             Quoted::SquareBrackets(inner) => write!(f, "[{inner}]"),
         }
     }
