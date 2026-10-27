@@ -139,7 +139,7 @@ fn evaluate_data_loss_with_past_unapplied_migrations_with_destructive_changes_do
     "#,
     );
 
-    let var_name: &[Cow<'_, str>] = if api.is_mysql() {
+    let var_name: &[Cow<'_, str>] = if api.is_mysql() || api.tags().contains(Tags::KingbaseMysql) {
         &["The values [PLAYFUL] on the enum `Cat_mood` will be removed. If these variants are still used in the database, this will fail.".into()]
     } else if api.is_sqlite() {
         &[]

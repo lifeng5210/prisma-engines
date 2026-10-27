@@ -5,6 +5,94 @@ use psl::builtin_connectors::{KingbaseOracleNumberArguments, KingbaseOracleType}
 use sql_schema_describer::{ColumnTypeFamily, ForeignKeyAction, SQLSortOrder};
 
 #[test_connector(tags(KingbaseOracle))]
+fn oracle_schema_case_aliases_describe_physical_names(api: TestApi) {
+    api.raw_cmd(
+        r#"
+        CREATE SCHEMA "APP";
+        CREATE SCHEMA "App";
+        CREATE TYPE "APP"."State" AS ENUM ('ready','done');
+        CREATE TABLE "APP"."Item" (id NUMBER(10,0) PRIMARY KEY, state "APP"."State" DEFAULT 'ready');
+        CREATE TABLE "App"."Item" (id NUMBER(10,0) PRIMARY KEY);
+        CREATE VIEW "APP"."ItemView" AS SELECT id FROM "APP"."Item";
+        INSERT INTO "APP"."Item" (id) VALUES (7);
+        INSERT INTO "App"."Item" VALUES (8);
+        "#,
+    );
+    // Request the SQL spelling, not the already-normalized catalog spelling.
+    let schema = api.describe_with_schemas(&["APP", "app", "App"]);
+    assert!(schema.namespace_walker("APP").is_none());
+    assert_eq!(schema.namespaces_count(), 2);
+    assert!(schema.table_walker_ns("app", "Item").is_some());
+    assert!(schema.table_walker_ns("App", "Item").is_some());
+    assert!(schema.view_walker_ns("app", "ItemView").is_some());
+    assert!(schema.find_enum("State", Some("app")).is_some());
+}
+
+#[test_connector(tags(KingbaseOracle))]
+fn oracle_repair_sys_catalogs_without_pg_reads(api: TestApi) {
+    api.raw_cmd(
+        r#"
+        CREATE TABLE catalog_repair(id NUMBER(10,0) PRIMARY KEY, value NUMBER(3,3) DEFAULT 0.012,
+            name VARCHAR2(40) UNIQUE, payload BLOB DEFAULT decoding('abcd','hex'));
+        CREATE INDEX catalog_repair_desc ON catalog_repair(name DESC);
+        CREATE TYPE catalog_repair_state AS ENUM ('ready','done');
+        ALTER TABLE catalog_repair ADD state catalog_repair_state DEFAULT 'ready';
+        COMMENT ON TYPE catalog_repair_state IS 'enum metadata kept';
+        ALTER TABLE catalog_repair ADD CONSTRAINT catalog_repair_positive CHECK(value > 0);
+        CREATE FUNCTION catalog_repair_function() RETURNS INTEGER AS 'SELECT 1' LANGUAGE sql;
+        CREATE VIEW catalog_repair_view AS SELECT id,name FROM catalog_repair;
+        COMMENT ON TABLE catalog_repair IS 'table metadata kept';
+        COMMENT ON COLUMN catalog_repair.name IS 'column metadata kept';
+        COMMENT ON VIEW catalog_repair_view IS 'view metadata kept';
+        BEGIN;
+        CREATE ROLE oracle_repair_catalog_reader;
+        GRANT SELECT ON catalog_repair,catalog_repair_view TO oracle_repair_catalog_reader;
+        REVOKE SELECT ON pg_catalog.pg_type,pg_catalog.pg_range,pg_catalog.pg_namespace,
+            pg_catalog.pg_enum,pg_catalog.pg_attribute,pg_catalog.pg_class,
+            pg_catalog.pg_constraint,pg_catalog.pg_index,pg_catalog.pg_attrdef,
+            pg_catalog.pg_am,pg_catalog.pg_opclass,pg_catalog.pg_description,
+            pg_catalog.pg_proc,pg_catalog.pg_language,pg_catalog.pg_extension,
+            pg_catalog.pg_views,pg_catalog.pg_depend FROM PUBLIC;
+        SET ROLE oracle_repair_catalog_reader;
+    "#,
+    );
+    api.raw_cmd("SAVEPOINT denied_pg");
+    let denied = tok(api.database().raw_cmd("SELECT oid FROM pg_catalog.pg_type LIMIT 0")).unwrap_err();
+    assert_eq!(denied.original_code(), Some("42501"));
+    api.raw_cmd("ROLLBACK TO SAVEPOINT denied_pg");
+    let schema = api.describe();
+    api.raw_cmd("ROLLBACK");
+    let table = schema.table_walker("catalog_repair").unwrap();
+    assert_eq!(table.description(), Some("table metadata kept"));
+    assert_eq!(
+        table.column("name").unwrap().description(),
+        Some("column metadata kept")
+    );
+    assert_eq!(
+        table
+            .indexes()
+            .find(|index| index.name() == "catalog_repair_desc")
+            .unwrap()
+            .columns()
+            .next()
+            .unwrap()
+            .sort_order(),
+        Some(SQLSortOrder::Desc)
+    );
+    let view = schema
+        .view_walkers()
+        .find(|view| view.name() == "catalog_repair_view")
+        .unwrap();
+    assert_eq!(view.description(), Some("view metadata kept"));
+    let enm = schema
+        .enum_walkers()
+        .find(|enm| enm.name() == "catalog_repair_state")
+        .unwrap();
+    assert_eq!(enm.description(), Some("enum metadata kept"));
+    assert!(schema.get_procedure("catalog_repair_function").is_some());
+}
+
+#[test_connector(tags(KingbaseOracle))]
 fn oracle_mode_column_types_and_identity_are_described(api: TestApi) {
     api.raw_cmd(
         r#"
@@ -93,17 +181,12 @@ fn oracle_mode_column_types_and_identity_are_described(api: TestApi) {
             Some(KingbaseOracleType::VarChar2(Some(32))),
         ),
         ("clob_value", ColumnTypeFamily::String, Some(KingbaseOracleType::Clob)),
-        // Kingbase Oracle's PostgreSQL-compatible catalog normalizes NCLOB to
-        // its CLOB storage type, so introspection must emit the canonical type.
-        ("nclob_value", ColumnTypeFamily::String, Some(KingbaseOracleType::Clob)),
+        // NCLOB retains its own physical type in the Oracle dictionary.
+        ("nclob_value", ColumnTypeFamily::String, Some(KingbaseOracleType::NClob)),
         ("blob_value", ColumnTypeFamily::Binary, Some(KingbaseOracleType::Blob)),
-        // Oracle DATE includes a time-of-day. The Kingbase catalog represents
-        // it as timestamp(0), which is the lossless canonical native type.
-        (
-            "date_value",
-            ColumnTypeFamily::DateTime,
-            Some(KingbaseOracleType::Timestamp(Some(0))),
-        ),
+        // The Oracle dictionary and physical type preserve DATE (with time-of-day).
+        // information_schema alone exposes a timestamp alias and loses this identity.
+        ("date_value", ColumnTypeFamily::DateTime, Some(KingbaseOracleType::Date)),
         (
             "timestamp_value",
             ColumnTypeFamily::DateTime,
@@ -619,4 +702,121 @@ fn oracle_mode_composite_index_sort_order_is_described(api: TestApi) {
     assert_eq!("second_value", columns[1].as_column().name());
     assert_eq!(Some(SQLSortOrder::Asc), columns[0].sort_order());
     assert_eq!(Some(SQLSortOrder::Desc), columns[1].sort_order());
+}
+
+#[test_connector(tags(KingbaseOracle))]
+fn oracle_independent_dictionary_namespaces_defaults_and_actions(api: TestApi) {
+    let setup = r#"
+        CREATE SCHEMA independent_one;
+        CREATE SCHEMA independent_two;
+        CREATE SEQUENCE independent_one."ExternalSeq";
+        CREATE TABLE independent_one."SameTable"(
+            id NUMBER(10,0) DEFAULT nextval('independent_one."ExternalSeq"'),
+            value NUMBER(3,3) DEFAULT NULLIF(0.012,0.013),
+            label VARCHAR2(60) DEFAULT q'[it's :ignored]',
+            payload BLOB DEFAULT decoding('00abcd','hex'),
+            CONSTRAINT same_pk PRIMARY KEY(id), CONSTRAINT same_unique UNIQUE(label));
+        CREATE TABLE independent_two."SameTable"(
+            id NUMBER(10,0), parent_id NUMBER(10,0), label VARCHAR2(60),
+            CONSTRAINT same_pk PRIMARY KEY(id),
+            CONSTRAINT parent_fk FOREIGN KEY(parent_id) REFERENCES independent_one."SameTable"(id) ON DELETE SET NULL ON UPDATE CASCADE);
+        CREATE INDEX same_index ON independent_two."SameTable"(label DESC);
+        CREATE TABLE independent_two.unquoted_lower(id NUMBER(10,0));
+        COMMENT ON COLUMN independent_one."SameTable".label IS 'exact metadata';
+    "#;
+    for statement in setup.split(';').map(str::trim).filter(|s| !s.is_empty()) {
+        tok(api.database().raw_cmd(statement)).unwrap_or_else(|error| panic!("{error}\nSQL: {statement}"));
+    }
+    let schema = api.describe_with_schemas(&["independent_one", "independent_two"]);
+    let first = schema.table_walker_ns("independent_one", "SameTable").unwrap();
+    let second = schema.table_walker_ns("independent_two", "SameTable").unwrap();
+    assert!(schema.table_walker_ns("independent_two", "unquoted_lower").is_some());
+    assert!(first.column("id").unwrap().is_autoincrement());
+    let label = first.column("label").unwrap();
+    assert_eq!(label.description(), Some("exact metadata"));
+    assert_eq!(
+        label.default().unwrap().kind(),
+        &sql_schema_describer::DefaultKind::Value(PrismaValue::String("it's :ignored".into()))
+    );
+    assert!(matches!(
+        first.column("value").unwrap().default().unwrap().kind(),
+        sql_schema_describer::DefaultKind::DbGenerated(_)
+    ));
+    assert_eq!(
+        first.column("payload").unwrap().default().unwrap().kind(),
+        &sql_schema_describer::DefaultKind::Value(PrismaValue::Bytes(vec![0, 0xab, 0xcd]))
+    );
+    let fk = second.foreign_keys().next().unwrap();
+    assert_eq!(fk.referenced_table().id, first.id);
+    assert_eq!(fk.on_delete_action(), ForeignKeyAction::SetNull);
+    assert_eq!(fk.on_update_action(), ForeignKeyAction::Cascade);
+    assert_eq!(
+        second
+            .indexes()
+            .find(|i| i.name() == "same_index")
+            .unwrap()
+            .columns()
+            .next()
+            .unwrap()
+            .sort_order(),
+        Some(SQLSortOrder::Desc)
+    );
+    let ext: &sql_schema_describer::kingbase_oracle::KingbaseOracleSchemaExt = schema.downcast_connector_data();
+    assert_eq!(
+        ext.owning_constraint_names
+            .get(&first.primary_key().unwrap().id)
+            .map(String::as_str),
+        Some("same_pk")
+    );
+}
+
+#[test_connector(tags(KingbaseOracle))]
+fn oracle_include_keys_cast_defaults_and_generation_ownership(api: TestApi) {
+    api.raw_cmd(
+        r#"
+        CREATE TABLE "Covered" (a NUMBER(10,0), b NUMBER(10,0));
+        CREATE UNIQUE INDEX covered_uq ON "Covered"(a) INCLUDE(b);
+        CREATE TABLE "Casted" (n NUMBER(10,2) DEFAULT CAST(1.25 AS NUMERIC(2,1)));
+        INSERT INTO "Casted" DEFAULT VALUES;
+        CREATE SEQUENCE external_seq;
+        CREATE SEQUENCE shared_seq;
+        CREATE TABLE "Owned" (id INTEGER DEFAULT nextval('shared_seq'));
+        ALTER SEQUENCE shared_seq OWNED BY "Owned".id;
+        CREATE TABLE "External" (id INTEGER DEFAULT nextval('external_seq'));
+        CREATE TABLE "Shared" (id INTEGER DEFAULT nextval('shared_seq'));
+        CREATE TABLE "NativeIdentity" (id INTEGER GENERATED BY DEFAULT AS IDENTITY);
+    "#,
+    );
+    let schema = api.describe();
+    let covered = schema.table_walker("Covered").unwrap();
+    let index = covered.indexes().find(|i| i.name() == "covered_uq").unwrap();
+    assert!(index.is_unique());
+    assert_eq!(index.column_names().collect::<Vec<_>>(), vec!["a"]);
+    let default = schema
+        .table_walker("Casted")
+        .unwrap()
+        .column("n")
+        .unwrap()
+        .default()
+        .unwrap();
+    assert!(
+        matches!(default.kind(), sql_schema_describer::DefaultKind::DbGenerated(Some(expression)) if expression.contains("numeric(2,1)"))
+    );
+    let actual = tok(api
+        .database()
+        .query_raw("SELECT CAST(n AS TEXT) AS n FROM \"Casted\"", &[]))
+    .unwrap();
+    assert_eq!(actual.into_single().unwrap().get("n").unwrap().as_str(), Some("1.30"));
+    use sql_schema_describer::kingbase_oracle::{ColumnGeneration, KingbaseOracleSchemaExt};
+    let ext: &KingbaseOracleSchemaExt = schema.downcast_connector_data();
+    let column = |table| schema.table_walker(table).unwrap().column("id").unwrap().id;
+    assert!(!ext.column_generations.contains_key(&column("External")));
+    assert!(!ext.column_generations.contains_key(&column("Shared")));
+    assert!(
+        matches!(ext.column_generations.get(&column("Owned")),Some(ColumnGeneration::OwnedSequence{name,shared:true,..}) if name=="shared_seq")
+    );
+    assert!(matches!(
+        ext.column_generations.get(&column("NativeIdentity")),
+        Some(ColumnGeneration::Identity { .. })
+    ));
 }

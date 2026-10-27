@@ -21,7 +21,7 @@ fn an_enum_can_be_turned_into_a_model(api: TestApi) {
 
     let enum_name = if api.lower_cases_table_names() {
         "cat_mood"
-    } else if api.is_mysql() {
+    } else if api.is_mysql() || api.tags().contains(Tags::KingbaseMysql) {
         "Cat_mood"
     } else {
         "CatMood"
@@ -56,6 +56,9 @@ fn an_enum_can_be_turned_into_a_model(api: TestApi) {
         .assert_table("Cat", |table| table.assert_columns_count(2).assert_has_column("moodId"))
         .assert_table("CatMood", |table| table.assert_column_count(3))
         .assert_has_no_enum("CatMood");
+    if api.tags().contains(Tags::KingbaseMysql) {
+        api.assert_schema().assert_has_no_enum(enum_name);
+    }
 }
 
 #[test_connector(capabilities(Enums))]
@@ -75,7 +78,7 @@ fn variants_can_be_added_to_an_existing_enum(api: TestApi) {
 
     let enum_name = if api.lower_cases_table_names() {
         "cat_mood"
-    } else if api.is_mysql() {
+    } else if api.is_mysql() || api.tags().contains(Tags::KingbaseMysql) {
         "Cat_mood"
     } else {
         "CatMood"
@@ -133,7 +136,7 @@ fn variants_can_be_removed_from_an_existing_enum(api: TestApi) {
 
     let enum_name = if api.lower_cases_table_names() {
         "cat_mood"
-    } else if api.is_mysql() {
+    } else if api.is_mysql() || api.tags().contains(Tags::KingbaseMysql) {
         "Cat_mood"
     } else {
         "CatMood"
@@ -159,7 +162,7 @@ fn variants_can_be_removed_from_an_existing_enum(api: TestApi) {
         }
     "#;
 
-    let warnings: &[Cow<'_, str>] = if api.is_mysql() {
+    let warnings: &[Cow<'_, str>] = if api.is_mysql() || api.tags().contains(Tags::KingbaseMysql) {
         &["The values [HAPPY] on the enum `Cat_mood` will be removed. If these variants are still used in the database, this will fail.".into()]
     } else if api.is_sqlite() {
         &[]

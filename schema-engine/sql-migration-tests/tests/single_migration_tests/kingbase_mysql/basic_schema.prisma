@@ -30,9 +30,10 @@ enum Status {
 //     `id` INTEGER NOT NULL,
 //     `email` VARCHAR(64) NOT NULL,
 //
-//     UNIQUE INDEX `Account_email_key`(`email`),
+//     UNIQUE INDEX `_prisma_idx_b8a6725f7952edc8`(`email`),
 //     PRIMARY KEY (`id`)
 // );
+// COMMENT ON INDEX `_prisma_idx_b8a6725f7952edc8` IS 'prisma:logical-index:Account_email_key';
 //
 // -- CreateTable
 // CREATE TABLE `Post` (
@@ -41,9 +42,10 @@ enum Status {
 //     `status` ENUM('DRAFT', 'PUBLISHED') NOT NULL DEFAULT 'DRAFT',
 //     `createdAt` DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
 //
-//     INDEX `Post_accountId_idx`(`accountId`),
+//     INDEX `_prisma_idx_2cbac8afbd2c4bbe`(`accountId`),
 //     PRIMARY KEY (`id`)
 // );
+// COMMENT ON INDEX `_prisma_idx_2cbac8afbd2c4bbe` IS 'prisma:logical-index:Post_accountId_idx';
 //
 // -- AddForeignKey
 // ALTER TABLE `Post` ADD CONSTRAINT `Post_accountId_fkey` FOREIGN KEY (`accountId`) REFERENCES `Account`(`id`) ON DELETE CASCADE ON UPDATE CASCADE;

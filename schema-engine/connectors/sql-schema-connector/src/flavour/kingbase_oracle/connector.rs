@@ -24,6 +24,7 @@ pub(super) struct Params {
     connector_params: ConnectorParams,
     url: KingbaseOracleUrl,
     raw_url: Url,
+    schema_name: String,
 }
 
 impl Params {
@@ -32,16 +33,37 @@ impl Params {
             super::super::validate_connection_infos_do_not_match(&connector_params.connection_string, shadow_db_url)?;
         }
 
-        let raw_url: Url = connector_params
+        let mut raw_url: Url = connector_params
             .connection_string
             .parse()
             .map_err(ConnectorError::url_parse_error)?;
+        // Startup search_path values are names, not SQL identifiers parsed by
+        // CREATE SCHEMA. Use the physical spelling in the connection as well.
+        if raw_url.query_pairs().any(|(key, _)| key == "schema") {
+            let pairs = raw_url
+                .query_pairs()
+                .map(|(key, value)| {
+                    let value = if key == "schema" {
+                        sql_schema_describer::kingbase_oracle::normalize_namespace(&value).into_owned()
+                    } else {
+                        value.into_owned()
+                    };
+                    (key.into_owned(), value)
+                })
+                .collect::<Vec<_>>();
+            raw_url.query_pairs_mut().clear().extend_pairs(pairs);
+        }
         let url = KingbaseOracleUrl::new(raw_url.clone()).map_err(ConnectorError::url_parse_error)?;
+        let schema_name = sql_schema_describer::kingbase_oracle::normalize_namespace(
+            url.schema().unwrap_or(DEFAULT_KINGBASE_ORACLE_SCHEMA),
+        )
+        .into_owned();
 
         Ok(Self {
             connector_params,
             url,
             raw_url,
+            schema_name,
         })
     }
 
@@ -52,7 +74,7 @@ impl Params {
     }
 
     fn schema_name(&self) -> &str {
-        self.url.schema().unwrap_or(DEFAULT_KINGBASE_ORACLE_SCHEMA)
+        &self.schema_name
     }
 }
 
@@ -82,7 +104,7 @@ impl KingbaseOracleConnector {
     fn schema_name(&self) -> &str {
         self.state
             .params()
-            .and_then(|params| params.url.schema())
+            .map(Params::schema_name)
             .unwrap_or(DEFAULT_KINGBASE_ORACLE_SCHEMA)
     }
 }
@@ -104,13 +126,13 @@ impl SqlConnector for KingbaseOracleConnector {
         with_connection(&mut self.state, |_params, connection| async move {
             crosstarget_utils::time::timeout(
                 ADVISORY_LOCK_TIMEOUT,
-                connection.raw_cmd(&format!("SELECT pg_advisory_lock({ADVISORY_LOCK_KEY})")),
+                connection.raw_cmd(&format!("SELECT sys_catalog.sys_advisory_lock({ADVISORY_LOCK_KEY})")),
             )
             .await
             .map_err(|_| {
                 ConnectorError::user_facing(user_facing_errors::common::DatabaseTimeout {
                     context: format!(
-                        "Timed out trying to acquire a Kingbase Oracle advisory lock (SELECT pg_advisory_lock({ADVISORY_LOCK_KEY})). Timeout: {}ms. See https://pris.ly/d/migrate-advisory-locking for details.",
+                        "Timed out trying to acquire a Kingbase Oracle advisory lock (SELECT sys_catalog.sys_advisory_lock({ADVISORY_LOCK_KEY})). Timeout: {}ms. See https://pris.ly/d/migrate-advisory-locking for details.",
                         ADVISORY_LOCK_TIMEOUT.as_millis()
                     ),
                 })
@@ -171,6 +193,19 @@ impl SqlConnector for KingbaseOracleConnector {
         })
     }
 
+    fn introspect<'a>(
+        &'a mut self,
+        namespaces: Option<Namespaces>,
+        _ctx: &'a schema_connector::IntrospectionContext,
+    ) -> BoxFuture<'a, ConnectorResult<SqlSchema>> {
+        Box::pin(async move {
+            let requested = Namespaces::to_vec(namespaces.clone(), self.schema_name().to_owned());
+            let mut schema = self.describe_schema(namespaces).await?;
+            sql_schema_describer::kingbase_oracle::preserve_namespace_spelling(&mut schema, &requested);
+            Ok(schema)
+        })
+    }
+
     fn drop_database(&mut self) -> BoxFuture<'_, ConnectorResult<()>> {
         let params = self.state.get_unwrapped_params().clone();
         // Kingbase refuses to drop a database while this connector owns a
@@ -202,10 +237,15 @@ impl SqlConnector for KingbaseOracleConnector {
             // matching PostgreSQL. It contains migration bookkeeping even
             // when the Prisma schema lists only custom namespaces.
             let default_schema = self.schema_name().to_owned();
-            let mut schema_names = Namespaces::to_vec(namespaces, default_schema.clone());
+            let mut schema_names = Namespaces::to_vec(namespaces, default_schema.clone())
+                .into_iter()
+                .map(|name| sql_schema_describer::kingbase_oracle::normalize_namespace(&name).into_owned())
+                .collect::<Vec<_>>();
             if !schema_names.iter().any(|schema| schema == &default_schema) {
                 schema_names.push(default_schema);
             }
+            schema_names.sort();
+            schema_names.dedup();
 
             let mut table_names = Vec::new();
 
@@ -267,9 +307,14 @@ impl SqlConnector for KingbaseOracleConnector {
         let default_schema = self.schema_name().to_owned();
 
         with_connection(&mut self.state, move |_params, connection| async move {
-            let schemas = namespaces
+            let mut schemas = namespaces
                 .map(|namespaces| namespaces.into_iter().collect::<Vec<_>>())
-                .unwrap_or_else(|| vec![default_schema]);
+                .unwrap_or_else(|| vec![default_schema])
+                .into_iter()
+                .map(|name| sql_schema_describer::kingbase_oracle::normalize_namespace(&name).into_owned())
+                .collect::<Vec<_>>();
+            schemas.sort();
+            schemas.dedup();
 
             for schema in schemas {
                 let schema = quote_identifier(&schema);
@@ -371,7 +416,7 @@ impl SqlConnector for KingbaseOracleConnector {
     }
 
     fn default_namespace(&self) -> Option<&str> {
-        Some(DEFAULT_KINGBASE_ORACLE_SCHEMA)
+        Some(self.schema_name())
     }
 
     fn describe_query<'a>(
@@ -449,9 +494,42 @@ where
         State::Connected(params, connection) => Box::pin(f(params, connection)),
         state @ State::WithParams(_) => Box::pin(async move {
             state
-                .try_connect(|params| Box::pin(async move { Ok(Connection::new(params.raw_url.clone()).await?) }))
+                .try_connect(|params| Box::pin(async move { Connection::new(params.raw_url.clone()).await }))
                 .await?;
             with_connection(state, f).await
         }),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn schema_url_uses_physical_name_without_changing_other_parameters() {
+        for (requested, expected) in [("APP", "app"), ("app", "app"), ("App", "App")] {
+            let params = Params::new(ConnectorParams {
+                connection_string: format!(
+                    "kingbase-oracle://localhost/test?schema={requested}&application_name=KeepCase"
+                ),
+                preview_features: Default::default(),
+                shadow_database_connection_string: None,
+            })
+            .unwrap();
+            assert_eq!(params.schema_name(), expected);
+            assert_eq!(params.url.schema(), Some(expected));
+            assert!(
+                params
+                    .raw_url
+                    .query_pairs()
+                    .any(|(key, value)| key == "schema" && value == expected)
+            );
+            assert!(
+                params
+                    .raw_url
+                    .query_pairs()
+                    .any(|(key, value)| key == "application_name" && value == "KeepCase")
+            );
+        }
     }
 }

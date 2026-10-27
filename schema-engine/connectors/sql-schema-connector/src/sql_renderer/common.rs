@@ -36,6 +36,8 @@ where
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum Quoted<T> {
     Double(T),
+    OracleIdentifier(T),
+    OracleString(T),
     Single(T),
     Backticks(T),
     SquareBrackets(T),
@@ -81,6 +83,8 @@ where
 {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Quoted::OracleIdentifier(inner) => write!(f, "\"{}\"", inner.to_string().replace('"', "\"\"")),
+            Quoted::OracleString(inner) => write!(f, "'{}'", inner.to_string().replace('\'', "''")),
             Quoted::Double(inner) => write!(f, "\"{inner}\""),
             Quoted::Single(inner) => write!(f, "'{inner}'"),
             Quoted::Backticks(inner) => write!(f, "`{}`", inner.to_string().replace('`', "``")),

@@ -75,7 +75,7 @@ static DB_UNDER_TEST: LazyLock<Result<DbUnderTest, String>> = LazyLock::new(|| {
         "kingbase" | "kingbase-mysql" => Ok(DbUnderTest {
             tags: Tags::KingbaseMysql.into(),
             database_url,
-            capabilities: Default::default(),
+            capabilities: Capabilities::Enums | Capabilities::Json,
             provider: "kingbase-mysql",
             shadow_database_url,
             max_ddl_refresh_delay: None,

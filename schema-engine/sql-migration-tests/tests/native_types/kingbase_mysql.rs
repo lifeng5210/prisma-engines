@@ -867,11 +867,19 @@ enum CastKind {
     Impossible,
 }
 
+struct CastBuffers<'a> {
+    dm1: String,
+    dm2: String,
+    warnings: Vec<Cow<'a, str>>,
+}
+
 fn run_casts_with_existing_data(api: &mut TestApi, cases: Cases, cast_kind: CastKind) {
     let colnames = colnames_for_cases(cases);
-    let mut dm1 = String::with_capacity(256);
-    let mut dm2 = String::with_capacity(256);
-    let mut warnings: Vec<Cow<'_, str>> = Vec::new();
+    let mut buffers = CastBuffers {
+        dm1: String::with_capacity(256),
+        dm2: String::with_capacity(256),
+        warnings: Vec::new(),
+    };
 
     for (from_type, test_value, to_types) in cases {
         let (no_op, remaining): (Vec<_>, Vec<_>) = to_types.iter().copied().partition(|to_type| *from_type == *to_type);
@@ -920,9 +928,7 @@ fn run_casts_with_existing_data(api: &mut TestApi, cases: Cases, cast_kind: Cast
                 &to_types,
                 effective_kind,
                 &colnames,
-                &mut dm1,
-                &mut dm2,
-                &mut warnings,
+                &mut buffers,
             );
         }
     }
@@ -935,10 +941,9 @@ fn run_cast_group(
     to_types: &[&str],
     cast_kind: CastKind,
     colnames: &[String],
-    dm1: &mut String,
-    dm2: &mut String,
-    warnings: &mut Vec<Cow<'_, str>>,
+    buffers: &mut CastBuffers<'_>,
 ) {
+    let CastBuffers { dm1, dm2, warnings } = buffers;
     let insert = expand_cases(
         from_type,
         test_value,

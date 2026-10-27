@@ -83,7 +83,7 @@ impl SqlRenderer for KingbaseMysqlRenderer {
                                 write!(rendered, "({length})").unwrap();
                             }
 
-                            if let Some(sort_order) = column.sort_order() {
+                            if let Some(sort_order) = column.sort_order().filter(|order| *order != SQLSortOrder::Asc) {
                                 rendered.push(' ');
                                 rendered.push_str(sort_order.as_ref());
                             }
@@ -250,7 +250,7 @@ impl SqlRenderer for KingbaseMysqlRenderer {
                 .primary_key_columns()
                 .into_iter()
                 .flatten()
-                .map(render_index_column)
+                .map(render_primary_key_column)
                 .collect(),
             default_character_set: None,
             collate: None,
@@ -404,6 +404,16 @@ fn render_column(col: TableColumnWalker<'_>) -> ddl::Column<'_> {
         auto_increment: col.is_autoincrement(),
         ..Default::default()
     }
+}
+
+fn render_primary_key_column(column: sql::walkers::IndexColumnWalker<'_>) -> IndexColumn<'_> {
+    let mut rendered = render_index_column(column);
+    // The describer records the default ascending order explicitly, while
+    // Kingbase's PRIMARY KEY column syntax requires omitting that marker.
+    if matches!(rendered.sort_order, Some(SortOrder::Asc)) {
+        rendered.sort_order = None;
+    }
+    rendered
 }
 
 fn render_index_column(column: sql::walkers::IndexColumnWalker<'_>) -> IndexColumn<'_> {
@@ -793,6 +803,46 @@ mod tests {
         }
         schema.set_connector_data(Box::new(ext));
         schema
+    }
+
+    #[test]
+    fn introspected_primary_key_ascending_order_is_implicit_in_ddl() {
+        let mut schema = SqlSchema::default();
+        let namespace = schema.push_namespace("public".into());
+        let table = schema.push_table("items".into(), namespace, None);
+        let mut tpe = sql::ColumnType::pure(ColumnTypeFamily::String, sql::ColumnArity::Required);
+        tpe.native_type = Some(psl::datamodel_connector::NativeTypeInstance::new(
+            KingbaseMySqlType::VarChar(32),
+        ));
+        let column = schema.push_table_column(
+            table,
+            sql::Column {
+                name: "value".into(),
+                tpe,
+                auto_increment: false,
+                description: None,
+            },
+        );
+        let index = schema.push_primary_key(table, "items_pkey".into());
+        schema.push_index_column(sql::IndexColumn {
+            index_id: index,
+            column_id: column,
+            sort_order: Some(SQLSortOrder::Asc),
+            length: None,
+        });
+        schema.set_connector_data(Box::<sql::kingbase_mysql::KingbaseMysqlSchemaExt>::default());
+        let table = schema.table_walkers().next().unwrap();
+        let created = KingbaseMysqlRenderer.render_create_table(table);
+        assert!(created.contains("PRIMARY KEY (`value`)"), "{created}");
+        assert!(!created.contains("`value` ASC"), "{created}");
+        let alter = AlterTable {
+            table_ids: MigrationPair::new(table.id, table.id),
+            changes: vec![TableChange::AddPrimaryKey],
+        };
+        assert_eq!(
+            KingbaseMysqlRenderer.render_alter_table(&alter, MigrationPair::new(&schema, &schema)),
+            vec!["ALTER TABLE `items` ADD PRIMARY KEY (`value`)".to_owned()]
+        );
     }
 
     // The regular differ emits RenameIndex. Force the otherwise dormant step

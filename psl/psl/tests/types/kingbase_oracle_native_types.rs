@@ -122,7 +122,7 @@ fn invalid_number_precision_is_rejected() {
 }
 
 #[test]
-fn number_scale_cannot_exceed_precision() {
+fn number_scale_above_precision_is_normalized() {
     let schema = indoc! {r#"
         datasource db {
           provider = "kingbase-oracle"
@@ -134,8 +134,44 @@ fn number_scale_cannot_exceed_precision() {
         }
     "#};
 
-    let error = parse_unwrap_err(schema);
-    assert!(error.contains("Scale must not be larger than precision."));
+    assert_valid(schema);
+    let mut diagnostics = psl::diagnostics::Diagnostics::new();
+    let parsed = KINGBASE_ORACLE
+        .parse_native_type(
+            "Number",
+            &["2".into(), "3".into()],
+            psl::diagnostics::Span::empty(),
+            &mut diagnostics,
+        )
+        .unwrap();
+    assert_eq!(
+        parsed.downcast_ref::<KingbaseOracleType>(),
+        &Number(PrecisionAndScale(3, 3))
+    );
+}
+
+#[test]
+fn normalizing_number_does_not_hide_zero_precision() {
+    let schema = r#"datasource db {
+          provider = "kingbase-oracle"
+        }
+        model Item {
+          id Int @id
+          value Decimal @db.Number(0,4)
+        }"#;
+    assert!(parse_unwrap_err(schema).contains("Precision must be between 1 and 1000."));
+}
+
+#[test]
+fn negative_number_scale_reports_the_server_semantics_limitation() {
+    let schema = r#"datasource db {
+          provider = "kingbase-oracle"
+        }
+        model Item {
+          id Int @id
+          value Decimal @db.Number(6,-2)
+        }"#;
+    assert!(parse_unwrap_err(schema).contains("does not preserve Oracle rounding semantics"));
 }
 
 #[test]
@@ -156,7 +192,7 @@ fn float_precision_above_53_is_rejected() {
 }
 
 #[test]
-fn varchar2_length_above_four_thousand_is_rejected() {
+fn varchar2_length_above_server_limit_is_rejected() {
     let schema = indoc! {r#"
         datasource db {
           provider = "kingbase-oracle"
@@ -164,12 +200,12 @@ fn varchar2_length_above_four_thousand_is_rejected() {
 
         model User {
           id    Int    @id
-          value String @db.VarChar2(4001)
+          value String @db.VarChar2(10485761)
         }
     "#};
 
     let error = parse_unwrap_err(schema);
-    assert!(error.contains("Length must be between 1 and 4,000."));
+    assert!(error.contains("Length must be between 1 and 10,485,760."));
 }
 
 #[test]
@@ -276,4 +312,13 @@ fn connector_requires_the_mode_specific_url_scheme() {
     assert!(KINGBASE_ORACLE.validate_url("kingbase-oracle://localhost/test").is_ok());
     assert!(KINGBASE_ORACLE.validate_url("kingbase://localhost/test").is_err());
     assert!(KINGBASE_ORACLE.validate_url("oracle://localhost/test").is_err());
+}
+
+#[test]
+fn varchar2_server_supported_lengths_are_valid() {
+    for length in [4001, 32767, 10485760] {
+        assert_valid(&format!(
+            "datasource db {{\n provider = \"kingbase-oracle\"\n}}\nmodel Wide {{\n id Int @id\n v String @db.VarChar2({length})\n}}"
+        ));
+    }
 }

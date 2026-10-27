@@ -57,11 +57,11 @@ impl SqlSchemaCalculatorFlavour for KingbaseOracleSchemaCalculatorFlavour {
     }
 
     fn push_connector_data(&self, context: &mut Context<'_>) {
-        use sql::postgres::{Constraint, ConstraintOption, PostgresSchemaExt};
+        use sql::kingbase_oracle::KingbaseOracleSchemaExt;
         let schema = &mut context.schema.describer_schema;
         sql::kingbase_oracle::normalize_schema_identifiers(schema);
         sql::kingbase_oracle::normalize_empty_string_defaults(schema);
-        let mut ext = PostgresSchemaExt::default();
+        let mut ext = KingbaseOracleSchemaExt::default();
         for index in schema
             .table_walkers()
             .flat_map(|table| table.indexes())
@@ -73,8 +73,21 @@ impl SqlSchemaCalculatorFlavour for KingbaseOracleSchemaCalculatorFlavour {
                             .any(|column| column.sort_order() == Some(sql::SQLSortOrder::Desc))
             })
         {
-            ext.constraint_options
-                .insert(Constraint::Index(index.id), ConstraintOption::IsConstraint.into());
+            ext.owning_constraint_names.insert(index.id, index.name().to_owned());
+        }
+        for column in schema
+            .table_walkers()
+            .flat_map(|table| table.columns())
+            .filter(|column| column.is_autoincrement())
+        {
+            ext.column_generations.insert(
+                column.id,
+                sql::kingbase_oracle::ColumnGeneration::OwnedSequence {
+                    namespace: column.table().namespace().unwrap_or("public").to_owned(),
+                    name: super::renderer::sequence_name(column.table().name(), column.name()),
+                    shared: false,
+                },
+            );
         }
         schema.set_connector_data(Box::new(ext));
     }

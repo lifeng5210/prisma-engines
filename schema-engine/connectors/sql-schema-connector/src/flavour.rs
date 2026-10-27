@@ -39,9 +39,6 @@ pub(crate) use kingbase_oracle::KingbaseOracleDialect;
 pub(crate) use kingbase_oracle::KingbaseOracleConnector;
 
 #[cfg(any(feature = "postgresql", feature = "cockroachdb"))]
-pub(crate) use postgres::PostgresRenderer;
-
-#[cfg(any(feature = "postgresql", feature = "cockroachdb"))]
 pub(crate) use postgres::{PostgresConnector, PostgresDialect};
 
 #[cfg(feature = "sqlite")]

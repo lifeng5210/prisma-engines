@@ -98,9 +98,9 @@ petgraph = "0.8"
 pin-project = "1"
 postgres-native-tls = { git = "https://github.com/prisma/rust-postgres", branch = "pgbouncer-mode" }
 postgres-types = { git = "https://github.com/prisma/rust-postgres", branch = "pgbouncer-mode" }
-kingbase-postgres-native-tls = { package = "postgres-native-tls", git = "https://github.com/lifeng5210/rust-kingbase", rev = "da927b91468c446c0527d85461d035c0e5dbc2b0" }
-kingbase-postgres-types = { package = "postgres-types", git = "https://github.com/lifeng5210/rust-kingbase", rev = "da927b91468c446c0527d85461d035c0e5dbc2b0" }
-kingbase-tokio-postgres = { package = "tokio-postgres", git = "https://github.com/lifeng5210/rust-kingbase", rev = "da927b91468c446c0527d85461d035c0e5dbc2b0" }
+kingbase-postgres-native-tls = { package = "postgres-native-tls", git = "https://github.com/lifeng5210/rust-kingbase", rev = "11a0a2ed3286eb791900ff43ea02114a63937e24" }
+kingbase-postgres-types = { package = "postgres-types", git = "https://github.com/lifeng5210/rust-kingbase", rev = "11a0a2ed3286eb791900ff43ea02114a63937e24" }
+kingbase-tokio-postgres = { package = "tokio-postgres", git = "https://github.com/lifeng5210/rust-kingbase", rev = "11a0a2ed3286eb791900ff43ea02114a63937e24" }
 pretty = "0.12"
 rustc-hash = "2"
 rand = "0.8"

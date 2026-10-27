@@ -66,7 +66,7 @@ fn all_supported_oracle_native_types_can_be_created_and_reintrospected(api: Test
             .assert_column("varcharValue", |column| {
                 column.assert_native_type("VarChar2(32)", KINGBASE_ORACLE)
             })
-            // Oracle compatibility catalog canonicalizes national strings and NCLOB.
+            // C010 canonicalizes national CHAR/VARCHAR aliases; NCLOB retains its physical identity.
             .assert_column("ncharValue", |column| {
                 column.assert_native_type("Char(10)", KINGBASE_ORACLE)
             })
@@ -75,12 +75,10 @@ fn all_supported_oracle_native_types_can_be_created_and_reintrospected(api: Test
             })
             .assert_column("clobValue", |column| column.assert_native_type("Clob", KINGBASE_ORACLE))
             .assert_column("nclobValue", |column| {
-                column.assert_native_type("Clob", KINGBASE_ORACLE)
+                column.assert_native_type("NClob", KINGBASE_ORACLE)
             })
             .assert_column("blobValue", |column| column.assert_native_type("Blob", KINGBASE_ORACLE))
-            .assert_column("dateValue", |column| {
-                column.assert_native_type("Timestamp(0)", KINGBASE_ORACLE)
-            })
+            .assert_column("dateValue", |column| column.assert_native_type("Date", KINGBASE_ORACLE))
             .assert_column("timestampTzValue", |column| {
                 column.assert_native_type("TimestampTz(3)", KINGBASE_ORACLE)
             })

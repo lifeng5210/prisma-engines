@@ -83,42 +83,6 @@ pub(crate) fn params_to_types(params: &[Value<'_>]) -> Vec<Type> {
         .collect()
 }
 
-#[cfg(test)]
-mod tests {
-    use super::params_to_types;
-    use crate::ast::Value;
-    use chrono::{TimeZone, Utc};
-    use kingbase_tokio_postgres::types::Type;
-
-    #[test]
-    fn uses_oracle_native_wire_types_when_scalar_types_are_ambiguous() {
-        let params = [
-            Value::boolean(true).with_native_column_type(Some("Boolean")),
-            Value::text("936DA01F-9ABD-4D9D-80C7-02AF85C822A8").with_native_column_type(Some("Uuid")),
-            Value::datetime(Utc.with_ymd_and_hms(2025, 1, 2, 3, 4, 5).unwrap())
-                .with_native_column_type(Some("TimestampTz")),
-            Value::datetime(Utc.with_ymd_and_hms(2025, 1, 2, 3, 4, 5).unwrap())
-                .with_native_column_type(Some("TimestampLocalTz")),
-            Value::text("large text").with_native_column_type(Some("Clob")),
-            Value::text("national text").with_native_column_type(Some("NClob")),
-            Value::json(serde_json::json!({ "value": 1 })),
-        ];
-
-        assert_eq!(
-            params_to_types(&params),
-            vec![
-                Type::BOOL,
-                Type::UUID,
-                Type::TIMESTAMPTZ,
-                Type::TIMESTAMPTZ,
-                Type::ORACLE_CLOB,
-                Type::ORACLE_NCLOB,
-                Type::JSONB,
-            ]
-        );
-    }
-}
-
 impl ToSql for OracleParam<'_, '_> {
     fn to_sql(&self, ty: &Type, out: &mut BytesMut) -> Result<IsNull, Box<dyn std::error::Error + Sync + Send>> {
         let result = match &self.0.typed {
@@ -180,4 +144,40 @@ impl ToSql for OracleParam<'_, '_> {
     }
 
     kingbase_postgres_types::to_sql_checked!();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::params_to_types;
+    use crate::ast::Value;
+    use chrono::{TimeZone, Utc};
+    use kingbase_tokio_postgres::types::Type;
+
+    #[test]
+    fn uses_oracle_native_wire_types_when_scalar_types_are_ambiguous() {
+        let params = [
+            Value::boolean(true).with_native_column_type(Some("Boolean")),
+            Value::text("936DA01F-9ABD-4D9D-80C7-02AF85C822A8").with_native_column_type(Some("Uuid")),
+            Value::datetime(Utc.with_ymd_and_hms(2025, 1, 2, 3, 4, 5).unwrap())
+                .with_native_column_type(Some("TimestampTz")),
+            Value::datetime(Utc.with_ymd_and_hms(2025, 1, 2, 3, 4, 5).unwrap())
+                .with_native_column_type(Some("TimestampLocalTz")),
+            Value::text("large text").with_native_column_type(Some("Clob")),
+            Value::text("national text").with_native_column_type(Some("NClob")),
+            Value::json(serde_json::json!({ "value": 1 })),
+        ];
+
+        assert_eq!(
+            params_to_types(&params),
+            vec![
+                Type::BOOL,
+                Type::UUID,
+                Type::TIMESTAMPTZ,
+                Type::TIMESTAMPTZ,
+                Type::ORACLE_CLOB,
+                Type::ORACLE_NCLOB,
+                Type::JSONB,
+            ]
+        );
+    }
 }

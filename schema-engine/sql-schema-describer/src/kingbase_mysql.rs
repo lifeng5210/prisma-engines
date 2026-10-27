@@ -2,13 +2,12 @@
 
 use crate::{getters::Getter, parsers::Parser, *};
 use indexmap::IndexMap;
-use indoc::indoc;
 use psl::{builtin_connectors::KingbaseMySqlType, datamodel_connector::NativeTypeInstance};
 use quaint::{
     Value,
     prelude::{Queryable, ResultRow},
 };
-use std::{borrow::Cow, collections::HashMap, sync::LazyLock};
+use std::{collections::HashMap, sync::LazyLock};
 use tracing::trace;
 
 /// Matches a default value in the schema, wrapped single quotes.
@@ -135,54 +134,7 @@ async fn push_indexes(
 ) -> DescriberResult<()> {
     // Kingbase MySQL does not expose MySQL's information_schema.statistics view.
     // Read the equivalent metadata from Kingbase's native system views.
-    let sql = r#"
-        SELECT
-            tableinfo.relname AS table_name,
-            indexinfo.relname AS index_name,
-            indexdescription.description AS index_description,
-            columninfo.attname AS column_name,
-            NULL::INT AS partial,
-            keys.ordinality::INT AS seq_in_index,
-            CASE
-                WHEN sys_catalog.sys_index_column_has_property(rawindex.indexrelid, keys.ordinality::INT, 'desc')
-                    THEN 'D'
-                WHEN sys_catalog.sys_index_column_has_property(rawindex.indexrelid, keys.ordinality::INT, 'asc')
-                    THEN 'A'
-                ELSE NULL
-            END AS column_order,
-            NOT rawindex.indisunique AS non_unique,
-            indexaccess.amname AS index_type,
-            rawindex.indisprimary AS is_primary,
-            indexconstraint.conname AS constraint_name,
-            sys_catalog.sys_get_expr(rawindex.indexprs, rawindex.indrelid) AS index_expression
-        FROM sys_catalog.sys_index AS rawindex
-        INNER JOIN sys_catalog.sys_class AS tableinfo
-            ON tableinfo.oid = rawindex.indrelid
-        INNER JOIN sys_catalog.sys_class AS indexinfo
-            ON indexinfo.oid = rawindex.indexrelid
-        LEFT JOIN sys_catalog.sys_description AS indexdescription
-            ON indexdescription.objoid = indexinfo.oid AND indexdescription.objsubid = 0
-            AND indexdescription.classoid = (
-                SELECT classid FROM sys_catalog.sys_get_object_address(
-                    'view', ARRAY['sys_catalog', 'sys_class'], ARRAY[]::text[]
-                )
-            )
-        INNER JOIN sys_catalog.sys_namespace AS schemainfo
-            ON schemainfo.oid = tableinfo.relnamespace
-        INNER JOIN sys_catalog.sys_am AS indexaccess
-            ON indexaccess.oid = indexinfo.relam
-        LEFT JOIN sys_catalog.sys_constraint AS indexconstraint
-            ON indexconstraint.conindid = rawindex.indexrelid
-            AND indexconstraint.conrelid = rawindex.indrelid
-            AND indexconstraint.contype IN ('p', 'u')
-        CROSS JOIN LATERAL unnest(rawindex.indkey) WITH ORDINALITY AS keys(attnum, ordinality)
-        LEFT JOIN sys_catalog.sys_attribute AS columninfo
-            ON columninfo.attrelid = tableinfo.oid
-            AND columninfo.attnum = keys.attnum
-        WHERE schemainfo.nspname = ?
-            AND NOT rawindex.indisexclusion
-        ORDER BY table_name, index_name, seq_in_index
-    "#;
+    let sql = include_str!("kingbase_mysql/indexes_query.sql");
 
     let rows = conn.query_raw(sql, &[schema_name.into()]).await?;
     // `SqlSchema` walkers expect indexes to be grouped by table id. The
@@ -539,30 +491,7 @@ impl<'a> SqlSchemaDescriber<'a> {
 
     #[tracing::instrument(skip(self))]
     async fn get_views(&self, schema: &str) -> DescriberResult<Vec<View>> {
-        let sql = indoc! {r#"
-            SELECT views.TABLE_NAME AS view_name, views.VIEW_DEFINITION AS view_sql
-            FROM INFORMATION_SCHEMA.VIEWS AS views
-            INNER JOIN sys_catalog.sys_namespace AS namespace
-                ON namespace.nspname = views.TABLE_SCHEMA
-            INNER JOIN sys_catalog.sys_class AS relation
-                ON relation.relnamespace = namespace.oid
-                AND relation.relname = views.TABLE_NAME
-            WHERE views.TABLE_SCHEMA = ?
-                -- Do not expose views installed by database extensions as user views.
-                AND NOT EXISTS (
-                    SELECT 1
-                    FROM sys_catalog.sys_depend AS dependency
-                    -- sys_class is a view; its own OID is not the relation classid.
-                    WHERE dependency.classid = (
-                        SELECT classid
-                        FROM sys_catalog.sys_get_object_address(
-                            'view', ARRAY['sys_catalog', 'sys_class'], ARRAY[]::text[]
-                        )
-                    )
-                        AND dependency.objid = relation.oid
-                        AND dependency.deptype = 'e'
-                );
-        "#};
+        let sql = include_str!("kingbase_mysql/views_query.sql");
 
         let result_set = self.conn.query_raw(sql, &[schema.into()]).await?;
         let mut views = Vec::with_capacity(result_set.len());
@@ -581,13 +510,7 @@ impl<'a> SqlSchemaDescriber<'a> {
 
     #[tracing::instrument(skip(self))]
     async fn get_procedures(&self, schema: &str) -> DescriberResult<Vec<Procedure>> {
-        let sql = r#"
-            SELECT routine_name AS name,
-                routine_definition AS definition
-            FROM information_schema.routines
-            WHERE ROUTINE_SCHEMA = ?
-            AND ROUTINE_TYPE = 'PROCEDURE'
-        "#;
+        let sql = include_str!("kingbase_mysql/procedures_query.sql");
 
         let rows = self.conn.query_raw(sql, &[schema.into()]).await?;
         let mut procedures = Vec::with_capacity(rows.len());
@@ -610,20 +533,7 @@ impl<'a> SqlSchemaDescriber<'a> {
         sql_schema: &mut SqlSchema,
     ) -> DescriberResult<IndexMap<String, TableId>> {
         // Only consider tables for which we can read at least one column.
-        let sql = r#"
-            SELECT DISTINCT
-              BINARY table_info.table_name AS table_name,
-              table_info.create_options AS create_options,
-              table_info.table_comment AS table_comment
-            FROM information_schema.tables AS table_info
-            JOIN information_schema.columns AS column_info
-                ON BINARY column_info.table_name = BINARY table_info.table_name
-            WHERE
-                table_info.table_schema = ?
-                AND column_info.table_schema = ?
-                -- Exclude views.
-                AND table_info.table_type = 'BASE TABLE'
-            ORDER BY BINARY table_info.table_name"#;
+        let sql = include_str!("kingbase_mysql/tables_query.sql");
         let rows = self.conn.query_raw(sql, &[schema.into(), schema.into()]).await?;
         let names = rows.into_iter().map(|row| {
             (
@@ -667,18 +577,7 @@ impl<'a> SqlSchemaDescriber<'a> {
         let user_defined_enum_variants = Self::get_user_defined_enum_variants(conn, schema_name).await?;
         let domain_columns = conn
             .query_raw(
-                "SELECT relation.relname AS table_name, attribute.attname AS column_name,
-            t.typname AS domain_name, sys_catalog.sys_get_expr(co.conbin,0) AS range_expression
-            FROM sys_catalog.sys_attribute attribute
-            JOIN sys_catalog.sys_class relation ON relation.oid=attribute.attrelid
-            JOIN sys_catalog.sys_namespace rn ON rn.oid=relation.relnamespace
-            JOIN sys_catalog.sys_type t ON t.oid=attribute.atttypid
-            JOIN sys_catalog.sys_type base ON base.oid=t.typbasetype
-            JOIN sys_catalog.sys_namespace bn ON bn.oid=base.typnamespace
-            JOIN sys_catalog.sys_constraint co ON co.contypid=t.oid
-            WHERE rn.nspname=? AND t.typtype='d' AND NOT t.typnotnull AND t.typdefault IS NULL
-            AND bn.nspname='sys' AND base.typname='uint4' AND co.contype='c' AND co.convalidated
-            AND (SELECT count(*) FROM sys_catalog.sys_constraint other WHERE other.contypid=t.oid)=1",
+                include_str!("kingbase_mysql/unsigned_domains_query.sql"),
                 &[schema_name.into()],
             )
             .await?;
@@ -710,17 +609,7 @@ impl<'a> SqlSchemaDescriber<'a> {
 
         let auto_columns = conn
             .query_raw(
-                "SELECT relation.relname AS table_name, attribute.attname AS column_name,
-            trigger.tgargs AS trigger_arguments, procedure.prosrc AS body
-            FROM sys_catalog.sys_trigger trigger JOIN sys_catalog.sys_class relation ON relation.oid=trigger.tgrelid
-            JOIN sys_catalog.sys_namespace rn ON rn.oid=relation.relnamespace
-            JOIN sys_catalog.sys_proc procedure ON procedure.oid=trigger.tgfoid
-            JOIN sys_catalog.sys_namespace pn ON pn.oid=procedure.pronamespace
-            JOIN sys_catalog.sys_attribute attribute ON attribute.attrelid=relation.oid
-            WHERE rn.nspname=? AND pn.nspname=rn.nspname AND procedure.proname='__prisma_unsigned_auto_guard'
-            AND trigger.tgname='__prisma_unsigned_auto' AND trigger.tgnargs=2 AND trigger.tgtype=21
-            AND trigger.tgenabled IN ('O','A') AND NOT trigger.tgisinternal
-            AND attribute.attidentity IN ('a','d','i') AND attribute.atttypid='integer'::regtype",
+                include_str!("kingbase_mysql/unsigned_auto_increment_query.sql"),
                 &[schema_name.into()],
             )
             .await?;
@@ -751,39 +640,7 @@ impl<'a> SqlSchemaDescriber<'a> {
         // We alias all the columns because MySQL column names are case-insensitive in queries, but the
         // information schema column names became upper-case in MySQL 8, causing the code fetching
         // the result values by column name below to fail.
-        let sql = "
-            SELECT
-                column_name column_name,
-                data_type data_type,
-                column_type full_data_type,
-                character_maximum_length character_maximum_length,
-                numeric_precision numeric_precision,
-                numeric_scale numeric_scale,
-                datetime_precision datetime_precision,
-                column_default column_default,
-                is_nullable is_nullable,
-                CASE
-                    WHEN extra = 'auto_increment' THEN extra
-                    WHEN EXISTS (
-                        SELECT 1
-                        FROM sys_catalog.sys_attribute AS identity_column
-                        INNER JOIN sys_catalog.sys_class AS identity_table
-                            ON identity_table.oid = identity_column.attrelid
-                        INNER JOIN sys_catalog.sys_namespace AS identity_schema
-                            ON identity_schema.oid = identity_table.relnamespace
-                        WHERE identity_schema.nspname = column_info.table_schema
-                            AND identity_table.relname = column_info.table_name
-                            AND identity_column.attname = column_info.column_name
-                            AND identity_column.attidentity IN ('a', 'd', 'i')
-                    ) THEN 'auto_increment'
-                    ELSE extra
-                END AS extra,
-                table_name table_name,
-                IF(column_comment = '', NULL, column_comment) AS column_comment
-            FROM information_schema.columns AS column_info
-            WHERE table_schema = ?
-            ORDER BY ordinal_position
-        ";
+        let sql = include_str!("kingbase_mysql/columns_query.sql");
 
         let mut table_defaults = Vec::new();
         let mut view_defaults = Vec::new();
@@ -835,8 +692,7 @@ impl<'a> SqlSchemaDescriber<'a> {
 
             let mut tpe = Self::get_column_type(
                 (&table_name, &name),
-                &data_type,
-                &full_data_type,
+                (&data_type, &full_data_type),
                 precision,
                 arity,
                 default_value,
@@ -900,24 +756,21 @@ impl<'a> SqlSchemaDescriber<'a> {
                                 },
                             },
                             ColumnTypeFamily::String => {
-                                // See https://dev.mysql.com/doc/refman/8.0/en/information-schema-columns-table.html
-                                // and https://mariadb.com/kb/en/information-schema-columns-table/
-                                let default_string = default_string
-                                    .split_once("::")
-                                    .filter(|(_, cast)| {
-                                        matches!(*cast, "char" | "character" | "varchar" | "character varying" | "text")
-                                    })
-                                    .map_or(default_string.as_str(), |(value, _)| value);
-
                                 if default_generated
                                     || (maria_db && !matches!(default_string.chars().next(), Some('\'')))
                                 {
                                     Self::dbgenerated_expression(&default_string)
+                                } else if let Some(literal) = Self::string_default_literal(
+                                    &default_string,
+                                    tpe.native_type
+                                        .as_ref()
+                                        .map(|native| native.downcast_ref::<KingbaseMySqlType>()),
+                                ) {
+                                    DefaultValue::value(PrismaValue::String(Self::unquote_default_literal(literal)))
                                 } else {
-                                    DefaultValue::value(PrismaValue::String(Self::unescape_and_unquote_default_string(
-                                        default_string.to_owned(),
-                                        flavour,
-                                    )))
+                                    // Length-qualified and unknown casts can truncate or
+                                    // otherwise change the literal. Keep the server expression.
+                                    DefaultValue::db_generated(default_string)
                                 }
                             }
                             ColumnTypeFamily::DateTime => {
@@ -956,11 +809,12 @@ impl<'a> SqlSchemaDescriber<'a> {
                                     || (maria_db && !matches!(default_string.chars().next(), Some('\'')))
                                 {
                                     Self::dbgenerated_expression(&default_string)
+                                } else if let Some(literal) =
+                                    Self::enum_default_literal(&default_string, schema_name, &full_data_type)
+                                {
+                                    DefaultValue::value(PrismaValue::Enum(Self::unquote_default_literal(literal)))
                                 } else {
-                                    let default = default_string.replace("_utf8mb4", "").replace("\\\'", "");
-                                    DefaultValue::value(PrismaValue::Enum(Self::unescape_and_unquote_default_string(
-                                        default, flavour,
-                                    )))
+                                    DefaultValue::db_generated(default_string)
                                 }
                             }
                             ColumnTypeFamily::Udt(_) | ColumnTypeFamily::Unsupported(_) => match default_expression {
@@ -1028,18 +882,7 @@ impl<'a> SqlSchemaDescriber<'a> {
         // Kingbase exposes MySQL ENUM columns through user-defined
         // types. The information_schema COLUMNS view only contains the generated type name,
         // so fetch the labels from sys_enum separately.
-        let sql = "
-            SELECT
-                t.typname AS type_name,
-                e.enumlabel AS enum_label
-            FROM sys_catalog.sys_type AS t
-            INNER JOIN sys_catalog.sys_enum AS e
-                ON e.enumtypid = t.oid
-            INNER JOIN sys_catalog.sys_namespace AS n
-                ON n.oid = t.typnamespace
-            WHERE n.nspname = ?
-            ORDER BY t.oid, e.enumsortorder
-        ";
+        let sql = include_str!("kingbase_mysql/enums_query.sql");
 
         let rows = conn.query_raw(sql, &[schema_name.into()]).await?;
         let mut variants = HashMap::new();
@@ -1085,8 +928,7 @@ impl<'a> SqlSchemaDescriber<'a> {
 
     fn get_column_type(
         (table, column_name): (&str, &str),
-        data_type: &str,
-        full_data_type: &str,
+        (data_type, full_data_type): (&str, &str),
         precision: Precision,
         arity: ColumnArity,
         default: Option<&Value<'_>>,
@@ -1339,43 +1181,75 @@ impl<'a> SqlSchemaDescriber<'a> {
             .and_then(|cap| cap.get(1).map(|precision| precision.as_str().parse::<u32>().unwrap()))
     }
 
-    // See https://dev.mysql.com/doc/refman/8.0/en/string-literals.html
-    //
-    // In addition, MariaDB will return string literals with the quotes and extra backslashes around
-    // control characters like `\n`.
-    fn unescape_and_unquote_default_string(default: String, flavour: &Flavour) -> String {
-        static MYSQL_ESCAPING_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\\('|\\[^\\])|'(')").unwrap());
-        static MARIADB_NEWLINE_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\\n").unwrap());
-        static MARIADB_DEFAULT_QUOTE_UNESCAPE_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r#"'(.*)'"#).unwrap());
+    /// Only remove typmod-free character casts whose literal representation is
+    /// unchanged. Scan the quoted literal first: `::` inside its contents is data.
+    fn string_default_literal<'d>(default: &'d str, target_native: Option<&KingbaseMySqlType>) -> Option<&'d str> {
+        let (literal, suffix) = Self::quoted_default_parts(default)?;
+        if suffix.is_empty() {
+            return Some(literal);
+        }
+        let casts = suffix.strip_prefix("::")?;
+        casts
+            .split("::")
+            .all(|cast| {
+                // Converting bpchar to varchar/text strips trailing
+                // spaces; normalize it only for a CHAR target.
+                matches!(
+                    cast.trim().to_ascii_lowercase().as_str(),
+                    "text" | "varchar" | "character varying"
+                ) || (cast.trim().eq_ignore_ascii_case("bpchar")
+                    && matches!(target_native, Some(KingbaseMySqlType::Char(_))))
+            })
+            .then_some(literal)
+    }
 
-        let default = if default.starts_with('\'') {
-            default
-                .rfind('\'')
-                .filter(|quote| default.get(quote + 1..).is_some_and(|suffix| suffix.starts_with("::")))
-                .map(|quote| default[..=quote].to_owned())
-                .unwrap_or(default)
-        } else {
-            default
-        };
+    fn enum_default_literal<'d>(default: &'d str, namespace: &str, native_type: &str) -> Option<&'d str> {
+        let (literal, mut suffix) = Self::quoted_default_parts(default)?;
+        let quote = |name: &str| format!("\"{}\"", name.replace('"', "\"\""));
+        let mut casts = vec!["text".to_owned(), "varchar".to_owned(), "character varying".to_owned()];
+        for name in [native_type.to_owned(), quote(native_type)] {
+            casts.push(format!("{namespace}.{name}"));
+            casts.push(format!("{}.{name}", quote(namespace)));
+            casts.push(name);
+        }
+        // Match whole type spellings so quoted namespaces containing `::`
+        // are not split and length-qualified or unrelated casts stay SQL.
+        while !suffix.is_empty() {
+            let rest = suffix.strip_prefix("::")?.trim_start();
+            suffix = casts.iter().find_map(|cast| {
+                rest.strip_prefix(cast.as_str())
+                    .map(str::trim)
+                    .filter(|tail| tail.is_empty() || tail.starts_with("::"))
+            })?;
+        }
+        Some(literal)
+    }
 
-        let maybe_unquoted: Cow<'_, str> = if matches!(flavour, Flavour::MariaDb) {
-            let unquoted = MARIADB_DEFAULT_QUOTE_UNESCAPE_RE
-                .captures(&default)
-                .and_then(|cap| cap.get(1).map(|x| x.as_str()))
-                .unwrap_or(&default);
+    /// KES returns decompiled SQL, not MySQL's unquoted COLUMN_DEFAULT text.
+    /// Only a complete quoted literal can be interpreted as a scalar default.
+    fn quoted_default_parts(default: &str) -> Option<(&str, &str)> {
+        let default = default.trim();
+        if !default.starts_with('\'') {
+            return None;
+        }
+        let bytes = default.as_bytes();
+        let mut index = 1;
+        while index < bytes.len() {
+            if bytes[index] != b'\'' {
+                index += 1;
+            } else if bytes.get(index + 1) == Some(&b'\'') {
+                index += 2;
+            } else {
+                return Some((&default[..=index], default[index + 1..].trim()));
+            }
+        }
+        None
+    }
 
-            MARIADB_NEWLINE_RE.replace_all(unquoted, "\n")
-        } else {
-            default.into()
-        };
-
-        let unquoted = maybe_unquoted
-            .strip_prefix('\'')
-            .and_then(|value| value.strip_suffix('\''))
-            .map(|value| value.replace("''", "'"));
-        let maybe_unquoted = unquoted.as_deref().unwrap_or(&maybe_unquoted);
-
-        MYSQL_ESCAPING_RE.replace_all(maybe_unquoted, "$1$2").into()
+    /// Decode a verified ordinary SQL literal once. Backslashes in KES's
+    /// ordinary decompiled literals are data, not MySQL escape sequences.
+    fn unquote_default_literal(literal: &str) -> String {
+        literal[1..literal.len() - 1].replace("''", "'")
     }
 
     /// Tests whether an introspected default value should be categorized as current_timestamp.
@@ -1401,30 +1275,7 @@ async fn push_foreign_keys(
     // We alias all the columns because MySQL column names are case-insensitive in queries, but
     // the information schema column names became upper-case in MySQL 8, causing the code
     // fetching the result values by column name below to fail.
-    let sql = "
-            SELECT
-                kcu.constraint_name constraint_name,
-                kcu.column_name column_name,
-                kcu.referenced_table_name referenced_table_name,
-                kcu.referenced_column_name referenced_column_name,
-                kcu.ordinal_position ordinal_position,
-                kcu.table_name table_name,
-                rc.delete_rule::TEXT AS delete_rule,
-                rc.update_rule::TEXT AS update_rule
-            FROM information_schema.key_column_usage AS kcu
-            INNER JOIN information_schema.referential_constraints AS rc ON
-                BINARY kcu.constraint_name = BINARY rc.constraint_name
-            WHERE
-                BINARY kcu.table_schema = ?
-                AND BINARY rc.constraint_schema = ?
-                AND kcu.referenced_column_name IS NOT NULL
-
-            ORDER BY
-                BINARY kcu.table_schema,
-                BINARY kcu.table_name,
-                BINARY kcu.constraint_name,
-                kcu.ordinal_position
-        ";
+    let sql = include_str!("kingbase_mysql/foreign_keys_query.sql");
 
     fn get_ids(
         row: &ResultRow,
@@ -1506,7 +1357,117 @@ fn push_enum_variants(full_data_type: &str, enum_id: EnumId, sql_schema: &mut Sq
 
 #[cfg(test)]
 mod tests {
-    use super::fulltext_index_columns;
+    use super::{KingbaseMySqlType, SqlSchemaDescriber, fulltext_index_columns};
+
+    #[test]
+    fn string_defaults_only_drop_neutral_character_casts() {
+        for (input, literal) in [
+            ("'abc'::varchar", "'abc'"),
+            ("'abc'::text::character varying", "'abc'"),
+            ("'O''Reilly'::varchar", "'O''Reilly'"),
+            ("'ab::cd'::text", "'ab::cd'"),
+            ("''::text", "''"),
+            ("'字'::varchar", "'字'"),
+        ] {
+            assert_eq!(
+                SqlSchemaDescriber::string_default_literal(input, Some(&KingbaseMySqlType::VarChar(30))),
+                Some(literal),
+                "{input}"
+            );
+        }
+    }
+
+    #[test]
+    fn bpchar_defaults_only_normalize_for_character_targets() {
+        let expression = "'abc '::bpchar";
+        assert_eq!(
+            SqlSchemaDescriber::string_default_literal(expression, Some(&KingbaseMySqlType::Char(5))),
+            Some("'abc '")
+        );
+        for native in [KingbaseMySqlType::Text, KingbaseMySqlType::VarChar(30)] {
+            assert_eq!(
+                SqlSchemaDescriber::string_default_literal(expression, Some(&native)),
+                None
+            );
+        }
+    }
+
+    #[test]
+    fn string_defaults_preserve_semantic_and_unknown_casts() {
+        for expression in [
+            "'abcdef'::character(3)",
+            "'abcdef'::character(3 char)",
+            "'abcdef'::varchar(3)",
+            "'abcdef'::text::varchar(3)",
+            "'abcdef'::citext",
+            "'abc '::bpchar",
+            "'abcdef'::char",
+            "'a'::text || 'b'::text",
+            "'unfinished",
+            "pending",
+            "upper('abc'::text)",
+            "NULLIF('a'::text, 'a'::text)",
+            "E'line\\nnext'",
+        ] {
+            assert_eq!(
+                SqlSchemaDescriber::string_default_literal(expression, Some(&KingbaseMySqlType::VarChar(30))),
+                None,
+                "{expression}"
+            );
+        }
+    }
+
+    #[test]
+    fn ordinary_default_literals_are_decoded_only_once() {
+        for (literal, expected) in [
+            ("'a''''b'", "a''b"),
+            ("'a''''''b'", "a'''b"),
+            ("''''", "'"),
+            ("''", ""),
+            (r"'C:\\path'", r"C:\\path"),
+            (r"'C:\''path'", r"C:\'path"),
+            ("'_utf8mb4'", "_utf8mb4"),
+        ] {
+            assert_eq!(SqlSchemaDescriber::unquote_default_literal(literal), expected);
+        }
+    }
+
+    #[test]
+    fn enum_literal_defaults_accept_only_neutral_and_target_casts() {
+        for expression in [
+            "'A'",
+            "'A'::Enum_123",
+            "'A'::text::\"Enum_123\"",
+            "'A'::public.\"Enum_123\"",
+        ] {
+            assert_eq!(
+                SqlSchemaDescriber::enum_default_literal(expression, "public", "Enum_123"),
+                Some("'A'")
+            );
+        }
+        assert_eq!(
+            SqlSchemaDescriber::enum_default_literal("'A'::\"n\"\"s::x\".\"Enum_123\"", "n\"s::x", "Enum_123"),
+            Some("'A'")
+        );
+    }
+
+    #[test]
+    fn enum_default_expressions_and_semantic_casts_remain_sql() {
+        for expression in [
+            "'AB'::varchar(1)::Enum_123",
+            "'A'::OtherEnum",
+            "'A' || 'B'",
+            "lower('A')::Enum_123",
+            "E'A'::Enum_123",
+            "'unfinished",
+        ] {
+            assert_eq!(
+                SqlSchemaDescriber::enum_default_literal(expression, "public", "Enum_123"),
+                None,
+                "{expression}"
+            );
+        }
+    }
 
     #[test]
     fn recognizes_the_renderer_fulltext_expression() {

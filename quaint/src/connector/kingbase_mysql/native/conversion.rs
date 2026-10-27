@@ -19,14 +19,27 @@ use kingbase_postgres_types::kingbase::{MySqlBit, MySqlJsonPath};
 use kingbase_postgres_types::{FromSql, ToSql, WrongType};
 use kingbase_tokio_postgres::{
     Row as KingbaseRow, Statement as KingbaseStatement,
-    types::{self, IsNull, Kind, Type as KingbaseType},
+    types::{self, IsNull, Type as KingbaseType},
 };
 use std::{borrow::Cow, convert::TryFrom, error::Error as StdError};
 
 use uuid::Uuid;
 
-pub(crate) fn conv_params<'a>(params: &'a [Value<'a>]) -> Vec<&'a (dyn types::ToSql + Sync)> {
-    params.iter().map(|x| x as &(dyn ToSql + Sync)).collect::<Vec<_>>()
+fn unsupported_array() -> Error {
+    let message = "Arrays are not supported in Kingbase MySQL.";
+    let mut error = Error::builder(ErrorKind::conversion(message));
+    error.set_original_message(message);
+    error.build()
+}
+
+pub(crate) fn conv_params<'a>(params: &'a [Value<'a>]) -> crate::Result<Vec<&'a (dyn types::ToSql + Sync)>> {
+    params
+        .iter()
+        .map(|value| match &value.typed {
+            ValueType::Array(_) | ValueType::EnumArray(_, _) => Err(unsupported_array()),
+            _ => Ok(value as &(dyn ToSql + Sync)),
+        })
+        .collect()
 }
 
 /// Maps a list of query parameter values to a list of Postgres type.
@@ -51,7 +64,7 @@ pub(crate) fn params_to_types(params: &[Value<'_>]) -> Vec<KingbaseType> {
                 ValueType::Double(_) => KingbaseType::FLOAT8,
                 ValueType::Text(_) => KingbaseType::TEXT,
                 // Enums are user-defined types, we can't statically infer them, so we let PG infer it
-                ValueType::Enum(_, _) | ValueType::EnumArray(_, _) => KingbaseType::UNKNOWN,
+                ValueType::Enum(_, _) => KingbaseType::UNKNOWN,
                 ValueType::Bytes(_) => KingbaseType::MYSQL_LONGBLOB,
                 ValueType::Boolean(_) => KingbaseType::MYSQL_TINYINT,
                 ValueType::Char(_) => KingbaseType::CHAR,
@@ -63,47 +76,7 @@ pub(crate) fn params_to_types(params: &[Value<'_>]) -> Vec<KingbaseType> {
                 ValueType::Date(_) => KingbaseType::MYSQL_SYS_DATE,
                 ValueType::Time(_) => KingbaseType::MYSQL_SYS_TIME,
 
-                ValueType::Array(arr) => {
-                    let arr = arr.as_ref().unwrap();
-
-                    // If the array is empty, we can't infer the type so we let PG infer it
-                    if arr.is_empty() {
-                        return KingbaseType::UNKNOWN;
-                    }
-
-                    let first = arr.first().unwrap();
-
-                    // If the array does not contain the same types of values, we let PG infer the type
-                    if arr
-                        .iter()
-                        .any(|val| std::mem::discriminant(&first.typed) != std::mem::discriminant(&val.typed))
-                    {
-                        return KingbaseType::UNKNOWN;
-                    }
-
-                    match first.typed {
-                        ValueType::Int32(_) => KingbaseType::INT4_ARRAY,
-                        ValueType::Int64(_) => KingbaseType::INT8_ARRAY,
-                        ValueType::Float(_) => KingbaseType::FLOAT4_ARRAY,
-                        ValueType::Double(_) => KingbaseType::FLOAT8_ARRAY,
-                        ValueType::Text(_) => KingbaseType::TEXT_ARRAY,
-                        // Enums are special types, we can't statically infer them, so we let PG infer it
-                        ValueType::Enum(_, _) | ValueType::EnumArray(_, _) => KingbaseType::UNKNOWN,
-                        ValueType::Bytes(_) => KingbaseType::BYTEA_ARRAY,
-                        ValueType::Boolean(_) => KingbaseType::BOOL_ARRAY,
-                        ValueType::Char(_) => KingbaseType::CHAR_ARRAY,
-                        ValueType::Numeric(_) => KingbaseType::NUMERIC_ARRAY,
-                        ValueType::Json(_) => KingbaseType::JSONB_ARRAY,
-                        ValueType::Xml(_) => KingbaseType::XML_ARRAY,
-                        ValueType::Uuid(_) => KingbaseType::UUID_ARRAY,
-                        ValueType::DateTime(_) => KingbaseType::TIMESTAMPTZ_ARRAY,
-                        ValueType::Date(_) => KingbaseType::TIMESTAMP_ARRAY,
-                        ValueType::Time(_) => KingbaseType::TIME_ARRAY,
-                        // In the case of nested arrays, we let PG infer the type
-                        ValueType::Array(_) => KingbaseType::UNKNOWN,
-                        ValueType::Opaque(_) => KingbaseType::UNKNOWN,
-                    }
-                }
+                ValueType::Array(_) | ValueType::EnumArray(_, _) => KingbaseType::UNKNOWN,
 
                 ValueType::Opaque(opaque) => match opaque.typ() {
                     OpaqueType::Unknown => KingbaseType::UNKNOWN,
@@ -123,26 +96,7 @@ pub(crate) fn params_to_types(params: &[Value<'_>]) -> Vec<KingbaseType> {
                     OpaqueType::DateTime => KingbaseType::TIMESTAMPTZ,
                     OpaqueType::Date => KingbaseType::TIMESTAMP,
                     OpaqueType::Time => KingbaseType::TIME,
-                    OpaqueType::Array(inner) => match &**inner {
-                        OpaqueType::Unknown => KingbaseType::UNKNOWN,
-                        OpaqueType::Int32 => KingbaseType::INT4_ARRAY,
-                        OpaqueType::Int64 => KingbaseType::INT8_ARRAY,
-                        OpaqueType::Float => KingbaseType::FLOAT4_ARRAY,
-                        OpaqueType::Double => KingbaseType::FLOAT8_ARRAY,
-                        OpaqueType::Text => KingbaseType::TEXT_ARRAY,
-                        OpaqueType::Enum => KingbaseType::TEXT_ARRAY,
-                        OpaqueType::Bytes => KingbaseType::BYTEA_ARRAY,
-                        OpaqueType::Boolean => KingbaseType::BOOL_ARRAY,
-                        OpaqueType::Char => KingbaseType::CHAR_ARRAY,
-                        OpaqueType::Numeric => KingbaseType::NUMERIC_ARRAY,
-                        OpaqueType::Json | OpaqueType::Object => KingbaseType::JSONB_ARRAY,
-                        OpaqueType::Xml => KingbaseType::XML_ARRAY,
-                        OpaqueType::Uuid => KingbaseType::UUID_ARRAY,
-                        OpaqueType::DateTime => KingbaseType::TIMESTAMPTZ_ARRAY,
-                        OpaqueType::Date => KingbaseType::TIMESTAMP_ARRAY,
-                        OpaqueType::Time => KingbaseType::TIME_ARRAY,
-                        OpaqueType::Array(_) | OpaqueType::Tuple(_) => KingbaseType::UNKNOWN,
-                    },
+                    OpaqueType::Array(_) => KingbaseType::UNKNOWN,
                     OpaqueType::Tuple(_) => KingbaseType::UNKNOWN,
                 },
             }
@@ -263,6 +217,7 @@ impl GetRow for KingbaseRow {
         fn convert(row: &KingbaseRow, i: usize) -> crate::Result<Value<'static>> {
             let column = &row.columns()[i];
             let pg_ty = column.type_();
+            ensure_supported_type(pg_ty)?;
 
             if is_mysql_bit_one(column) {
                 let val: Option<MySqlBit> = row.try_get(i)?;
@@ -470,371 +425,6 @@ impl GetRow for KingbaseRow {
                 KingbaseColumnType::Uuid(ty, v) => match ty {
                     KingbaseColumnTypeUuid::UUID => ValueType::Uuid(v.read(row.try_get(i)?)),
                 },
-                KingbaseColumnType::Int32Array(ty, v) => match ty {
-                    KingbaseColumnTypeInt32Array::INT2_ARRAY => {
-                        let vals: Option<Vec<Option<i16>>> = row.try_get(i)?;
-
-                        match vals {
-                            Some(vals) => {
-                                let ints = vals.into_iter().map(|val| val.map(i32::from));
-
-                                ValueType::Array(Some(
-                                    v.read(ints).map(ValueType::Int32).map(ValueType::into_value).collect(),
-                                ))
-                            }
-                            None => ValueType::Array(None),
-                        }
-                    }
-                    KingbaseColumnTypeInt32Array::INT4_ARRAY => {
-                        let vals: Option<Vec<Option<i32>>> = row.try_get(i)?;
-
-                        match vals {
-                            Some(vals) => ValueType::Array(Some(
-                                v.read(vals.into_iter())
-                                    .map(ValueType::Int32)
-                                    .map(ValueType::into_value)
-                                    .collect(),
-                            )),
-                            None => ValueType::Array(None),
-                        }
-                    }
-                },
-                KingbaseColumnType::Int64Array(ty, v) => match ty {
-                    KingbaseColumnTypeInt64Array::INT8_ARRAY => {
-                        let vals: Option<Vec<Option<i64>>> = row.try_get(i)?;
-
-                        match vals {
-                            Some(vals) => ValueType::Array(Some(
-                                v.read(vals.into_iter())
-                                    .map(ValueType::Int64)
-                                    .map(ValueType::into_value)
-                                    .collect(),
-                            )),
-                            None => ValueType::Array(None),
-                        }
-                    }
-                    KingbaseColumnTypeInt64Array::OID_ARRAY => {
-                        let vals: Option<Vec<Option<u32>>> = row.try_get(i)?;
-
-                        match vals {
-                            Some(vals) => {
-                                let oids = vals.into_iter().map(|oid| oid.map(i64::from));
-
-                                ValueType::Array(Some(
-                                    v.read(oids).map(ValueType::Int64).map(ValueType::into_value).collect(),
-                                ))
-                            }
-                            None => ValueType::Array(None),
-                        }
-                    }
-                },
-                KingbaseColumnType::FloatArray(ty, v) => match ty {
-                    KingbaseColumnTypeFloatArray::FLOAT4_ARRAY => {
-                        let vals: Option<Vec<Option<f32>>> = row.try_get(i)?;
-
-                        match vals {
-                            Some(vals) => ValueType::Array(Some(
-                                v.read(vals.into_iter())
-                                    .map(ValueType::Float)
-                                    .map(ValueType::into_value)
-                                    .collect(),
-                            )),
-                            None => ValueType::Array(None),
-                        }
-                    }
-                },
-                KingbaseColumnType::DoubleArray(ty, v) => match ty {
-                    KingbaseColumnTypeDoubleArray::FLOAT8_ARRAY => {
-                        let vals: Option<Vec<Option<f64>>> = row.try_get(i)?;
-
-                        match vals {
-                            Some(vals) => ValueType::Array(Some(
-                                v.read(vals.into_iter())
-                                    .map(ValueType::Double)
-                                    .map(ValueType::into_value)
-                                    .collect(),
-                            )),
-                            None => ValueType::Array(None),
-                        }
-                    }
-                },
-                KingbaseColumnType::TextArray(ty, v) => match ty {
-                    KingbaseColumnTypeTextArray::TEXT_ARRAY
-                    | KingbaseColumnTypeTextArray::NAME_ARRAY
-                    | KingbaseColumnTypeTextArray::VARCHAR_ARRAY => {
-                        let vals: Option<Vec<Option<&str>>> = row.try_get(i)?;
-
-                        match vals {
-                            Some(vals) => {
-                                let strings = vals.into_iter().map(|s| s.map(ToOwned::to_owned).map(Cow::Owned));
-
-                                ValueType::Array(Some(
-                                    v.read(strings)
-                                        .map(ValueType::Text)
-                                        .map(ValueType::into_value)
-                                        .collect(),
-                                ))
-                            }
-                            None => ValueType::Array(None),
-                        }
-                    }
-                    KingbaseColumnTypeTextArray::INET_ARRAY | KingbaseColumnTypeTextArray::CIDR_ARRAY => {
-                        let vals: Option<Vec<Option<std::net::IpAddr>>> = row.try_get(i)?;
-
-                        match vals {
-                            Some(vals) => {
-                                let addrs = vals
-                                    .into_iter()
-                                    .map(|ip| ip.as_ref().map(ToString::to_string).map(Cow::Owned));
-
-                                ValueType::Array(Some(
-                                    v.read(addrs).map(ValueType::Text).map(ValueType::into_value).collect(),
-                                ))
-                            }
-                            None => ValueType::Array(None),
-                        }
-                    }
-                    KingbaseColumnTypeTextArray::BIT_ARRAY | KingbaseColumnTypeTextArray::VARBIT_ARRAY => {
-                        let vals: Option<Vec<Option<BitVec>>> = row.try_get(i)?;
-
-                        match vals {
-                            Some(vals) => {
-                                let vals = vals
-                                    .into_iter()
-                                    .map(|bits| bits.map(|bits| bits_to_string(&bits).map(Cow::Owned)).transpose())
-                                    .collect::<crate::Result<Vec<_>>>()?;
-
-                                ValueType::Array(Some(
-                                    v.read(vals.into_iter())
-                                        .map(ValueType::Text)
-                                        .map(ValueType::into_value)
-                                        .collect(),
-                                ))
-                            }
-                            None => ValueType::Array(None),
-                        }
-                    }
-                    KingbaseColumnTypeTextArray::XML_ARRAY => {
-                        let vals: Option<Vec<Option<XmlString>>> = row.try_get(i)?;
-
-                        match vals {
-                            Some(vals) => {
-                                let xmls = vals.into_iter().map(|xml| xml.map(|xml| xml.0).map(Cow::Owned));
-
-                                ValueType::Array(Some(
-                                    v.read(xmls).map(ValueType::Text).map(ValueType::into_value).collect(),
-                                ))
-                            }
-                            None => ValueType::Array(None),
-                        }
-                    }
-                },
-                KingbaseColumnType::BytesArray(ty, v) => match ty {
-                    KingbaseColumnTypeBytesArray::BYTEA_ARRAY => {
-                        let vals: Option<Vec<Option<Vec<u8>>>> = row.try_get(i)?;
-
-                        match vals {
-                            Some(vals) => ValueType::Array(Some(
-                                v.read(vals.into_iter())
-                                    .map(|b| b.map(Cow::Owned))
-                                    .map(ValueType::Bytes)
-                                    .map(ValueType::into_value)
-                                    .collect(),
-                            )),
-                            None => ValueType::Array(None),
-                        }
-                    }
-                },
-                KingbaseColumnType::BooleanArray(ty, v) => match ty {
-                    KingbaseColumnTypeBooleanArray::BOOL_ARRAY => {
-                        let vals: Option<Vec<Option<bool>>> = row.try_get(i)?;
-
-                        match vals {
-                            Some(vals) => ValueType::Array(Some(
-                                v.read(vals.into_iter())
-                                    .map(ValueType::Boolean)
-                                    .map(ValueType::into_value)
-                                    .collect(),
-                            )),
-                            None => ValueType::Array(None),
-                        }
-                    }
-                },
-                KingbaseColumnType::NumericArray(ty, v) => match ty {
-                    KingbaseColumnTypeNumericArray::NUMERIC_ARRAY => {
-                        let vals: Option<Vec<Option<DecimalWrapper>>> = row.try_get(i)?;
-
-                        match vals {
-                            Some(vals) => {
-                                let decimals = vals.into_iter().map(|dec| dec.map(|dec| dec.0));
-
-                                ValueType::Array(Some(
-                                    v.read(decimals.into_iter())
-                                        .map(ValueType::Numeric)
-                                        .map(ValueType::into_value)
-                                        .collect(),
-                                ))
-                            }
-                            None => ValueType::Array(None),
-                        }
-                    }
-                    KingbaseColumnTypeNumericArray::MONEY_ARRAY => {
-                        let vals: Option<Vec<Option<NaiveMoney>>> = row.try_get(i)?;
-
-                        match vals {
-                            Some(vals) => {
-                                let nums = vals.into_iter().map(|num| num.map(|num| num.0));
-
-                                ValueType::Array(Some(
-                                    v.read(nums.into_iter())
-                                        .map(ValueType::Numeric)
-                                        .map(ValueType::into_value)
-                                        .collect(),
-                                ))
-                            }
-                            None => ValueType::Array(None),
-                        }
-                    }
-                },
-                KingbaseColumnType::JsonArray(ty, v) => match ty {
-                    KingbaseColumnTypeJsonArray::JSON_ARRAY | KingbaseColumnTypeJsonArray::JSONB_ARRAY => {
-                        let vals: Option<Vec<Option<serde_json::Value>>> = row.try_get(i)?;
-
-                        match vals {
-                            Some(vals) => ValueType::Array(Some(
-                                v.read(vals.into_iter())
-                                    .map(ValueType::Json)
-                                    .map(ValueType::into_value)
-                                    .collect(),
-                            )),
-                            None => ValueType::Array(None),
-                        }
-                    }
-                },
-                KingbaseColumnType::UuidArray(ty, v) => match ty {
-                    KingbaseColumnTypeUuidArray::UUID_ARRAY => match row.try_get(i)? {
-                        Some(vals) => {
-                            let vals: Vec<Option<Uuid>> = vals;
-
-                            ValueType::Array(Some(
-                                v.read(vals.into_iter())
-                                    .map(ValueType::Uuid)
-                                    .map(ValueType::into_value)
-                                    .collect(),
-                            ))
-                        }
-                        None => ValueType::Array(None),
-                    },
-                },
-                KingbaseColumnType::DateTimeArray(ty, v) => match ty {
-                    KingbaseColumnTypeDateTimeArray::TIMESTAMP_ARRAY => match row.try_get(i)? {
-                        Some(vals) => {
-                            let vals: Vec<Option<NaiveDateTime>> = vals;
-                            let dates = vals
-                                .into_iter()
-                                .map(|dt| dt.map(|dt| DateTime::<Utc>::from_naive_utc_and_offset(dt, Utc)));
-
-                            ValueType::Array(Some(
-                                v.read(dates)
-                                    .map(ValueType::DateTime)
-                                    .map(ValueType::into_value)
-                                    .collect(),
-                            ))
-                        }
-                        None => ValueType::Array(None),
-                    },
-                    KingbaseColumnTypeDateTimeArray::TIMESTAMPTZ_ARRAY => match row.try_get(i)? {
-                        Some(vals) => {
-                            let vals: Vec<Option<DateTime<Utc>>> = vals;
-
-                            ValueType::Array(Some(
-                                v.read(vals.into_iter())
-                                    .map(ValueType::DateTime)
-                                    .map(ValueType::into_value)
-                                    .collect(),
-                            ))
-                        }
-                        None => ValueType::Array(None),
-                    },
-                },
-                KingbaseColumnType::DateArray(ty, v) => match ty {
-                    KingbaseColumnTypeDateArray::DATE_ARRAY => match row.try_get(i)? {
-                        Some(vals) => {
-                            let vals: Vec<Option<chrono::NaiveDate>> = vals;
-
-                            ValueType::Array(Some(
-                                v.read(vals.into_iter())
-                                    .map(ValueType::Date)
-                                    .map(ValueType::into_value)
-                                    .collect(),
-                            ))
-                        }
-                        None => ValueType::Array(None),
-                    },
-                },
-                KingbaseColumnType::TimeArray(ty, v) => match ty {
-                    KingbaseColumnTypeTimeArray::TIME_ARRAY => match row.try_get(i)? {
-                        Some(vals) => {
-                            let vals: Vec<Option<chrono::NaiveTime>> = vals;
-
-                            ValueType::Array(Some(
-                                v.read(vals.into_iter())
-                                    .map(ValueType::Time)
-                                    .map(ValueType::into_value)
-                                    .collect(),
-                            ))
-                        }
-                        None => ValueType::Array(None),
-                    },
-                    KingbaseColumnTypeTimeArray::TIMETZ_ARRAY => match row.try_get(i)? {
-                        Some(val) => {
-                            let val: Vec<Option<TimeTz>> = val;
-                            let timetzs = val.into_iter().map(|time| time.map(|time| time.0));
-
-                            ValueType::Array(Some(
-                                v.read(timetzs.into_iter())
-                                    .map(ValueType::Time)
-                                    .map(ValueType::into_value)
-                                    .collect(),
-                            ))
-                        }
-                        None => ValueType::Array(None),
-                    },
-                },
-                KingbaseColumnType::EnumArray(v) => {
-                    let vals: Option<Vec<Option<EnumString>>> = row.try_get(i)?;
-
-                    match vals {
-                        Some(vals) => {
-                            let enums = vals.into_iter().map(|val| val.map(|val| Cow::Owned(val.value)));
-
-                            ValueType::Array(Some(
-                                v.read(enums)
-                                    .map(|variant| ValueType::Enum(variant.map(EnumVariant::new), None))
-                                    .map(ValueType::into_value)
-                                    .collect(),
-                            ))
-                        }
-                        None => ValueType::Array(None),
-                    }
-                }
-                KingbaseColumnType::SetArray(v) => {
-                    let vals: Option<Vec<Option<String>>> = row.try_get(i)?;
-
-                    match vals {
-                        Some(vals) => {
-                            let strings = vals.into_iter().map(|val| val.map(Cow::Owned));
-
-                            ValueType::Array(Some(
-                                v.read(strings)
-                                    .map(ValueType::Text)
-                                    .map(ValueType::into_value)
-                                    .collect(),
-                            ))
-                        }
-                        None => ValueType::Array(None),
-                    }
-                }
                 KingbaseColumnType::Enum(v) => {
                     let val: Option<EnumString> = row.try_get(i)?;
                     let enum_variant = v.read(val.map(|x| Cow::Owned(x.value)));
@@ -846,31 +436,6 @@ impl GetRow for KingbaseRow {
 
                     ValueType::Text(v.read(val.map(Cow::Owned)))
                 }
-                KingbaseColumnType::UnknownArray(v) => match row.try_get(i) {
-                    Ok(Some(vals)) => {
-                        let vals: Vec<Option<String>> = vals;
-                        let strings = vals.into_iter().map(|str| str.map(Cow::Owned));
-
-                        Ok(ValueType::Array(Some(
-                            v.read(strings.into_iter())
-                                .map(ValueType::Text)
-                                .map(ValueType::into_value)
-                                .collect(),
-                        )))
-                    }
-                    Ok(None) => Ok(ValueType::Array(None)),
-                    Err(err) => {
-                        if err.source().map(|err| err.is::<WrongType>()).unwrap_or(false) {
-                            let kind = ErrorKind::UnsupportedColumnType {
-                                column_type: pg_ty.to_string(),
-                            };
-
-                            return Err(Error::builder(kind).build());
-                        } else {
-                            Err(err)
-                        }
-                    }
-                }?,
                 KingbaseColumnType::Unknown(v) => match row.try_get(i) {
                     Ok(Some(val)) => {
                         let val: String = val;
@@ -919,7 +484,14 @@ impl ToSql for Value<'_> {
         ty: &KingbaseType,
         out: &mut BytesMut,
     ) -> Result<IsNull, Box<dyn StdError + 'static + Send + Sync>> {
+        if matches!(&self.typed, ValueType::Array(_) | ValueType::EnumArray(_, _)) {
+            return Err(unsupported_array().into());
+        }
+
         let res = match (&self.typed, ty) {
+            (ValueType::Array(_) | ValueType::EnumArray(_, _), _) => {
+                unreachable!("array parameters are rejected above")
+            }
             (ValueType::Int32(integer), &KingbaseType::INT2) => match integer {
                 Some(i) => {
                     let integer = i16::try_from(*i).map_err(|_| {
@@ -1060,54 +632,6 @@ impl ToSql for Value<'_> {
                 let f = decimal.to_string().parse::<f64>().expect("decimal to f64 conversion");
                 f.to_sql(ty, out)
             }),
-            (ValueType::Array(values), &KingbaseType::FLOAT4_ARRAY) => values.as_ref().map(|values| {
-                let mut floats = Vec::with_capacity(values.len());
-
-                for value in values.iter() {
-                    let float = match &value.typed {
-                        ValueType::Numeric(n) => n.as_ref().and_then(|n| n.to_string().parse::<f32>().ok()),
-                        ValueType::Int64(n) => n.map(|n| n as f32),
-                        ValueType::Float(f) => *f,
-                        ValueType::Double(d) => d.map(|d| d as f32),
-                        _ if value.is_null() => None,
-                        v => {
-                            let kind = ErrorKind::conversion(format!(
-                                "Couldn't add value of type `{v:?}` into a float array."
-                            ));
-
-                            return Err(Error::builder(kind).build().into());
-                        }
-                    };
-
-                    floats.push(float);
-                }
-
-                floats.to_sql(ty, out)
-            }),
-            (ValueType::Array(values), &KingbaseType::FLOAT8_ARRAY) => values.as_ref().map(|values| {
-                let mut floats = Vec::with_capacity(values.len());
-
-                for value in values.iter() {
-                    let float = match &value.typed {
-                        ValueType::Numeric(n) => n.as_ref().and_then(|n| n.to_string().parse::<f64>().ok()),
-                        ValueType::Int64(n) => n.map(|n| n as f64),
-                        ValueType::Float(f) => f.map(|f| f as f64),
-                        ValueType::Double(d) => *d,
-                        v if v.is_null() => None,
-                        v => {
-                            let kind = ErrorKind::conversion(format!(
-                                "Couldn't add value of type `{v:?}` into a double array."
-                            ));
-
-                            return Err(Error::builder(kind).build().into());
-                        }
-                    };
-
-                    floats.push(float);
-                }
-
-                floats.to_sql(ty, out)
-            }),
             (ValueType::Numeric(decimal), &KingbaseType::MONEY) => decimal.as_ref().map(|decimal| {
                 let decimal = (decimal * BigInt::from_i32(100).unwrap()).round(0);
 
@@ -1128,29 +652,12 @@ impl ToSql for Value<'_> {
                 let parsed_uuid: Uuid = string.parse()?;
                 parsed_uuid.to_sql(ty, out)
             }),
-            (ValueType::Array(values), &KingbaseType::UUID_ARRAY) => values.as_ref().map(|values| {
-                let parsed_uuid: Vec<Option<Uuid>> = values
-                    .iter()
-                    .map(<Option<Uuid>>::try_from)
-                    .collect::<crate::Result<Vec<_>>>()?;
-
-                parsed_uuid.to_sql(ty, out)
-            }),
             (ValueType::Text(string), &KingbaseType::INET) | (ValueType::Text(string), &KingbaseType::CIDR) => {
                 string.as_ref().map(|string| {
                     let parsed_ip_addr: std::net::IpAddr = string.parse()?;
                     parsed_ip_addr.to_sql(ty, out)
                 })
             }
-            (ValueType::Array(values), &KingbaseType::INET_ARRAY)
-            | (ValueType::Array(values), &KingbaseType::CIDR_ARRAY) => values.as_ref().map(|values| {
-                let parsed_ip_addr: Vec<Option<std::net::IpAddr>> = values
-                    .iter()
-                    .map(<Option<std::net::IpAddr>>::try_from)
-                    .collect::<crate::Result<_>>()?;
-
-                parsed_ip_addr.to_sql(ty, out)
-            }),
             (ValueType::Text(string), &KingbaseType::JSON) | (ValueType::Text(string), &KingbaseType::JSONB) => string
                 .as_ref()
                 .map(|string| serde_json::from_str::<serde_json::Value>(string)?.to_sql(ty, out)),
@@ -1182,15 +689,6 @@ impl ToSql for Value<'_> {
                 })
             }
             (ValueType::Text(string), _) => string.as_ref().map(|ref string| string.to_sql(ty, out)),
-            (ValueType::Array(values), &KingbaseType::BIT_ARRAY)
-            | (ValueType::Array(values), &KingbaseType::VARBIT_ARRAY) => values.as_ref().map(|values| {
-                let bitvecs: Vec<Option<BitVec>> = values
-                    .iter()
-                    .map(|value| value.try_into())
-                    .collect::<crate::Result<Vec<_>>>()?;
-
-                bitvecs.to_sql(ty, out)
-            }),
             (ValueType::Bytes(bytes), &KingbaseType::MYSQL_BINARY)
             | (ValueType::Bytes(bytes), &KingbaseType::MYSQL_VARBINARY)
             | (ValueType::Bytes(bytes), &KingbaseType::MYSQL_BLOB)
@@ -1217,26 +715,6 @@ impl ToSql for Value<'_> {
             }
             (ValueType::Boolean(boo), _) => boo.map(|boo| boo.to_sql(ty, out)),
             (ValueType::Char(c), _) => c.map(|c| (c as i8).to_sql(ty, out)),
-            (ValueType::Array(vec), typ) if matches!(typ.kind(), Kind::Array(_)) => {
-                vec.as_ref().map(|vec| vec.to_sql(ty, out))
-            }
-            (ValueType::EnumArray(variants, _), typ) if matches!(typ.kind(), Kind::Array(_)) => variants
-                .as_ref()
-                .map(|vec| vec.iter().map(|val| val.as_ref()).collect::<Vec<_>>().to_sql(ty, out)),
-            (ValueType::EnumArray(variants, _), typ) => {
-                let kind = ErrorKind::conversion(format!(
-                    "Couldn't serialize value `{variants:?}` into a `{typ}`. Value is a list but `{typ}` is not."
-                ));
-
-                return Err(Error::builder(kind).build().into());
-            }
-            (ValueType::Array(vec), typ) => {
-                let kind = ErrorKind::conversion(format!(
-                    "Couldn't serialize value `{vec:?}` into a `{typ}`. Value is a list but `{typ}` is not."
-                ));
-
-                return Err(Error::builder(kind).build().into());
-            }
             (ValueType::Json(value), _) => value.as_ref().map(|value| value.to_sql(ty, out)),
             (ValueType::Xml(value), _) => value.as_ref().map(|value| value.to_sql(ty, out)),
             (ValueType::Uuid(value), _) => value.map(|value| value.to_sql(ty, out)),
@@ -1316,36 +794,35 @@ fn bits_to_string(bits: &BitVec) -> crate::Result<String> {
     Ok(s)
 }
 
-// The PostgreSQL connector provides the same shared conversion when the test
-// harness enables all native connectors together.
-#[cfg(not(feature = "postgresql-native"))]
-impl<'a> TryFrom<&Value<'a>> for Option<BitVec> {
-    type Error = Error;
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-    fn try_from(value: &Value<'a>) -> Result<Option<BitVec>, Self::Error> {
-        match value {
-            val @ Value {
-                typed: ValueType::Text(Some(_)),
-                ..
-            } => {
-                let text = val.as_str().unwrap();
-
-                string_to_bits(text).map(Option::Some)
-            }
-            val @ Value {
-                typed: ValueType::Bytes(Some(_)),
-                ..
-            } => {
-                let text = val.as_str().unwrap();
-
-                string_to_bits(text).map(Option::Some)
-            }
-            v if v.is_null() => Ok(None),
-            v => {
-                let kind = ErrorKind::conversion(format!("Couldn't convert value of type `{v:?}` to bit_vec::BitVec."));
-
-                Err(Error::builder(kind).build())
-            }
+    #[test]
+    fn sql_array_parameters_are_rejected_including_empty_null_and_enum_arrays() {
+        for value in [
+            Value::array([1, 2]),
+            Value::array(Vec::<i32>::new()),
+            Value::null_array(),
+            Value::enum_array([EnumVariant::new("A")]),
+            Value::null_enum_array(),
+        ] {
+            let params = [value];
+            assert!(
+                conv_params(&params)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("Arrays are not supported")
+            );
+            let mut buffer = BytesMut::new();
+            assert!(params[0].to_sql(&KingbaseType::INT4_ARRAY, &mut buffer).is_err());
+            assert!(buffer.is_empty());
         }
+        let params = [
+            Value::json(serde_json::json!([1, "123", null])),
+            Value::int32(1),
+            Value::int32(2),
+        ];
+        assert_eq!(conv_params(&params).unwrap().len(), 3);
     }
 }

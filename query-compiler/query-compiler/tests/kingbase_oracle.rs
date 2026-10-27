@@ -93,51 +93,66 @@ fn compiles_verified_oracle_filter_variants() {
         false,
     ));
 
-    let requests: &[(&str, &[&str])] = &[
+    let requests: &[(&str, &[&str], Option<&str>)] = &[
         (
             r#"{"modelName":"TestModel","action":"findMany","query":{"arguments":{"where":{"json":{"path":["profile","name"],"equals":"\\\"Ada\\\""}}},"selection":{"$scalars":true}}}"#,
-            &["JSON_QUERY"],
+            &["jsonb_extract_path(", "VARIADIC CAST("],
+            Some(r#"{"profile","name"}"#),
         ),
         (
             r#"{"modelName":"TestModel","action":"findMany","query":{"arguments":{"where":{"json":{"path":["score"],"gt":"5"}}},"selection":{"$scalars":true}}}"#,
-            &["JSON_QUERY"],
+            &["jsonb_extract_path(", "VARIADIC CAST("],
+            Some(r#"{"score"}"#),
         ),
         (
             r#"{"modelName":"TestModel","action":"findMany","query":{"arguments":{"where":{"json":{"path":["profile","name"],"string_contains":"d"}}},"selection":{"$scalars":true}}}"#,
-            &["JSON_QUERY"],
+            &["jsonb_extract_path_text(", "jsonb_extract_path("],
+            Some(r#"{"profile","name"}"#),
         ),
         (
             r#"{"modelName":"TestModel","action":"findMany","query":{"arguments":{"where":{"json":{"path":["tags"],"array_contains":"[\\\"prisma\\\"]"}}},"selection":{"$scalars":true}}}"#,
-            &["JSON_QUERY"],
+            &["jsonb_extract_path(", "VARIADIC CAST("],
+            Some(r#"{"tags"}"#),
         ),
         (
             r#"{"modelName":"TestModel","action":"findMany","query":{"arguments":{"where":{"json":{"path":["tags"],"array_starts_with":"\\\"prisma\\\"","array_ends_with":"\\\"orm\\\""}}},"selection":{"$scalars":true}}}"#,
-            &["JSON_QUERY"],
+            &["jsonb_extract_path(", "JSON_QUERY", "$[0]", "$[last]"],
+            Some(r#"{"tags"}"#),
         ),
         (
             r#"{"modelName":"TestModel","action":"findMany","query":{"arguments":{"where":{"json":{"path":["score"],"gt":{"$type":"FieldRef","value":{"_ref":"json2","_container":"TestModel"}}}}},"selection":{"$scalars":true}}}"#,
-            &["JSON_QUERY"],
+            &["jsonb_extract_path(", "VARIADIC CAST("],
+            Some(r#"{"score"}"#),
         ),
         (
             r#"{"modelName":"TestModel","action":"findMany","query":{"arguments":{"where":{"stringRef":{"contains":"lov","mode":"insensitive"}}},"selection":{"$scalars":true}}}"#,
             &["ILIKE"],
+            None,
         ),
         (
             r#"{"modelName":"TestModel","action":"findMany","query":{"arguments":{"where":{"json":{"path":["profile","name"],"string_contains":"lov","mode":"insensitive"}}},"selection":{"$scalars":true}}}"#,
-            &["LOWER(JSON_VALUE"],
+            &["LOWER(jsonb_extract_path_text(", "jsonb_extract_path("],
+            Some(r#"{"profile","name"}"#),
         ),
         (
             r#"{"modelName":"TestModel","action":"findMany","query":{"arguments":{"where":{"stringRef":{"search":"prisma & compiler"}}},"selection":{"$scalars":true}}}"#,
             &["to_tsvector"],
+            None,
         ),
         (
             r#"{"modelName":"TestModel","action":"findMany","query":{"arguments":{"orderBy":{"_relevance":{"fields":["stringRef"],"search":"prisma & compiler","sort":"desc"}}},"selection":{"$scalars":true}}}"#,
             &["ORDER BY ts_rank", " DESC"],
+            None,
+        ),
+        (
+            r#"{"modelName":"TestModel","action":"findMany","query":{"arguments":{"where":{"json":{"path":["map","0"],"equals":"\"zero\""}}},"selection":{"$scalars":true}}}"#,
+            &["jsonb_extract_path(", "VARIADIC CAST("],
+            Some(r#"{"map","0"}"#),
         ),
     ];
 
     query_core::with_sync_unevaluated_request_context(|| {
-        for &(request, expected_sql_fragments) in requests {
+        for &(request, expected_sql_fragments, expected_path) in requests {
             let request = RequestBody::try_from_str(request, EngineProtocol::Json).unwrap();
             let QueryDocument::Single(operation) = request.into_doc(&query_schema).unwrap() else {
                 panic!("expected a single query");
@@ -145,6 +160,23 @@ fn compiles_verified_oracle_filter_variants() {
 
             let plan = query_compiler::compile(&query_schema, operation, &connection_info).unwrap();
             let rendered = plan.pretty_print(false, 80).unwrap();
+
+            if let Some(expected_path) = expected_path {
+                fn contains_string(value: &serde_json::Value, expected: &str) -> bool {
+                    match value {
+                        serde_json::Value::String(value) => value == expected,
+                        serde_json::Value::Array(values) => values.iter().any(|value| contains_string(value, expected)),
+                        serde_json::Value::Object(values) => {
+                            values.values().any(|value| contains_string(value, expected))
+                        }
+                        _ => false,
+                    }
+                }
+                assert!(
+                    contains_string(&serde_json::to_value(&plan).unwrap(), expected_path),
+                    "missing bound JSON path {expected_path}:\n{rendered}"
+                );
+            }
 
             for expected_sql in expected_sql_fragments {
                 assert!(rendered.contains(expected_sql), "expected {expected_sql}:\n{rendered}");

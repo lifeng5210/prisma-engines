@@ -115,38 +115,6 @@ impl<'a> KingbaseOracle<'a> {
         self.write(" AS JSONB)")
     }
 
-    fn visit_json_path(&mut self, path: JsonPath<'a>) -> visitor::Result {
-        let path = match path {
-            JsonPath::String(path) => path.into_owned(),
-            JsonPath::Array(path) => {
-                let mut oracle_path = String::from("$");
-
-                for segment in path {
-                    if !segment.is_empty() && segment.bytes().all(|byte| byte.is_ascii_digit()) {
-                        oracle_path.push('[');
-                        oracle_path.push_str(&segment);
-                        oracle_path.push(']');
-                    } else {
-                        oracle_path.push_str(".\"");
-
-                        for character in segment.chars() {
-                            if matches!(character, '\\' | '\"') {
-                                oracle_path.push('\\');
-                            }
-                            oracle_path.push(character);
-                        }
-
-                        oracle_path.push('\"');
-                    }
-                }
-
-                oracle_path
-            }
-        };
-
-        self.visit_parameterized(Value::text(path))
-    }
-
     fn visit_json_type(&mut self, expression: Expression<'a>) -> visitor::Result {
         self.write("JSONB_TYPEOF(")?;
         self.visit_json_as_jsonb(expression)?;
@@ -323,6 +291,12 @@ impl<'a> Visitor<'a> for KingbaseOracle<'a> {
     fn write(&mut self, value: impl fmt::Display) -> visitor::Result {
         self.query_template.write_string_chunk(value.to_string());
         Ok(())
+    }
+
+    fn surround_with_backticks(&mut self, part: &str) -> visitor::Result {
+        self.write("\"")?;
+        self.write(part.replace('"', "\"\""))?;
+        self.write("\"")
     }
 
     fn add_parameter(&mut self, value: Value<'a>) {
@@ -570,7 +544,7 @@ impl<'a> Visitor<'a> for KingbaseOracle<'a> {
             ValueType::Char(value) => value.map(|value| self.write_quoted_string(&value.to_string())),
             ValueType::Bytes(value) => value
                 .as_deref()
-                .map(|value| self.write(format!("decode('{}', 'hex')", hex::encode(value)))),
+                .map(|value| self.write(format!("decoding('{}', 'hex')", hex::encode(value)))),
             ValueType::Json(value) => value.as_ref().map(|value| {
                 let json = serde_json::to_string(value)?;
                 self.write_quoted_string(&json)
@@ -595,18 +569,53 @@ impl<'a> Visitor<'a> for KingbaseOracle<'a> {
     }
 
     fn visit_json_extract(&mut self, json_extract: JsonExtract<'a>) -> visitor::Result {
-        if json_extract.extract_as_string {
-            self.write("JSON_VALUE(")?;
-            self.visit_json_as_jsonb(*json_extract.column)?;
-            self.write(", ")?;
-            self.visit_json_path(json_extract.path)?;
-            self.write(")")
-        } else {
-            self.write("CAST(JSON_QUERY(")?;
-            self.visit_json_as_jsonb(*json_extract.column)?;
-            self.write(", ")?;
-            self.visit_json_path(json_extract.path)?;
-            self.write(") AS JSONB)")
+        match json_extract.path {
+            JsonPath::Array(path) => {
+                // KES interprets each text segment against the actual JSON value:
+                // "0" selects an object key or an array index as appropriate.
+                self.write(if json_extract.extract_as_string {
+                    "jsonb_extract_path_text("
+                } else {
+                    "jsonb_extract_path("
+                })?;
+                self.visit_json_as_jsonb(*json_extract.column)?;
+                self.write(", VARIADIC CAST(")?;
+                // Bind the complete array input as text. Binding individual empty
+                // segments would turn them into NULL in Oracle mode. Quoting every
+                // element also preserves literal NULL, delimiters and backslashes.
+                let mut array_input = String::from("{");
+                for (index, segment) in path.into_iter().enumerate() {
+                    if index > 0 {
+                        array_input.push(',');
+                    }
+                    array_input.push('"');
+                    for character in segment.chars() {
+                        if matches!(character, '\\' | '"') {
+                            array_input.push('\\');
+                        }
+                        array_input.push(character);
+                    }
+                    array_input.push('"');
+                }
+                array_input.push('}');
+                self.visit_parameterized(Value::text(array_input))?;
+                self.write(" AS text[]))")
+            }
+            JsonPath::String(path) => {
+                self.write(if json_extract.extract_as_string {
+                    "JSON_VALUE("
+                } else {
+                    "CAST(JSON_QUERY("
+                })?;
+                self.visit_json_as_jsonb(*json_extract.column)?;
+                self.write(", ")?;
+                self.visit_parameterized(Value::text(path))?;
+                self.write(if json_extract.extract_as_string {
+                    ")"
+                } else {
+                    ") AS JSONB)"
+                })
+            }
         }
     }
 
@@ -676,7 +685,19 @@ impl<'a> Visitor<'a> for KingbaseOracle<'a> {
             for (index, (name, expression)) in build_obj.exprs.into_iter().enumerate() {
                 visitor.visit_raw_value(Value::text(name))?;
                 visitor.write(" VALUE ")?;
-                visitor.visit_expression(expression)?;
+                // Relation JSON is parsed as JavaScript numbers before the Client
+                // restores scalar types. Preserve exact integers and decimals as
+                // text through that intermediate representation (including NULL).
+                let exact_numeric = expression
+                    .as_column()
+                    .is_some_and(|column| matches!(column.type_family, Some(TypeFamily::Int | TypeFamily::Decimal(_))));
+                if exact_numeric {
+                    visitor.write("CAST(")?;
+                    visitor.visit_expression(expression)?;
+                    visitor.write(" AS TEXT)")?;
+                } else {
+                    visitor.visit_expression(expression)?;
+                }
 
                 if index < len - 1 {
                     visitor.write(", ")?;
@@ -690,7 +711,7 @@ impl<'a> Visitor<'a> for KingbaseOracle<'a> {
     fn visit_stringify(&mut self, stringify: Stringify<'a>) -> visitor::Result {
         self.write("CAST(")?;
         self.visit_expression(*stringify.expression)?;
-        self.write(" AS VARCHAR2(4000))")
+        self.write(" AS TEXT)")
     }
 
     fn visit_text_search(&mut self, text_search: TextSearch<'a>) -> visitor::Result {
@@ -925,7 +946,7 @@ mod tests {
         let (sql, params) =
             KingbaseOracle::build(Select::default().value(Value::bytes(vec![0xab, 0xcd]).raw())).unwrap();
 
-        assert_eq!("SELECT decode('abcd', 'hex')", sql);
+        assert_eq!("SELECT decoding('abcd', 'hex')", sql);
         assert!(params.is_empty());
     }
 
@@ -939,11 +960,11 @@ mod tests {
         let (sql, params) = KingbaseOracle::build(query).unwrap();
 
         assert_eq!(
-            "SELECT CAST(JSON_QUERY(CAST(\"payload\" AS JSONB), $1) AS JSONB) FROM \"documents\" WHERE CAST(\"payload\" AS JSONB) @> CAST($2 AS JSONB)",
+            "SELECT jsonb_extract_path(CAST(\"payload\" AS JSONB), VARIADIC CAST($1 AS text[])) FROM \"documents\" WHERE CAST(\"payload\" AS JSONB) @> CAST($2 AS JSONB)",
             sql
         );
         assert_eq!(
-            vec![Value::text("$.\"items\"[0]"), Value::json(serde_json::json!([1, 2]))],
+            vec![Value::text(r#"{"items","0"}"#), Value::json(serde_json::json!([1, 2]))],
             params
         );
 
@@ -994,6 +1015,64 @@ mod tests {
     }
 
     #[test]
+    fn preserves_exact_numeric_columns_in_relation_json() {
+        let query = Select::default().value(json_build_object(vec![
+            ("integer".into(), Column::from("id").type_family(TypeFamily::Int).into()),
+            (
+                "decimal".into(),
+                Column::from("amount").type_family(TypeFamily::Decimal(None)).into(),
+            ),
+            (
+                "float".into(),
+                Column::from("measure").type_family(TypeFamily::Double).into(),
+            ),
+            (
+                "text".into(),
+                Column::from("name").type_family(TypeFamily::Text(None)).into(),
+            ),
+        ]));
+        let (sql, params) = KingbaseOracle::build(query).unwrap();
+        assert_eq!(
+            "SELECT JSON_OBJECT('integer' VALUE CAST(\"id\" AS TEXT), 'decimal' VALUE CAST(\"amount\" AS TEXT), 'float' VALUE \"measure\", 'text' VALUE \"name\" RETURNING JSONB)",
+            sql
+        );
+        assert!(params.is_empty());
+    }
+
+    #[test]
+    fn binds_json_path_segments_without_guessing_object_or_array_structure() {
+        let query = Select::default()
+            .value(json_extract(
+                Column::from("payload"),
+                JsonPath::array(["map", "0", "q\"\\k", "", "NULL", "{a,b}"]),
+                true,
+            ))
+            .value(json_extract(
+                Column::from("payload"),
+                JsonPath::array(Vec::<String>::new()),
+                false,
+            ))
+            .value(json_extract(
+                Column::from("payload"),
+                JsonPath::string("$.items[0]"),
+                false,
+            ));
+        let (sql, params) = KingbaseOracle::build(query).unwrap();
+        assert_eq!(
+            "SELECT jsonb_extract_path_text(CAST(\"payload\" AS JSONB), VARIADIC CAST($1 AS text[])), jsonb_extract_path(CAST(\"payload\" AS JSONB), VARIADIC CAST($2 AS text[])), CAST(JSON_QUERY(CAST(\"payload\" AS JSONB), $3) AS JSONB)",
+            sql
+        );
+        assert_eq!(
+            vec![
+                Value::text(r#"{"map","0","q\"\\k","","NULL","{a,b}"}"#),
+                Value::text("{}"),
+                Value::text("$.items[0]")
+            ],
+            params
+        );
+    }
+
+    #[test]
     fn renders_oracle_full_text_search() {
         let search: Expression = text_search(&[Column::from("title"), Column::from("body")]).into();
         let query = Select::from_table("documents").so_that(search.matches("prisma & compiler"));
@@ -1013,5 +1092,21 @@ mod tests {
             sql
         );
         assert_eq!(vec![Value::text("prisma")], params);
+    }
+    #[test]
+    fn quotes_embedded_identifier_quotes_without_changing_column_identity() {
+        let query = Select::from_table("Odd\"Name").column("va\"l");
+        let (sql, _) = KingbaseOracle::build(query).unwrap();
+        assert_eq!(sql, "SELECT \"va\"\"l\" FROM \"Odd\"\"Name\"");
+    }
+
+    #[test]
+    fn json_stringification_does_not_impose_a_four_thousand_character_limit() {
+        let query = Select::default().value(stringify(Expression::from(Value::json(serde_json::json!(
+            "a".repeat(4100) + "TAIL"
+        )))));
+        let (sql, params) = KingbaseOracle::build(query).unwrap();
+        assert_eq!(sql, "SELECT CAST($1 AS TEXT)");
+        assert_eq!(params.len(), 1);
     }
 }

@@ -1,6 +1,31 @@
 use sql_introspection_tests::test_api::*;
 use test_macros::test_connector;
 
+#[test_connector(tags(KingbaseOracle), namespaces("APP", "App"))]
+async fn oracle_schema_case_introspection_returns_valid_configuration(api: &mut TestApi) -> TestResult {
+    api.raw_cmd(
+        r#"CREATE SCHEMA "APP";
+           CREATE SCHEMA "App";
+           CREATE TABLE "APP"."UpperItem" (id NUMBER(10,0) PRIMARY KEY);
+           CREATE TABLE "App"."MixedItem" (id NUMBER(10,0) PRIMARY KEY);"#,
+    )
+    .await;
+    let output = api.introspect().await?;
+    let schema = psl::parse_schema_without_extensions(&output).unwrap();
+    let mut namespaces = schema.configuration.datasources[0]
+        .namespaces
+        .iter()
+        .map(|(name, _)| name.as_str())
+        .collect::<Vec<_>>();
+    namespaces.sort();
+    assert_eq!(namespaces, ["APP", "App"]);
+    assert!(output.contains("@@schema(\"APP\")"), "{output}");
+    assert!(output.contains("@@schema(\"App\")"), "{output}");
+    let dml = api.introspect_dml().await?;
+    assert_eq!(api.re_introspect(&dml).await?, output);
+    Ok(())
+}
+
 #[test_connector(tags(KingbaseOracle))]
 async fn oracle_defaults_and_indexes_are_introspected(api: &mut TestApi) -> TestResult {
     api.raw_cmd(

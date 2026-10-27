@@ -11,6 +11,19 @@ use sql_schema_describer::walkers::{IndexWalker, TableColumnWalker};
 pub(crate) struct KingbaseOracleSchemaDifferFlavour;
 
 impl SqlSchemaDifferFlavour for KingbaseOracleSchemaDifferFlavour {
+    fn contains_table(&self, tables: &[String], namespace: Option<&str>, table_name: &str) -> bool {
+        let Some(namespace) = namespace else {
+            return tables.iter().any(|table| table == table_name);
+        };
+        let namespace = sql_schema_describer::kingbase_oracle::normalize_namespace(namespace);
+        let suffix = format!(".{table_name}");
+        tables.iter().any(|table| {
+            table
+                .strip_suffix(&suffix)
+                .is_some_and(|schema| sql_schema_describer::kingbase_oracle::normalize_namespace(schema) == namespace)
+        })
+    }
+
     fn can_rename_foreign_key(&self) -> bool {
         true
     }
@@ -93,30 +106,46 @@ impl SqlSchemaDifferFlavour for KingbaseOracleSchemaDifferFlavour {
 /// defaults before the enum change and restore the still-valid ones after it.
 fn push_alter_enum_previous_usages_as_default(db: &DifferDatabase<'_>, alter_enum: &mut AlterEnum) {
     let mut previous_usages_as_default: Vec<(_, Option<_>)> = Vec::new();
-    let enum_names = db.schemas.walk(alter_enum.id).map(|enm| enm.name());
+    let enum_names = db
+        .schemas
+        .walk(alter_enum.id)
+        .map(|enm| (enm.namespace().to_owned(), enm.name().to_owned()));
 
     for table in db.dropped_tables() {
-        for column in table
-            .columns()
-            .filter(|column| column.column_type_is_enum(enum_names.previous) && column.default().is_some())
-        {
+        for column in table.columns().filter(|column| {
+            column
+                .column_type_family_as_enum()
+                .is_some_and(|enm| enm.namespace() == enum_names.previous.0 && enm.name() == enum_names.previous.1)
+                && column.default().is_some()
+        }) {
             previous_usages_as_default.push((column.id, None));
         }
     }
 
     for tables in db.table_pairs() {
-        for column in tables
-            .dropped_columns()
-            .filter(|column| column.column_type_is_enum(enum_names.previous) && column.default().is_some())
-        {
+        for column in tables.dropped_columns().filter(|column| {
+            column
+                .column_type_family_as_enum()
+                .is_some_and(|enm| enm.namespace() == enum_names.previous.0 && enm.name() == enum_names.previous.1)
+                && column.default().is_some()
+        }) {
             previous_usages_as_default.push((column.id, None));
         }
 
         for columns in tables.column_pairs().filter(|columns| {
-            columns.previous.column_type_is_enum(enum_names.previous) && columns.previous.default().is_some()
+            columns
+                .previous
+                .column_type_family_as_enum()
+                .is_some_and(|enm| enm.namespace() == enum_names.previous.0 && enm.name() == enum_names.previous.1)
+                && columns.previous.default().is_some()
         }) {
             let next_usage_as_default = Some(&columns.next)
-                .filter(|column| column.column_type_is_enum(enum_names.next) && column.default().is_some())
+                .filter(|column| {
+                    column
+                        .column_type_family_as_enum()
+                        .is_some_and(|enm| enm.namespace() == enum_names.next.0 && enm.name() == enum_names.next.1)
+                        && column.default().is_some()
+                })
                 .map(|column| column.id);
 
             previous_usages_as_default.push((columns.previous.id, next_usage_as_default));
@@ -142,6 +171,21 @@ fn oracle_type_change(previous: KingbaseOracleType, next: KingbaseOracleType) ->
     }
 
     match (previous, next) {
+        (
+            KingbaseOracleType::Number(_),
+            KingbaseOracleType::Boolean
+            | KingbaseOracleType::Date
+            | KingbaseOracleType::Timestamp(_)
+            | KingbaseOracleType::TimestampTz(_)
+            | KingbaseOracleType::TimestampLocalTz(_),
+        )
+        | (
+            KingbaseOracleType::Date
+            | KingbaseOracleType::Timestamp(_)
+            | KingbaseOracleType::TimestampTz(_)
+            | KingbaseOracleType::TimestampLocalTz(_),
+            KingbaseOracleType::Number(_),
+        ) => Some(NotCastable),
         (
             KingbaseOracleType::Number(
                 KingbaseOracleNumberArguments::Precision(precision)
@@ -196,7 +240,8 @@ fn catalog_types_are_equivalent(previous: KingbaseOracleType, next: KingbaseOrac
     use KingbaseOracleType::*;
 
     match (previous, next) {
-        (Float(_), BinaryDouble) | (BinaryDouble, Float(_)) => true,
+        (Float(None | Some(25..=53)), BinaryDouble) | (BinaryDouble, Float(None | Some(25..=53))) => true,
+        (Float(Some(1..=24)), BinaryFloat) | (BinaryFloat, Float(Some(1..=24))) => true,
         (Char(previous), Char(next))
         | (Char(previous), NChar(next))
         | (NChar(previous), Char(next))
@@ -205,8 +250,6 @@ fn catalog_types_are_equivalent(previous: KingbaseOracleType, next: KingbaseOrac
         | (VarChar2(previous), NVarChar2(next))
         | (NVarChar2(previous), VarChar2(next))
         | (NVarChar2(previous), NVarChar2(next)) => previous == next,
-        (Clob, NClob) | (NClob, Clob) => true,
-        (Date, Timestamp(None) | Timestamp(Some(0))) | (Timestamp(None) | Timestamp(Some(0)), Date) => true,
         (TimestampLocalTz(previous), Timestamp(next)) | (Timestamp(next), TimestampLocalTz(previous)) => {
             previous == next
         }
@@ -286,8 +329,31 @@ fn is_character_or_lob(native_type: KingbaseOracleType) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn external_table_schema_aliases_preserve_mixed_case() {
+        use crate::sql_schema_differ::SqlSchemaDifferFlavour;
+        let flavour = super::KingbaseOracleSchemaDifferFlavour;
+        let tables = vec!["APP.Item".to_owned(), "Other.App.Item".to_owned()];
+        assert!(flavour.contains_table(&tables, Some("app"), "Item"));
+        assert!(flavour.contains_table(&tables, Some("APP"), "Item"));
+        assert!(!flavour.contains_table(&tables, Some("App"), "Item"));
+        assert!(flavour.contains_table(&tables, Some("Other.App"), "Item"));
+        assert!(!flavour.contains_table(&tables, Some("app"), "item"));
+    }
+
     use super::*;
 
+    #[test]
+    fn unsupported_implicit_conversions_require_column_recreation() {
+        let number = KingbaseOracleType::Number(KingbaseOracleNumberArguments::PrecisionAndScale(10, 0));
+        for (previous, next) in [
+            (number, KingbaseOracleType::Boolean),
+            (number, KingbaseOracleType::Timestamp(Some(3))),
+            (KingbaseOracleType::Timestamp(Some(3)), number),
+        ] {
+            assert_eq!(oracle_type_change(previous, next), Some(ColumnTypeChange::NotCastable));
+        }
+    }
     #[test]
     fn integer_to_string_requires_room_for_all_digits_and_sign() {
         let integer = KingbaseOracleType::Number(KingbaseOracleNumberArguments::PrecisionAndScale(10, 0));
@@ -386,11 +452,11 @@ mod tests {
         );
         assert_eq!(
             oracle_type_change(KingbaseOracleType::NClob, KingbaseOracleType::Clob),
-            None
+            Some(ColumnTypeChange::RiskyCast)
         );
         assert_eq!(
             oracle_type_change(KingbaseOracleType::Timestamp(Some(0)), KingbaseOracleType::Date),
-            None
+            Some(ColumnTypeChange::RiskyCast)
         );
         assert_eq!(
             oracle_type_change(
@@ -401,6 +467,25 @@ mod tests {
         );
         assert_eq!(
             oracle_type_change(KingbaseOracleType::BinaryDouble, KingbaseOracleType::Float(None)),
+            None
+        );
+    }
+    #[test]
+    fn distinct_physical_types_are_not_hidden_by_catalog_alias_rules() {
+        assert_eq!(
+            oracle_type_change(KingbaseOracleType::Date, KingbaseOracleType::Timestamp(None)),
+            Some(ColumnTypeChange::SafeCast)
+        );
+        assert_eq!(
+            oracle_type_change(KingbaseOracleType::Clob, KingbaseOracleType::NClob),
+            Some(ColumnTypeChange::RiskyCast)
+        );
+        assert_eq!(
+            oracle_type_change(KingbaseOracleType::BinaryDouble, KingbaseOracleType::Float(Some(1))),
+            Some(ColumnTypeChange::RiskyCast)
+        );
+        assert_eq!(
+            oracle_type_change(KingbaseOracleType::BinaryFloat, KingbaseOracleType::Float(Some(24))),
             None
         );
     }

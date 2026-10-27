@@ -6,6 +6,194 @@ use sql_schema_describer::ColumnTypeFamily;
 use sql_schema_describer::ForeignKeyAction;
 
 #[test_connector(tags(KingbaseMysql))]
+fn regression_non_literal_string_defaults_remain_expressions(api: TestApi) {
+    api.raw_cmd(
+        "CREATE TABLE expression_defaults(id INT PRIMARY KEY,
+        upper_value VARCHAR(50) NOT NULL DEFAULT upper('abc'),
+        lower_value VARCHAR(50) NOT NULL DEFAULT lower('ABC'),
+        missing_value VARCHAR(50) DEFAULT NULLIF('a','a'),
+        literal_value VARCHAR(50) NOT NULL DEFAULT 'upper(''abc'')')",
+    );
+    let schema = api.describe();
+    let table = schema.table_walker("expression_defaults").unwrap();
+    let expressions = api.block_on(api.database().query_raw(
+        "SELECT column_name,column_default FROM information_schema.columns WHERE table_schema=current_schema() AND table_name='expression_defaults'", &[])).unwrap();
+    for name in ["upper_value", "lower_value", "missing_value"] {
+        let expression = expressions
+            .iter()
+            .find(|row| row.get("column_name").unwrap().as_str() == Some(name))
+            .unwrap();
+        assert_eq!(
+            table.column(name).unwrap().default().unwrap().kind(),
+            &sql_schema_describer::DefaultKind::DbGenerated(Some(
+                expression.get("column_default").unwrap().as_str().unwrap().to_owned()
+            )),
+            "{name}"
+        );
+    }
+    assert_eq!(
+        table.column("literal_value").unwrap().default().unwrap().as_value(),
+        Some(&PrismaValue::String("upper('abc')".into()))
+    );
+    api.raw_cmd("INSERT INTO expression_defaults(id) VALUES(1)");
+    let rows = api
+        .block_on(api.database().query_raw(
+            "SELECT upper_value,lower_value,missing_value,literal_value FROM expression_defaults",
+            &[],
+        ))
+        .unwrap();
+    let row = rows.into_iter().next().unwrap();
+    assert_eq!(row.get("upper_value").unwrap().as_str(), Some("ABC"));
+    assert_eq!(row.get("lower_value").unwrap().as_str(), Some("abc"));
+    assert!(row.get("missing_value").unwrap().is_null());
+    assert_eq!(row.get("literal_value").unwrap().as_str(), Some("upper('abc')"));
+}
+
+#[test_connector(tags(KingbaseMysql))]
+fn regression_string_and_enum_default_literals_are_decoded_once(api: TestApi) {
+    let cases = [
+        ("single_quote", "O'Reilly"),
+        ("two_quotes", "a''b"),
+        ("three_quotes", "a'''b"),
+        ("quote_edges", "''"),
+        ("one_slash", r"C:\path"),
+        ("two_slashes", r"C:\\path"),
+        ("slash_quote", r"C:\'path"),
+        ("charset_text", "_utf8mb4"),
+        ("colons", "ab::cd"),
+        ("empty", ""),
+        ("linefeed", "line\nnext"),
+        ("unicode", "字"),
+        ("plain", "pending"),
+    ];
+    let mut ddl = "CREATE TABLE literal_defaults(id INT PRIMARY KEY".to_owned();
+    for (name, value) in cases {
+        let literal = format!("'{}'", value.replace('\'', "''"));
+        ddl.push_str(&format!(",s_{name} VARCHAR(100) NOT NULL DEFAULT {literal},e_{name} ENUM({literal},'other') NOT NULL DEFAULT {literal}"));
+    }
+    ddl.push(')');
+    api.raw_cmd(&ddl);
+    let schema = api.describe();
+    let table = schema.table_walker("literal_defaults").unwrap();
+    api.raw_cmd("INSERT INTO literal_defaults(id) VALUES(1)");
+    let selected_columns = cases
+        .iter()
+        .flat_map(|(name, _)| ["s", "e"].map(|prefix| format!("CAST({prefix}_{name} AS TEXT) AS {prefix}_{name}")))
+        .collect::<Vec<_>>()
+        .join(",");
+    let rows = api
+        .block_on(
+            api.database()
+                .query_raw(&format!("SELECT {selected_columns} FROM literal_defaults"), &[]),
+        )
+        .unwrap();
+    let row = rows.into_iter().next().unwrap();
+    for (name, value) in cases {
+        for (prefix, expected) in [
+            ("s", PrismaValue::String(value.into())),
+            ("e", PrismaValue::Enum(value.into())),
+        ] {
+            let name = format!("{prefix}_{name}");
+            assert_eq!(row.get(&name).unwrap().as_str(), Some(value), "actual server {name}");
+            assert_eq!(
+                table.column(&name).unwrap().default().unwrap().as_value(),
+                Some(&expected),
+                "introspected {name}"
+            );
+        }
+    }
+}
+
+#[test_connector(tags(KingbaseMysql))]
+fn regression_include_columns_are_not_index_keys(api: TestApi) {
+    use sql_schema_describer::SQLSortOrder::{Asc, Desc};
+    api.raw_cmd(
+        "CREATE TABLE included(id INT PRIMARY KEY,a INT NOT NULL,b INT NOT NULL,payload VARCHAR(32));
+        CREATE UNIQUE INDEX included_unique ON included(a) INCLUDE(b,payload);
+        CREATE INDEX included_regular ON included(b DESC,a ASC) INCLUDE(payload)",
+    );
+    let schema = api.describe();
+    let table = schema.table_walker("included").unwrap();
+    assert_eq!(
+        table.columns().map(|column| column.name()).collect::<Vec<_>>(),
+        vec!["id", "a", "b", "payload"]
+    );
+    let unique = table.indexes().find(|index| index.name() == "included_unique").unwrap();
+    assert!(unique.is_unique());
+    assert_eq!(
+        unique
+            .columns()
+            .map(|column| column.as_column().name())
+            .collect::<Vec<_>>(),
+        vec!["a"]
+    );
+    let regular = table
+        .indexes()
+        .find(|index| index.name() == "included_regular")
+        .unwrap();
+    assert!(!regular.is_unique());
+    assert_eq!(
+        regular
+            .columns()
+            .map(|column| (column.as_column().name(), column.sort_order()))
+            .collect::<Vec<_>>(),
+        vec![("b", Some(Desc)), ("a", Some(Asc))]
+    );
+    assert_eq!(
+        table
+            .primary_key_columns()
+            .unwrap()
+            .map(|column| column.as_column().name())
+            .collect::<Vec<_>>(),
+        vec!["id"]
+    );
+}
+
+#[test_connector(tags(KingbaseMysql))]
+fn regression_string_cast_defaults_remain_expressions(api: TestApi) {
+    api.raw_cmd(
+        "CREATE TABLE cast_defaults(id INT PRIMARY KEY,
+        truncated VARCHAR(30) NOT NULL DEFAULT CAST('abcdef' AS CHAR(3)),
+        quoted VARCHAR(30) NOT NULL DEFAULT CAST('O''Reilly' AS CHAR(4)),
+        plain VARCHAR(30) NOT NULL DEFAULT 'abcdef',
+        colons VARCHAR(30) NOT NULL DEFAULT 'ab::cd',
+        trimmed VARCHAR(30) NOT NULL DEFAULT CAST('abc ' AS bpchar),
+        fixed CHAR(5) NOT NULL DEFAULT 'abc')",
+    );
+    let schema = api.describe();
+    let table = schema.table_walker("cast_defaults").unwrap();
+    for name in ["truncated", "quoted", "trimmed"] {
+        assert!(
+            table.column(name).unwrap().default().unwrap().is_db_generated(),
+            "{name}"
+        );
+    }
+    for (name, value) in [("plain", "abcdef"), ("colons", "ab::cd"), ("fixed", "abc")] {
+        assert_eq!(
+            table.column(name).unwrap().default().unwrap().as_value(),
+            Some(&PrismaValue::String(value.into()))
+        );
+    }
+    api.raw_cmd("INSERT INTO cast_defaults(id) VALUES(1)");
+    let rows = api
+        .block_on(
+            api.database()
+                .query_raw("SELECT truncated,quoted,plain,colons,trimmed FROM cast_defaults", &[]),
+        )
+        .unwrap();
+    let row = rows.into_iter().next().unwrap();
+    for (name, value) in [
+        ("truncated", "abc"),
+        ("trimmed", "abc"),
+        ("quoted", "O'Re"),
+        ("plain", "abcdef"),
+        ("colons", "ab::cd"),
+    ] {
+        assert_eq!(row.get(name).unwrap().as_str(), Some(value));
+    }
+}
+
+#[test_connector(tags(KingbaseMysql))]
 fn index_column_sort_orders_are_described(api: TestApi) {
     use sql_schema_describer::SQLSortOrder::{Asc, Desc};
 
@@ -269,15 +457,26 @@ fn escaped_string_defaults_are_described(api: TestApi) {
 
     let schema = api.describe();
     let table = schema.table_walker("escaped_defaults").unwrap();
+    let expected_quote = "\"That's a lot of fish!\"\\n - Godzilla, 1998";
+    let expected_backslashes = r"xyz\\Datasource\\Model";
+
+    api.raw_cmd("INSERT INTO escaped_defaults DEFAULT VALUES");
+    let rows = api
+        .block_on(
+            api.database()
+                .query_raw("SELECT quote_value,backslash_value FROM escaped_defaults", &[]),
+        )
+        .unwrap();
+    let row = rows.into_iter().next().unwrap();
+    assert_eq!(row.get("quote_value").unwrap().as_str(), Some(expected_quote));
+    assert_eq!(row.get("backslash_value").unwrap().as_str(), Some(expected_backslashes));
 
     assert_eq!(
-        Some(&PrismaValue::String(
-            "\"That's a lot of fish!\"\\n - Godzilla, 1998".to_owned()
-        )),
+        Some(&PrismaValue::String(expected_quote.to_owned())),
         table.column("quote_value").unwrap().default().unwrap().as_value()
     );
     assert_eq!(
-        Some(&PrismaValue::String("xyz\\Datasource\\Model".to_owned())),
+        Some(&PrismaValue::String(expected_backslashes.to_owned())),
         table.column("backslash_value").unwrap().default().unwrap().as_value()
     );
 }
@@ -300,8 +499,7 @@ fn function_expression_defaults_are_described_as_dbgenerated(api: TestApi) {
 
 #[test_connector(tags(KingbaseMysql))]
 fn constraints_from_other_schemas_are_not_described(api: TestApi) {
-    let sql = format!(
-        r#"
+    let sql = r#"
         DROP SCHEMA IF EXISTS other_schema CASCADE;
         CREATE SCHEMA other_schema;
 
@@ -320,10 +518,9 @@ fn constraints_from_other_schemas_are_not_described(api: TestApi) {
             CONSTRAINT shared_parent_fk FOREIGN KEY (parent_id)
                 REFERENCES constraint_parent (id)
         );
-        "#,
-    );
+        "#;
 
-    api.raw_cmd(&sql);
+    api.raw_cmd(sql);
 
     let schema = api.describe();
     assert_eq!(1, schema.walk_foreign_keys().count());

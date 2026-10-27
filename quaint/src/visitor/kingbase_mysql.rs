@@ -671,21 +671,21 @@ fn json_numeric_comparison_parameter_indexes(sql: &str) -> Vec<usize> {
     let mut indexes = Vec::new();
     let mut search_start = 0;
 
-    while let Some((function_start, open_paren)) = find_function(&sql, search_start, "JSON_EXTRACT") {
+    while let Some((function_start, open_paren)) = find_function(sql, search_start, "JSON_EXTRACT") {
         let Some(function_end) = matching_parenthesis(sql, open_paren) else {
             break;
         };
 
-        if let Some(parameter_position) = numeric_comparison_parameter_after(sql, function_end + 1) {
-            if let Ok(index) = parameter_positions.binary_search(&parameter_position) {
-                indexes.push(index);
-            }
+        if let Some(parameter_position) = numeric_comparison_parameter_after(sql, function_end + 1)
+            && let Ok(index) = parameter_positions.binary_search(&parameter_position)
+        {
+            indexes.push(index);
         }
 
-        if let Some(parameter_position) = numeric_comparison_parameter_before(sql, function_start) {
-            if let Ok(index) = parameter_positions.binary_search(&parameter_position) {
-                indexes.push(index);
-            }
+        if let Some(parameter_position) = numeric_comparison_parameter_before(sql, function_start)
+            && let Ok(index) = parameter_positions.binary_search(&parameter_position)
+        {
+            indexes.push(index);
         }
 
         search_start = function_end + 1;
@@ -709,9 +709,8 @@ fn parameter_positions(sql: &str) -> Vec<usize> {
             continue;
         }
 
-        match byte {
-            b'?' => positions.push(index),
-            _ => {}
+        if byte == b'?' {
+            positions.push(index);
         }
 
         index += 1;
@@ -1043,6 +1042,101 @@ fn non_code_end(sql: &str, start: usize) -> Option<usize> {
     None
 }
 
+fn skip_whitespace(sql: &str, mut index: usize) -> usize {
+    while sql.as_bytes().get(index).is_some_and(u8::is_ascii_whitespace) {
+        index += 1;
+    }
+
+    index
+}
+
+fn first_function_argument_comma(sql: &str, open_paren: usize, function_end: usize) -> Option<usize> {
+    let bytes = sql.as_bytes();
+    let mut depth = 1;
+    let mut index = open_paren + 1;
+
+    while index < function_end {
+        let byte = bytes[index];
+
+        if let Some(end) = non_code_end(sql, index) {
+            index = end;
+            continue;
+        }
+
+        match byte {
+            b'(' => depth += 1,
+            b')' => depth -= 1,
+            b',' if depth == 1 => return Some(index),
+            _ => {}
+        }
+
+        index += 1;
+    }
+
+    None
+}
+
+fn function_argument_count(sql: &str, open_paren: usize, function_end: usize) -> usize {
+    let bytes = sql.as_bytes();
+    let mut count = 1;
+    let mut depth = 1;
+    let mut index = open_paren + 1;
+
+    if sql[index..function_end].trim().is_empty() {
+        return 0;
+    }
+
+    while index < function_end {
+        let byte = bytes[index];
+
+        if let Some(end) = non_code_end(sql, index) {
+            index = end;
+            continue;
+        }
+
+        match byte {
+            b'(' => depth += 1,
+            b')' => depth -= 1,
+            b',' if depth == 1 => count += 1,
+            _ => {}
+        }
+
+        index += 1;
+    }
+
+    count
+}
+
+fn matching_parenthesis(sql: &str, open_paren: usize) -> Option<usize> {
+    let bytes = sql.as_bytes();
+    let mut depth = 0;
+    let mut index = open_paren;
+
+    while index < bytes.len() {
+        let byte = bytes[index];
+
+        if let Some(end) = non_code_end(sql, index) {
+            index = end;
+            continue;
+        }
+
+        match byte {
+            b'(' => depth += 1,
+            b')' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(index);
+                }
+            }
+            _ => {}
+        }
+
+        index += 1;
+    }
+
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::KingbaseMysql;
@@ -1211,99 +1305,4 @@ mod tests {
         );
         assert_eq!(params, vec![Value::text("('John') | ('Smith')")]);
     }
-}
-
-fn skip_whitespace(sql: &str, mut index: usize) -> usize {
-    while sql.as_bytes().get(index).is_some_and(u8::is_ascii_whitespace) {
-        index += 1;
-    }
-
-    index
-}
-
-fn first_function_argument_comma(sql: &str, open_paren: usize, function_end: usize) -> Option<usize> {
-    let bytes = sql.as_bytes();
-    let mut depth = 1;
-    let mut index = open_paren + 1;
-
-    while index < function_end {
-        let byte = bytes[index];
-
-        if let Some(end) = non_code_end(sql, index) {
-            index = end;
-            continue;
-        }
-
-        match byte {
-            b'(' => depth += 1,
-            b')' => depth -= 1,
-            b',' if depth == 1 => return Some(index),
-            _ => {}
-        }
-
-        index += 1;
-    }
-
-    None
-}
-
-fn function_argument_count(sql: &str, open_paren: usize, function_end: usize) -> usize {
-    let bytes = sql.as_bytes();
-    let mut count = 1;
-    let mut depth = 1;
-    let mut index = open_paren + 1;
-
-    if sql[index..function_end].trim().is_empty() {
-        return 0;
-    }
-
-    while index < function_end {
-        let byte = bytes[index];
-
-        if let Some(end) = non_code_end(sql, index) {
-            index = end;
-            continue;
-        }
-
-        match byte {
-            b'(' => depth += 1,
-            b')' => depth -= 1,
-            b',' if depth == 1 => count += 1,
-            _ => {}
-        }
-
-        index += 1;
-    }
-
-    count
-}
-
-fn matching_parenthesis(sql: &str, open_paren: usize) -> Option<usize> {
-    let bytes = sql.as_bytes();
-    let mut depth = 0;
-    let mut index = open_paren;
-
-    while index < bytes.len() {
-        let byte = bytes[index];
-
-        if let Some(end) = non_code_end(sql, index) {
-            index = end;
-            continue;
-        }
-
-        match byte {
-            b'(' => depth += 1,
-            b')' => {
-                depth -= 1;
-                if depth == 0 {
-                    return Some(index);
-                }
-            }
-            _ => {}
-        }
-
-        index += 1;
-    }
-
-    None
 }

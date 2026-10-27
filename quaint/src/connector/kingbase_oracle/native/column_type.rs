@@ -7,7 +7,7 @@ pub(crate) fn column_type_from_type(typ: &Type) -> ColumnType {
         ColumnType::Enum
     } else if typ == &Type::BOOL {
         ColumnType::Boolean
-    } else if matches!(typ, &Type::INT2 | &Type::INT4) {
+    } else if matches!(typ, &Type::INT2 | &Type::INT4 | &Type::ORACLE_TINYINT) {
         ColumnType::Int32
     } else if matches!(typ, &Type::INT8 | &Type::OID) {
         ColumnType::Int64
@@ -17,7 +17,9 @@ pub(crate) fn column_type_from_type(typ: &Type) -> ColumnType {
         ColumnType::Double
     } else if typ == &Type::NUMERIC {
         ColumnType::Numeric
-    } else if is_oracle_text_type(typ) {
+    } else if is_oracle_text_type(typ) || typ == &Type::ORACLE_ROWID {
+        // ROWID is exposed as text by the SQL text protocol (JS TypedSQL).
+        // Its native binary payload is opaque, unlike UROWID/String.
         ColumnType::Text
     } else if matches!(typ, &Type::BYTEA | &Type::ORACLE_BLOB) {
         ColumnType::Bytes
@@ -75,13 +77,29 @@ mod tests {
     use crate::connector::ColumnType;
     use kingbase_tokio_postgres::types::Type;
 
+    #[tokio::test]
+    async fn describe_rowid_reports_text_for_typed_sql() {
+        use crate::{prelude::Queryable, single::Quaint, tests::test_api::kingbase_oracle::CONN_STR};
+        let connection = Quaint::new(CONN_STR.as_str()).await.unwrap();
+        let described = connection
+            .describe_query("SELECT nextrowid() AS \"rowId\", CAST(-128 AS TINYINT) AS \"tiny\"")
+            .await
+            .unwrap();
+        assert_eq!(described.columns.len(), 2);
+        assert_eq!(described.columns[0].typ, ColumnType::Text);
+        assert_eq!(described.columns[0].name, "rowId");
+        assert_eq!(described.columns[1].typ, ColumnType::Int32);
+    }
+
     #[test]
     fn maps_oracle_mode_scalar_oids() {
         assert_eq!(column_type_from_type(&Type::NUMERIC), ColumnType::Numeric);
+        assert_eq!(column_type_from_type(&Type::ORACLE_TINYINT), ColumnType::Int32);
         assert_eq!(column_type_from_type(&Type::ORACLE_BLOB), ColumnType::Bytes);
         assert_eq!(column_type_from_type(&Type::ORACLE_CLOB), ColumnType::Text);
         assert_eq!(column_type_from_type(&Type::ORACLE_NCLOB), ColumnType::Text);
         assert_eq!(column_type_from_type(&Type::ORACLE_SYS_DATE), ColumnType::DateTime);
+        assert_eq!(column_type_from_type(&Type::ORACLE_ROWID), ColumnType::Text);
         assert_eq!(column_type_from_type(&Type::TEXT_ARRAY), ColumnType::TextArray);
     }
 

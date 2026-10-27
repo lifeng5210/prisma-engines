@@ -43,9 +43,9 @@ async fn oracle_native_type_columns_are_introspected(api: &mut TestApi) -> TestR
           char_value          String   @db.Char(10)
           varchar_value       String   @db.VarChar2(32)
           clob_value          String   @db.Clob
-          nclob_value         String   @db.Clob
+          nclob_value         String   @db.NClob
           blob_value          Bytes
-          date_value          DateTime @db.Timestamp(0)
+          date_value          DateTime @db.Date
           timestamp_value     DateTime
           timestamp_tz_value  DateTime @db.TimestampTz(3)
           bool_value          Boolean
@@ -76,9 +76,15 @@ async fn oracle_national_and_local_timezone_types_follow_catalog_canonicalizatio
 
     let result = api.introspect_dml().await?;
 
-    for expected in ["nchar_value", "nvarchar_value", "local_tz_value", "@db.Timestamp(6)"] {
-        assert!(result.contains(expected), "missing `{expected}` in:\n{result}");
-    }
+    expect![[r#"
+        model oracle_type_variants {
+          id             Int      @id
+          nchar_value    String   @db.Char(4)
+          nvarchar_value String   @db.VarChar2(32)
+          local_tz_value DateTime @db.Timestamp(6)
+        }
+    "#]]
+    .assert_eq(&result);
 
     Ok(())
 }
@@ -101,18 +107,36 @@ async fn oracle_number_precision_boundaries_are_introspected(api: &mut TestApi) 
 
     let result = api.introspect_dml().await?;
 
-    for (field, scalar) in [
-        ("single_digit_value", "Int"),
-        ("boolean_value", "Boolean"),
-        ("int_value", "Int"),
-        ("bigint_value", "BigInt"),
-        ("decimal_value", "Decimal"),
-    ] {
-        assert!(
-            result.lines().any(|line| line.contains(field) && line.contains(scalar)),
-            "missing `{field} {scalar}` in:\n{result}"
-        );
-    }
+    expect![[r#"
+        model number_boundaries {
+          id                 Int     @id
+          single_digit_value Int     @db.Number(1, 0)
+          boolean_value      Boolean
+          int_value          Int
+          bigint_value       BigInt
+          decimal_value      Decimal @db.Number(20, 0)
+        }
+    "#]]
+    .assert_eq(&result);
 
+    Ok(())
+}
+
+#[test_connector(tags(KingbaseOracle))]
+async fn oracle_wide_varchar_introspection_remains_valid(api: &mut TestApi) -> TestResult {
+    api.raw_cmd("CREATE TABLE wide (id INTEGER PRIMARY KEY, v VARCHAR2(4001) NOT NULL); INSERT INTO wide VALUES(1,repeat('x',4001))").await;
+    let result = api.introspect_dml().await?;
+    expect![[r#"
+        model wide {
+          id Int    @id
+          v  String @db.VarChar2(4001)
+        }
+    "#]]
+    .assert_eq(&result);
+    psl::parse_schema_multi_without_extensions(&[(
+        "schema.prisma".into(),
+        format!("datasource db {{\n provider = \"kingbase-oracle\"\n}}\n{result}").into(),
+    )])
+    .unwrap();
     Ok(())
 }

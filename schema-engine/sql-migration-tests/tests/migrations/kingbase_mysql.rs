@@ -2,6 +2,177 @@ use sql_migration_tests::test_api::*;
 use sql_schema_describer::{ColumnTypeFamily, ForeignKeyAction};
 
 #[test_connector(tags(KingbaseMysql))]
+fn unique_error_reports_logical_names_for_existing_and_failing_new_indexes(mut api: TestApi) {
+    let source = r#"
+        model LogicalError {
+            id Int @id
+            value Int
+        }
+    "#;
+    api.schema_push_w_datasource(source).send().assert_green();
+    api.raw_cmd("INSERT INTO LogicalError VALUES(1,1),(2,1)");
+    let target = source.replace("value Int", "value Int @unique(map: \"custom'unique\")");
+    let error = api
+        .schema_push_w_datasource(&target)
+        .force(true)
+        .send_unwrap_err()
+        .to_user_facing();
+    let error = serde_json::to_value(error).unwrap();
+    assert_eq!(error["error_code"], "P2002");
+    assert_eq!(error["meta"]["target"], "custom'unique");
+    api.raw_cmd("DELETE FROM LogicalError WHERE id=2");
+    api.schema_push_w_datasource(&target)
+        .force(true)
+        .send()
+        .assert_executable()
+        .assert_has_executed_steps()
+        .assert_warnings(&["A unique constraint covering the columns `[value]` on the table `LogicalError` will be added. If there are existing duplicate values, this will fail.".into()]);
+    let error = tok(api.connector.raw_cmd("INSERT INTO LogicalError VALUES(2,1)"))
+        .unwrap_err()
+        .to_user_facing();
+    let error = serde_json::to_value(error).unwrap();
+    assert_eq!(error["error_code"], "P2002");
+    assert_eq!(error["meta"]["target"], "custom'unique");
+}
+
+#[test_connector(tags(KingbaseMysql))]
+fn regression_expression_and_escaped_defaults_survive_roundtrip_and_replay(mut api: TestApi) {
+    use schema_core::schema_connector::DiffTarget;
+    api.raw_cmd(
+        r"CREATE TABLE repaired_defaults(id INT PRIMARY KEY,
+        upper_value VARCHAR(50) NOT NULL DEFAULT upper('abc'),
+        lower_value VARCHAR(50) NOT NULL DEFAULT lower('ABC'),
+        missing_value VARCHAR(50) DEFAULT NULLIF('a','a'),
+        quotes VARCHAR(50) NOT NULL DEFAULT 'a''''b',
+        slashes VARCHAR(50) NOT NULL DEFAULT 'C:\\path')",
+    );
+    let expressions: std::collections::HashMap<String, String> = api.query_raw(
+        "SELECT column_name,column_default FROM information_schema.columns WHERE table_schema=current_schema() AND table_name='repaired_defaults' AND column_name IN ('upper_value','lower_value','missing_value')", &[])
+        .into_iter().map(|row| (row.get("column_name").unwrap().as_str().unwrap().to_owned(),row.get("column_default").unwrap().as_str().unwrap().to_owned())).collect();
+    let schema = format!(
+        "model repaired_defaults {{\n id Int @id\n upper_value String @db.VarChar(50) @default(dbgenerated({}))\n lower_value String @db.VarChar(50) @default(dbgenerated({}))\n missing_value String? @db.VarChar(50) @default(dbgenerated({}))\n quotes String @db.VarChar(50) @default({})\n slashes String @db.VarChar(50) @default({})\n}}",
+        serde_json::to_string(&expressions["upper_value"]).unwrap(),
+        serde_json::to_string(&expressions["lower_value"]).unwrap(),
+        serde_json::to_string(&expressions["missing_value"]).unwrap(),
+        serde_json::to_string("a''b").unwrap(),
+        serde_json::to_string(r"C:\\path").unwrap()
+    );
+    api.raw_cmd("INSERT INTO repaired_defaults(id) VALUES(1)");
+    for id in [1, 2] {
+        if id == 2 {
+            let script = api.connector_diff(DiffTarget::Empty, DiffTarget::Database, None);
+            api.raw_cmd("DROP TABLE repaired_defaults");
+            api.raw_cmd(&script);
+            api.raw_cmd("INSERT INTO repaired_defaults(id) VALUES(2)");
+        }
+        api.query_raw("SELECT * FROM repaired_defaults", &[])
+            .assert_single_row(|row| {
+                row.assert_int_value("id", id)
+                    .assert_text_value("upper_value", "ABC")
+                    .assert_text_value("lower_value", "abc")
+                    .assert_null_value("missing_value")
+                    .assert_text_value("quotes", "a''b")
+                    .assert_text_value("slashes", r"C:\\path")
+            });
+        api.schema_push_w_datasource(&schema)
+            .send()
+            .assert_green()
+            .assert_no_steps();
+    }
+}
+
+#[test_connector(tags(KingbaseMysql))]
+fn regression_enum_default_literals_do_not_repeat_alterations(mut api: TestApi) {
+    api.raw_cmd(
+        r"CREATE TABLE enum_defaults(id INT PRIMARY KEY,
+        quoted ENUM('a''''b','other') NOT NULL DEFAULT 'a''''b',
+        slashed ENUM('C:\\path','other') NOT NULL DEFAULT 'C:\\path')",
+    );
+    let schema = r#"
+        enum Quoted {
+            A @map("a''b")
+            other
+        }
+        enum Slashed {
+            A @map("C:\\\\path")
+            other
+        }
+        model enum_defaults {
+            id Int @id
+            quoted Quoted @default(A)
+            slashed Slashed @default(A)
+        }
+    "#;
+    api.raw_cmd("INSERT INTO enum_defaults(id) VALUES(1)");
+    // This checks default introspection and no-op planning; quoted enum DDL
+    // generation is a separately deferred upstream-compatible limitation.
+    for _ in 0..2 {
+        api.schema_push_w_datasource(schema)
+            .send()
+            .assert_green()
+            .assert_no_steps();
+    }
+    api.query_raw(
+        "SELECT CAST(quoted AS TEXT) AS quoted,CAST(slashed AS TEXT) AS slashed FROM enum_defaults",
+        &[],
+    )
+    .assert_single_row(|row| {
+        row.assert_text_value("quoted", "a''b")
+            .assert_text_value("slashed", r"C:\\path")
+    });
+}
+
+#[test_connector(tags(KingbaseMysql))]
+fn regression_truncating_string_default_survives_roundtrip_and_replay(mut api: TestApi) {
+    use schema_core::schema_connector::DiffTarget;
+    api.raw_cmd(
+        "CREATE TABLE cast_roundtrip(id INT PRIMARY KEY,
+        label VARCHAR(30) NOT NULL DEFAULT CAST('abcdef' AS CHAR(3)),
+        trimmed VARCHAR(30) NOT NULL DEFAULT CAST('abc ' AS bpchar),
+        fixed CHAR(5) NOT NULL DEFAULT 'abc')",
+    );
+    api.raw_cmd("INSERT INTO cast_roundtrip(id) VALUES(1)");
+    api.query_raw("SELECT label,trimmed FROM cast_roundtrip WHERE id=1", &[])
+        .assert_single_row(|row| {
+            row.assert_text_value("label", "abc")
+                .assert_text_value("trimmed", "abc")
+        });
+    let rows = api.query_raw("SELECT column_name,column_default FROM information_schema.columns WHERE table_schema=current_schema() AND table_name='cast_roundtrip' AND column_name IN ('label','trimmed')", &[]);
+    let expressions: std::collections::HashMap<String, String> = rows
+        .into_iter()
+        .map(|row| {
+            (
+                row.get("column_name").unwrap().as_str().unwrap().to_owned(),
+                row.get("column_default").unwrap().as_str().unwrap().to_owned(),
+            )
+        })
+        .collect();
+    let schema = format!(
+        "model cast_roundtrip {{\n id Int @id\n label String @db.VarChar(30) @default(dbgenerated({}))\n trimmed String @db.VarChar(30) @default(dbgenerated({}))\n fixed String @db.Char(5) @default(\"abc\")\n }}",
+        serde_json::to_string(&expressions["label"]).unwrap(),
+        serde_json::to_string(&expressions["trimmed"]).unwrap()
+    );
+    api.schema_push_w_datasource(&schema)
+        .send()
+        .assert_green()
+        .assert_no_steps();
+    let script = api.connector_diff(DiffTarget::Empty, DiffTarget::Database, None);
+    assert!(!script.contains("`id` ASC"), "{script}");
+    api.raw_cmd("DROP TABLE cast_roundtrip");
+    api.raw_cmd(&script);
+    api.raw_cmd("INSERT INTO cast_roundtrip(id) VALUES(2)");
+    api.query_raw("SELECT label,trimmed FROM cast_roundtrip WHERE id=2", &[])
+        .assert_single_row(|row| {
+            row.assert_text_value("label", "abc")
+                .assert_text_value("trimmed", "abc")
+        });
+    api.schema_push_w_datasource(&schema)
+        .send()
+        .assert_green()
+        .assert_no_steps();
+}
+
+#[test_connector(tags(KingbaseMysql))]
 fn kb_remaining_quoted_identifier_lifecycle(mut api: TestApi) {
     let source = r#"
         model Parent {
@@ -441,7 +612,7 @@ fn full_column_text_and_blob_keys_are_enforced_and_idempotent(mut api: TestApi) 
         .send()
         .assert_green()
         .assert_no_steps();
-    api.schema_push_w_datasource(&schema.replace("Bytes @db.LongBlob", "Bytes"))
+    api.schema_push_w_datasource(schema.replace("Bytes @db.LongBlob", "Bytes"))
         .send()
         .assert_green()
         .assert_no_steps();
@@ -477,7 +648,7 @@ fn extended_native_parameters_preserve_values_and_are_idempotent(mut api: TestAp
         .send()
         .assert_green()
         .assert_no_steps();
-    api.schema_push_w_datasource(&schema.replace("Decimal(2,4)", "Decimal(4,4)"))
+    api.schema_push_w_datasource(schema.replace("Decimal(2,4)", "Decimal(4,4)"))
         .send()
         .assert_green()
         .assert_no_steps();

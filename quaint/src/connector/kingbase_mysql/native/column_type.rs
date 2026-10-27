@@ -1,10 +1,26 @@
-use crate::connector::ColumnType;
+use crate::{
+    connector::ColumnType,
+    error::{Error, ErrorKind},
+};
 
 use kingbase_tokio_postgres::{
     Column as KingbaseColumn,
     types::{Kind as KingbaseKind, Type as KingbaseType},
 };
 use std::borrow::Cow;
+
+/// SQL arrays are not part of the MySQL connector's supported value types.
+/// Check metadata as well as values so NULL arrays and empty result sets fail.
+pub(crate) fn ensure_supported_type(typ: &KingbaseType) -> crate::Result<()> {
+    match typ.kind() {
+        KingbaseKind::Array(_) => Err(Error::builder(ErrorKind::UnsupportedColumnType {
+            column_type: typ.to_string(),
+        })
+        .build()),
+        KingbaseKind::Domain(inner) => ensure_supported_type(inner),
+        _ => Ok(()),
+    }
+}
 
 /// Kingbase's MySQL-compatible BIT type stores the declared bit width directly
 /// in typmod. A negative typmod means that no fixed length was declared.
@@ -87,15 +103,6 @@ macro_rules! create_pg_mapping {
                           KingbaseColumnType::Enum(KingbaseColumnValidatorText)
                       }
                       KingbaseKind::MySqlSet => KingbaseColumnType::Set(KingbaseColumnValidatorText),
-                      KingbaseKind::Array(inner) => match inner.kind() {
-                          KingbaseKind::Enum(_) | KingbaseKind::MySqlEnum(_) => {
-                              KingbaseColumnType::EnumArray(KingbaseColumnValidatorTextArray)
-                          }
-                          KingbaseKind::MySqlSet => {
-                              KingbaseColumnType::SetArray(KingbaseColumnValidatorTextArray)
-                          }
-                          _ => KingbaseColumnType::UnknownArray(KingbaseColumnValidatorTextArray),
-                      },
                       _ => KingbaseColumnType::Unknown(KingbaseColumnValidatorText),
                   },
               }
@@ -148,34 +155,47 @@ create_pg_mapping! {
   Xml(Option<Cow<'a, str>>) => [XML],
   Char(Option<char>) => [CHAR],
 
-  BooleanArray(impl Iterator<Item = Option<bool>>) => [BOOL_ARRAY],
-  Int32Array(impl Iterator<Item = Option<i32>>) => [INT2_ARRAY, INT4_ARRAY],
-  Int64Array(impl Iterator<Item =Option<i64>>) => [INT8_ARRAY, OID_ARRAY],
-  FloatArray(impl Iterator<Item = Option<f32>>) => [FLOAT4_ARRAY],
-  DoubleArray(impl Iterator<Item = Option<f64>>) => [FLOAT8_ARRAY],
-  BytesArray(impl Iterator<Item = Option<Vec<u8>>>) => [BYTEA_ARRAY],
-  NumericArray(impl Iterator<Item = Option<bigdecimal::BigDecimal>>) => [NUMERIC_ARRAY, MONEY_ARRAY],
-  DateTimeArray(impl Iterator<Item = Option<chrono::DateTime<chrono::Utc>>>) => [TIMESTAMP_ARRAY, TIMESTAMPTZ_ARRAY],
-  DateArray(impl Iterator<Item = Option<chrono::NaiveDate>>) => [DATE_ARRAY],
-  TimeArray(impl Iterator<Item = Option<chrono::NaiveTime>>) => [TIME_ARRAY, TIMETZ_ARRAY],
-  TextArray(impl Iterator<Item = Option<Cow<'a, str>>>) => [TEXT_ARRAY, NAME_ARRAY, VARCHAR_ARRAY, INET_ARRAY, CIDR_ARRAY, BIT_ARRAY, VARBIT_ARRAY, XML_ARRAY],
-  UuidArray(impl Iterator<Item = Option<uuid::Uuid>>) => [UUID_ARRAY],
-  JsonArray(impl Iterator<Item = Option<serde_json::Value>>) => [JSON_ARRAY, JSONB_ARRAY],
-
   // For the cases where the Postgres type is not directly mappable to ColumnType, use the following:
   // [KingbaseColumnType => ColumnType]
   [Enum => Text],
-  [EnumArray => TextArray],
   [Set => Text],
-  [SetArray => TextArray],
-  [UnknownArray => TextArray],
   [Unknown => Text]
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{ColumnType, KingbaseColumnType, mysql_bit_length_from_type_modifier};
+    use super::{ColumnType, KingbaseColumnType, ensure_supported_type, mysql_bit_length_from_type_modifier};
     use kingbase_tokio_postgres::types::{Kind, Type};
+
+    #[test]
+    fn sql_arrays_and_domains_over_arrays_are_unsupported() {
+        let enum_type = Type::new("example".into(), 100_001, Kind::Enum(vec!["A".into()]), "public".into());
+        let custom_array = Type::new("_example".into(), 100_002, Kind::Array(enum_type), "public".into());
+        let domain_array = Type::new(
+            "array_domain".into(),
+            100_003,
+            Kind::Domain(Type::INT4_ARRAY),
+            "public".into(),
+        );
+        for typ in [
+            Type::INT4_ARRAY,
+            Type::TEXT_ARRAY,
+            Type::JSONB_ARRAY,
+            custom_array,
+            domain_array,
+        ] {
+            assert!(ensure_supported_type(&typ).is_err(), "{typ}");
+        }
+        for typ in [
+            Type::INT4,
+            Type::TEXT,
+            Type::JSONB,
+            Type::MYSQL_SYS_JSON,
+            Type::MYSQL_LONGBLOB,
+        ] {
+            assert!(ensure_supported_type(&typ).is_ok(), "{typ}");
+        }
+    }
 
     #[test]
     fn mysql_bit_typmod_is_the_declared_bit_width() {

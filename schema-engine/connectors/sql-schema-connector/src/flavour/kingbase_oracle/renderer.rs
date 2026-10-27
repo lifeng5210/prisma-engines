@@ -1,5 +1,4 @@
 use crate::{
-    flavour::PostgresRenderer,
     migration_pair::MigrationPair,
     sql_migration::{AlterColumn, AlterEnum, AlterTable, RedefineTable, TableChange},
     sql_renderer::{Quoted, QuotedWithPrefix, SqlRenderer},
@@ -17,14 +16,13 @@ use std::{borrow::Cow, fmt::Write as _};
 /// DDL renderer for KingbaseES in Oracle compatibility mode.
 ///
 /// Oracle-mode public types and `ALTER TABLE ... MODIFY` are emitted here.
-/// PostgreSQL catalog-compatible syntax is reused only for enum evolution,
-/// which Kingbase Oracle mode implements unchanged.
+/// KES enum evolution is implemented locally, independently of PG version rules.
 #[derive(Debug, Default)]
 pub(crate) struct KingbaseOracleRenderer;
 
 impl SqlRenderer for KingbaseOracleRenderer {
     fn quote<'a>(&self, name: &'a str) -> Quoted<&'a str> {
-        Quoted::postgres_ident(name)
+        Quoted::OracleIdentifier(name)
     }
 
     fn render_add_foreign_key(&self, foreign_key: ForeignKeyWalker<'_>) -> String {
@@ -51,10 +49,7 @@ impl SqlRenderer for KingbaseOracleRenderer {
     }
 
     fn render_alter_enum(&self, alter_enum: &AlterEnum, schemas: MigrationPair<&SqlSchema>) -> Vec<String> {
-        // Enum storage and ALTER TYPE semantics are PostgreSQL-compatible in
-        // Kingbase Oracle mode. Reusing this narrow implementation keeps the
-        // data-preserving drop/recreate path for removed enum values.
-        PostgresRenderer::new(false).render_alter_enum(alter_enum, schemas)
+        render_oracle_alter_enum(alter_enum, schemas)
     }
 
     fn render_rename_index(&self, indexes: MigrationPair<IndexWalker<'_>>) -> Vec<String> {
@@ -79,7 +74,7 @@ impl SqlRenderer for KingbaseOracleRenderer {
                         .expect("drop primary key without a primary key");
                     statements.push(format!(
                         "ALTER TABLE {table} DROP CONSTRAINT {}",
-                        self.quote(primary_key.name())
+                        self.quote(owning_constraint_name(primary_key))
                     ));
                 }
                 TableChange::RenamePrimaryKey => {
@@ -93,7 +88,7 @@ impl SqlRenderer for KingbaseOracleRenderer {
                         .expect("rename primary key without a primary key");
                     statements.push(format!(
                         "ALTER TABLE {table} RENAME CONSTRAINT {} TO {}",
-                        self.quote(previous.name()),
+                        self.quote(owning_constraint_name(previous)),
                         self.quote(next.name())
                     ));
                 }
@@ -135,7 +130,10 @@ impl SqlRenderer for KingbaseOracleRenderer {
     }
 
     fn render_create_enum(&self, create_enum: EnumWalker<'_>) -> Vec<String> {
-        PostgresRenderer::new(false).render_create_enum(create_enum)
+        vec![create_enum_statement(
+            &quoted_name(create_enum.explicit_namespace(), create_enum.name()).to_string(),
+            create_enum.values(),
+        )]
     }
 
     fn render_create_index(&self, index: IndexWalker<'_>) -> String {
@@ -187,6 +185,15 @@ impl SqlRenderer for KingbaseOracleRenderer {
     }
 
     fn render_create_table_as(&self, table: TableWalker<'_>, table_name: QuotedWithPrefix<&str>) -> String {
+        let escape = |quoted| match quoted {
+            Quoted::Double(name)
+            | Quoted::Single(name)
+            | Quoted::Backticks(name)
+            | Quoted::SquareBrackets(name)
+            | Quoted::OracleIdentifier(name)
+            | Quoted::OracleString(name) => Quoted::OracleIdentifier(name),
+        };
+        let table_name = QuotedWithPrefix(table_name.0.map(escape), escape(table_name.1));
         render_create_table_with_sequences(table, table_name, table.name())
     }
 
@@ -198,33 +205,29 @@ impl SqlRenderer for KingbaseOracleRenderer {
     }
 
     fn render_drop_enum(&self, namespace: Option<&str>, dropped_enum: EnumWalker<'_>) -> Vec<String> {
-        let enum_name = QuotedWithPrefix::pg_new(namespace, dropped_enum.name());
+        let enum_name = quoted_name(namespace, dropped_enum.name());
         vec![format!("DROP TYPE {enum_name}")]
     }
 
     fn render_drop_foreign_key(&self, _namespace: Option<&str>, foreign_key: ForeignKeyWalker<'_>) -> String {
         format!(
-            "ALTER TABLE {} DROP CONSTRAINT {}",
+            "ALTER TABLE {} DROP CONSTRAINT IF EXISTS {}",
             quoted_table(foreign_key.table()),
             self.quote(foreign_key.constraint_name().expect("foreign key name is required"))
         )
     }
 
     fn render_drop_index(&self, namespace: Option<&str>, index: IndexWalker<'_>) -> String {
-        use sql::postgres::{Constraint, ConstraintOption, PostgresSchemaExt};
-        let ext: &PostgresSchemaExt = index.schema.downcast_connector_data();
-        if ext
-            .constraint_options
-            .get(&Constraint::Index(index.id))
-            .is_some_and(|options| options.contains(ConstraintOption::IsConstraint))
-        {
+        use sql::kingbase_oracle::KingbaseOracleSchemaExt;
+        let ext: &KingbaseOracleSchemaExt = index.schema.downcast_connector_data();
+        if ext.owning_constraint_names.contains_key(&index.id) {
             return format!(
                 "ALTER TABLE {} DROP CONSTRAINT {}",
                 quoted_table(index.table()),
-                self.quote(index.name())
+                self.quote(owning_constraint_name(index))
             );
         }
-        let index_name = QuotedWithPrefix::pg_new(namespace, index.name());
+        let index_name = quoted_name(namespace.or_else(|| index.table().explicit_namespace()), index.name());
         format!("DROP INDEX {index_name}")
     }
 
@@ -234,7 +237,7 @@ impl SqlRenderer for KingbaseOracleRenderer {
         for redefine_table in tables {
             let tables = schemas.walk(redefine_table.table_ids);
             let temporary_name = format!("_prisma_new_{}", tables.next.name());
-            let temporary_table = QuotedWithPrefix::pg_new(tables.next.explicit_namespace(), temporary_name.as_str());
+            let temporary_table = quoted_name(tables.next.explicit_namespace(), temporary_name.as_str());
             statements.push(render_create_table_with_sequences(
                 tables.next,
                 temporary_table,
@@ -274,13 +277,13 @@ impl SqlRenderer for KingbaseOracleRenderer {
     fn render_rename_table(&self, namespace: Option<&str>, name: &str, new_name: &str) -> String {
         format!(
             "ALTER TABLE {} RENAME TO {}",
-            QuotedWithPrefix::pg_new(namespace, name),
+            quoted_name(namespace, name),
             self.quote(new_name)
         )
     }
 
     fn render_drop_view(&self, namespace: Option<&str>, view: ViewWalker<'_>) -> String {
-        format!("DROP VIEW {}", QuotedWithPrefix::pg_new(namespace, view.name()))
+        format!("DROP VIEW {}", quoted_name(namespace, view.name()))
     }
 
     fn render_drop_user_defined_type(&self, _namespace: Option<&str>, _udt: &UserDefinedTypeWalker<'_>) -> String {
@@ -301,13 +304,190 @@ impl SqlRenderer for KingbaseOracleRenderer {
     }
 }
 
+fn create_enum_statement<'a>(name: &str, values: impl Iterator<Item = &'a str>) -> String {
+    format!(
+        "CREATE TYPE {name} AS ENUM ({})",
+        values.map(Quoted::OracleString).join(", ")
+    )
+}
+
+/// Oracle 19c has no schema enum type. Use the documented KES enum interface,
+/// including an atomic replacement when labels are removed; no PG version policy.
+fn render_oracle_alter_enum(alter: &AlterEnum, schemas: MigrationPair<&SqlSchema>) -> Vec<String> {
+    let enums = schemas.walk(alter.id);
+    let old_name = quoted_name(enums.previous.explicit_namespace(), enums.previous.name()).to_string();
+    // A newly added value cannot be used until ADD VALUE commits. A complete
+    // migration is submitted as one script, so defaults in existing/new columns
+    // must instead use a replacement type whose labels are immediately usable.
+    let default_needs_new_value = schemas.next.walk_table_columns().any(|column| {
+        column
+            .column_type_family_as_enum()
+            .is_some_and(|enm| enm.id == enums.next.id)
+            && column.default().is_some_and(|default| match default.kind() {
+                DefaultKind::Value(PrismaValue::Enum(value) | PrismaValue::String(value)) => {
+                    alter.created_variants.contains(value)
+                }
+                // Do not guess which labels an arbitrary SQL expression uses.
+                DefaultKind::DbGenerated(_) => true,
+                _ => false,
+            })
+    });
+    if alter.dropped_variants.is_empty() && !default_needs_new_value {
+        return alter
+            .created_variants
+            .iter()
+            .map(|value| format!("ALTER TYPE {old_name} ADD VALUE {}", Quoted::OracleString(value)))
+            .collect();
+    }
+    let suffix = uuid::Uuid::new_v4().simple().to_string();
+    let new_local = format!("_prisma_enum_new_{suffix}");
+    let old_local = format!("_prisma_enum_old_{suffix}");
+    let new_name = quoted_name(enums.next.explicit_namespace(), new_local.as_str()).to_string();
+    let retired_name = quoted_name(enums.previous.explicit_namespace(), old_local.as_str()).to_string();
+    let mut sql = vec![
+        "BEGIN".to_owned(),
+        create_enum_statement(&new_name, enums.next.values()),
+    ];
+    // Enum OIDs change during replacement, including on otherwise unchanged
+    // FK columns. Release all affected FKs before converting either endpoint.
+    let affected_fks: Vec<_> = schemas
+        .previous
+        .walk_foreign_keys()
+        .filter(|fk| {
+            fk.constrained_columns().chain(fk.referenced_columns()).any(|column| {
+                column
+                    .column_type_family_as_enum()
+                    .is_some_and(|enm| enm.id == enums.previous.id)
+            })
+        })
+        .collect();
+    let renderer = KingbaseOracleRenderer;
+    for fk in &affected_fks {
+        sql.push(renderer.render_drop_foreign_key(None, *fk));
+    }
+    for (previous, _) in &alter.previous_usages_as_default {
+        let column = schemas.previous.walk(*previous);
+        sql.push(format!(
+            "ALTER TABLE {} ALTER COLUMN {} DROP DEFAULT",
+            quoted_table(column.table()),
+            Quoted::OracleIdentifier(column.name())
+        ));
+    }
+    // Only existing columns that survive this migration can be converted here.
+    for column in schemas.previous.walk_table_columns().filter(|column| {
+        column
+            .column_type_family_as_enum()
+            .is_some_and(|enm| enm.id == enums.previous.id)
+    }) {
+        let table = column.table();
+        let survives = schemas
+            .next
+            .table_walkers()
+            .find(|next| next.name() == table.name() && next.namespace() == table.namespace())
+            .and_then(|next| next.column(column.name()))
+            .is_some_and(|next| {
+                next.column_type_family_as_enum()
+                    .is_some_and(|enm| enm.id == enums.next.id)
+            });
+        if survives {
+            sql.push(format!(
+                "ALTER TABLE {} ALTER COLUMN {} TYPE {new_name} USING (CAST(CAST({} AS TEXT) AS {new_name}))",
+                quoted_table(table),
+                Quoted::OracleIdentifier(column.name()),
+                Quoted::OracleIdentifier(column.name())
+            ));
+        } else {
+            sql.push(format!(
+                "ALTER TABLE {} ALTER COLUMN {} TYPE TEXT USING (CAST({} AS TEXT))",
+                quoted_table(table),
+                Quoted::OracleIdentifier(column.name()),
+                Quoted::OracleIdentifier(column.name())
+            ));
+        }
+    }
+    sql.push(format!(
+        "ALTER TYPE {old_name} RENAME TO {}",
+        Quoted::OracleIdentifier(old_local.as_str())
+    ));
+    sql.push(format!(
+        "ALTER TYPE {new_name} RENAME TO {}",
+        Quoted::OracleIdentifier(enums.next.name())
+    ));
+    sql.push(format!("DROP TYPE {retired_name}"));
+    for (previous, next) in &alter.previous_usages_as_default {
+        if let Some(next) = next.and_then(|id| schemas.next.walk(id).default()) {
+            let column = schemas.previous.walk(*previous);
+            sql.push(format!(
+                "ALTER TABLE {} ALTER COLUMN {} SET DEFAULT {}",
+                quoted_table(column.table()),
+                Quoted::OracleIdentifier(column.name()),
+                render_default(next.inner())
+            ));
+        }
+    }
+    // Restore the previous constraint when both endpoint columns still use
+    // this enum. Ordinary migration steps can subsequently rename, replace or
+    // remove it. Retiring columns must not regain incompatible constraints.
+    for fk in affected_fks {
+        let columns_survive = fk.constrained_columns().chain(fk.referenced_columns()).all(|column| {
+            schemas
+                .next
+                .table_walkers()
+                .find(|t| t.name() == column.table().name() && t.namespace() == column.table().namespace())
+                .and_then(|t| t.column(column.name()))
+                .is_some_and(|next| {
+                    if column
+                        .column_type_family_as_enum()
+                        .is_some_and(|enm| enm.id == enums.previous.id)
+                    {
+                        next.column_type_family_as_enum()
+                            .is_some_and(|enm| enm.id == enums.next.id)
+                    } else {
+                        true
+                    }
+                })
+        });
+        if columns_survive {
+            let ext: &sql::kingbase_oracle::KingbaseOracleSchemaExt = schemas.previous.downcast_connector_data();
+            sql.push(match ext.foreign_key_definitions.get(&fk.id) {
+                Some(definition) => format!(
+                    "ALTER TABLE {} ADD CONSTRAINT {} {definition}",
+                    quoted_table(fk.table()),
+                    Quoted::OracleIdentifier(fk.constraint_name().expect("foreign key name"))
+                ),
+                None => renderer.render_add_foreign_key(fk),
+            });
+        }
+    }
+    sql.push("COMMIT".to_owned());
+    sql
+}
+
 fn render_alter_column(
     table: &QuotedWithPrefix<&str>,
     columns: MigrationPair<TableColumnWalker<'_>>,
     changes: &crate::sql_schema_differ::ColumnChanges,
 ) -> Vec<String> {
-    let column_name = Quoted::postgres_ident(columns.previous.name());
+    let column_name = Quoted::OracleIdentifier(columns.previous.name());
     let mut statements = Vec::new();
+    let ext: &sql::kingbase_oracle::KingbaseOracleSchemaExt = columns.previous.schema.downcast_connector_data();
+    let generation = ext.column_generations.get(&columns.previous.id);
+    let removing_identity = changes.autoincrement_changed()
+        && !columns.next.is_autoincrement()
+        && matches!(
+            generation,
+            Some(sql::kingbase_oracle::ColumnGeneration::Identity { .. })
+        );
+    if removing_identity {
+        if let Some(sql::kingbase_oracle::ColumnGeneration::Identity {
+            sequence: Some(sequence),
+        }) = generation
+        {
+            statements.push(render_remove_identity(table, &column_name, sequence));
+        } else {
+            statements.push(format!("ALTER TABLE {table} ALTER COLUMN {column_name} DROP IDENTITY"));
+        }
+    }
 
     if changes.type_changed() {
         statements.push(format!(
@@ -337,30 +517,114 @@ fn render_alter_column(
 
     if changes.autoincrement_changed() {
         if columns.next.is_autoincrement() {
-            let sequence_name = sequence_name(columns.next.table().name(), columns.next.name());
-            statements.push(format!("CREATE SEQUENCE {}", Quoted::postgres_ident(&sequence_name)));
-            statements.push(format!(
-                "ALTER TABLE {table} ALTER COLUMN {column_name} SET DEFAULT nextval({})",
-                Quoted::postgres_string(&sequence_name)
-            ));
-            statements.push(format!(
-                "ALTER SEQUENCE {} OWNED BY {table}.{column_name}",
-                Quoted::postgres_ident(&sequence_name)
-            ));
+            let sequence_name = quoted_sequence(columns.next, columns.next.table().name());
+            // Keep calibration and installing the default atomic for schema
+            // push as well as script execution. The table lock prevents writes
+            // between reading MAX and enabling the generated default.
+            let commands = [
+                format!("LOCK TABLE {table} IN ACCESS EXCLUSIVE MODE"),
+                format!("CREATE SEQUENCE {sequence_name}"),
+                format!(
+                    "SELECT sys_catalog.setval({}, CAST(GREATEST(COALESCE(MAX(CAST({column_name} AS NUMERIC)), 0) + 1, 1) AS BIGINT), false) FROM {table}",
+                    Quoted::OracleString(&sequence_name)
+                ),
+                format!(
+                    "ALTER TABLE {table} ALTER COLUMN {column_name} SET DEFAULT nextval({})",
+                    Quoted::OracleString(&sequence_name)
+                ),
+                format!("ALTER SEQUENCE {sequence_name} OWNED BY {table}.{column_name}"),
+            ];
+            let body = format!(
+                "BEGIN\n{}\nEND;",
+                commands
+                    .iter()
+                    .map(|sql| format!("EXECUTE {};", Quoted::OracleString(sql)))
+                    .join("\n")
+            );
+            statements.push(format!("DO {}", Quoted::OracleString(&body)));
         } else {
-            let previous_sequence = columns.previous.default().and_then(|default| default.as_sequence());
             // A simultaneous SET DEFAULT (e.g. autoincrement() -> 3) above
             // must survive removing the old sequence.
-            if !changes.default_changed() {
+            if !changes.default_changed() && !removing_identity {
                 statements.push(format!("ALTER TABLE {table} ALTER COLUMN {column_name} DROP DEFAULT"));
             }
-            if let Some(sequence) = previous_sequence.filter(|sequence| !sequence.is_empty()) {
-                statements.push(format!("DROP SEQUENCE {}", Quoted::postgres_ident(sequence)));
+            if let Some(sql::kingbase_oracle::ColumnGeneration::OwnedSequence {
+                namespace,
+                name,
+                shared,
+            }) = generation
+            {
+                let sequence = quoted_name(Some(namespace), name);
+                statements.push(if *shared {
+                    format!("ALTER SEQUENCE {sequence} OWNED BY NONE")
+                } else {
+                    format!("DROP SEQUENCE {sequence}")
+                });
             }
         }
     }
 
     statements
+}
+
+/// One atomic KES DO statement: preserve a shared sequence under its original
+/// name, then rebind current defaults before DROP IDENTITY deletes the old OID.
+/// Read dependencies at execution time: earlier migration steps may already
+/// have changed or removed a referencing column/default.
+fn render_remove_identity(
+    table: &QuotedWithPrefix<&str>,
+    column: &Quoted<&str>,
+    sequence: &sql::kingbase_oracle::IdentitySequence,
+) -> String {
+    let original = quoted_name(Some(&sequence.namespace), &sequence.name).to_string();
+    let retired_local = format!("_prisma_identity_{}", uuid::Uuid::new_v4().simple());
+    let retired = quoted_name(Some(&sequence.namespace), &retired_local).to_string();
+    let defaults_query = format!(
+        r#"
+SELECT COALESCE(jsonb_agg(jsonb_build_object('namespace',n.nspname,'table',c.relname,
+    'column',a.attname,'expression',sys_catalog.sys_get_expr(d.adbin,d.adrelid)) ORDER BY n.nspname,c.relname,a.attnum),'[]'::jsonb)
+INTO defaults FROM sys_catalog.sys_depend dep JOIN sys_catalog.sys_attrdef d ON d.oid=dep.objid
+JOIN sys_catalog.sys_class c ON c.oid=d.adrelid JOIN sys_catalog.sys_namespace n ON n.oid=c.relnamespace
+JOIN sys_catalog.sys_attribute a ON a.attrelid=c.oid AND a.attnum=d.adnum
+WHERE dep.refobjid={}::regclass AND dep.deptype='n'
+AND dep.classid=(SELECT classid FROM sys_catalog.sys_get_object_address('default value',ARRAY[n.nspname,c.relname,a.attname],ARRAY[]::text[]))
+AND dep.refclassid=(SELECT classid FROM sys_catalog.sys_get_object_address('view',ARRAY['sys_catalog','sys_class'],ARRAY[]::text[]));
+"#,
+        Quoted::OracleString(&original)
+    );
+    let rename = format!(
+        "ALTER SEQUENCE {original} RENAME TO {}",
+        Quoted::OracleIdentifier(&retired_local)
+    );
+    let create = format!("CREATE SEQUENCE {original} {}", sequence.options);
+    let copy = format!(
+        "SELECT sys_catalog.setval({},last_value,is_called) FROM {retired}",
+        Quoted::OracleString(&original)
+    );
+    let drop = format!("ALTER TABLE {table} ALTER COLUMN {column} DROP IDENTITY");
+    let lock = format!("LOCK TABLE {table} IN ACCESS EXCLUSIVE MODE");
+    let body = format!(
+        r#"DECLARE defaults jsonb; reference record; BEGIN
+EXECUTE {lock};
+{defaults_query}
+FOR reference IN SELECT value AS item FROM jsonb_array_elements(defaults) LOOP
+    EXECUTE format('LOCK TABLE %I.%I IN ACCESS EXCLUSIVE MODE',reference.item->>'namespace',reference.item->>'table');
+END LOOP;
+{defaults_query}
+IF jsonb_array_length(defaults)>0 THEN
+    EXECUTE {rename}; EXECUTE {create}; EXECUTE {copy};
+    FOR reference IN SELECT value AS item FROM jsonb_array_elements(defaults) LOOP
+        EXECUTE format('ALTER TABLE %I.%I ALTER COLUMN %I SET DEFAULT %s',reference.item->>'namespace',reference.item->>'table',reference.item->>'column',reference.item->>'expression');
+    END LOOP;
+END IF;
+EXECUTE {drop}; END;"#,
+        lock = Quoted::OracleString(&lock),
+        rename = Quoted::OracleString(&rename),
+        create = Quoted::OracleString(&create),
+        copy = Quoted::OracleString(&copy),
+        drop = Quoted::OracleString(&drop)
+    );
+    format!("DO {}", Quoted::OracleString(&body))
 }
 
 fn render_create_table_with_sequences(
@@ -376,11 +640,11 @@ fn render_create_table_with_sequences(
     if let Some(primary_key) = table.primary_key() {
         let columns = primary_key
             .columns()
-            .map(|column| Quoted::postgres_ident(column.name()))
+            .map(|column| Quoted::OracleIdentifier(column.name()))
             .join(", ");
         definitions.push(format!(
             "CONSTRAINT {} PRIMARY KEY ({columns})",
-            Quoted::postgres_ident(primary_key.name())
+            Quoted::OracleIdentifier(primary_key.name())
         ));
     }
 
@@ -424,7 +688,7 @@ fn render_add_column(table: &QuotedWithPrefix<&str>, column: TableColumnWalker<'
 fn render_column(column: TableColumnWalker<'_>, sequence_table_name: &str) -> String {
     let mut output = format!(
         "{} {}",
-        Quoted::postgres_ident(column.name()),
+        Quoted::OracleIdentifier(column.name()),
         render_column_type(column)
     );
 
@@ -434,7 +698,7 @@ fn render_column(column: TableColumnWalker<'_>, sequence_table_name: &str) -> St
 
     if column.is_autoincrement() {
         let sequence = quoted_sequence(column, sequence_table_name);
-        write!(output, " DEFAULT nextval({})", Quoted::postgres_string(&sequence)).unwrap();
+        write!(output, " DEFAULT nextval({})", Quoted::OracleString(&sequence)).unwrap();
     } else if let Some(default) = column
         .default()
         .filter(|default| !matches!(default.kind(), DefaultKind::DbGenerated(None)))
@@ -449,9 +713,7 @@ fn render_column(column: TableColumnWalker<'_>, sequence_table_name: &str) -> St
 
 fn render_column_type(column: TableColumnWalker<'_>) -> Cow<'static, str> {
     if let Some(enm) = column.column_type_family_as_enum() {
-        return QuotedWithPrefix::pg_new(enm.explicit_namespace(), enm.name())
-            .to_string()
-            .into();
+        return quoted_name(enm.explicit_namespace(), enm.name()).to_string().into();
     }
 
     if let ColumnTypeFamily::Unsupported(description) = &column.column_type().family {
@@ -518,13 +780,13 @@ fn render_default(default: &DefaultValue) -> Cow<'_, str> {
         DefaultKind::Value(PrismaValue::String(value) | PrismaValue::Enum(value) | PrismaValue::Json(value)) => {
             format!("'{}'", value.replace('\'', "''")).into()
         }
-        DefaultKind::Value(PrismaValue::DateTime(value)) => Quoted::postgres_string(value).to_string().into(),
+        DefaultKind::Value(PrismaValue::DateTime(value)) => Quoted::OracleString(value).to_string().into(),
         DefaultKind::Value(PrismaValue::Bytes(value)) => {
             let mut encoded = String::with_capacity(value.len() * 2);
             for byte in value {
                 write!(encoded, "{byte:02x}").unwrap();
             }
-            format!("decode({}, 'hex')", Quoted::postgres_string(&encoded)).into()
+            format!("decoding({}, 'hex')", Quoted::OracleString(&encoded)).into()
         }
         DefaultKind::Value(value) => value.to_string().into(),
     }
@@ -540,21 +802,44 @@ fn render_foreign_key_action(action: ForeignKeyAction) -> &'static str {
     }
 }
 
+fn quoted_name<'a>(namespace: Option<&'a str>, name: &'a str) -> QuotedWithPrefix<&'a str> {
+    QuotedWithPrefix(namespace.map(Quoted::OracleIdentifier), Quoted::OracleIdentifier(name))
+}
+
 fn quoted_table(table: TableWalker<'_>) -> QuotedWithPrefix<&str> {
-    QuotedWithPrefix::pg_from_table_walker(table)
+    quoted_name(table.explicit_namespace(), table.name())
 }
 
 fn quoted_index(index: IndexWalker<'_>) -> QuotedWithPrefix<&str> {
-    QuotedWithPrefix::pg_new(index.table().explicit_namespace(), index.name())
+    quoted_name(index.table().explicit_namespace(), index.name())
 }
 
-fn sequence_name(table_name: &str, column_name: &str) -> String {
-    format!("{table_name}_{column_name}_seq").to_lowercase()
+fn owning_constraint_name(index: IndexWalker<'_>) -> &str {
+    let ext: &sql::kingbase_oracle::KingbaseOracleSchemaExt = index.schema.downcast_connector_data();
+    ext.owning_constraint_names
+        .get(&index.id)
+        .map(String::as_str)
+        .unwrap_or_else(|| index.name())
+}
+
+pub(super) fn sequence_name(table_name: &str, column_name: &str) -> String {
+    let name = format!("{table_name}_{column_name}_seq");
+    if name.len() <= 63 && name == name.to_lowercase() {
+        return name;
+    }
+    let hash = name.bytes().fold(0xcbf29ce484222325_u64, |state, byte| {
+        (state ^ u64::from(byte)).wrapping_mul(0x100000001b3)
+    });
+    let mut prefix = name.to_lowercase();
+    while prefix.len() > 40 {
+        prefix.pop();
+    }
+    format!("{prefix}_{hash:016x}")
 }
 
 fn quoted_sequence(column: TableColumnWalker<'_>, table_name: &str) -> String {
     let sequence_name = sequence_name(table_name, column.name());
-    QuotedWithPrefix::pg_new(column.table().explicit_namespace(), &sequence_name).to_string()
+    quoted_name(column.table().explicit_namespace(), &sequence_name).to_string()
 }
 
 fn render_create_sequence(column: TableColumnWalker<'_>, table_name: &str) -> String {
@@ -569,13 +854,58 @@ fn render_own_sequence(
     format!(
         "ALTER SEQUENCE {} OWNED BY {table_name}.{}",
         quoted_sequence(column, sequence_table_name),
-        Quoted::postgres_ident(column.name())
+        Quoted::OracleIdentifier(column.name())
     )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn drops_the_actual_owning_constraint_instead_of_the_index_name() {
+        use sql::kingbase_oracle::KingbaseOracleSchemaExt;
+        let mut schema = SqlSchema::default();
+        let table = schema.push_table("items".into(), Default::default(), None);
+        let owned = schema.push_unique_constraint(table, "supporting_index".into());
+        let standalone = schema.push_unique_constraint(table, "standalone_unique".into());
+        let mut ext = KingbaseOracleSchemaExt::default();
+        ext.owning_constraint_names.insert(owned, "actual_constraint".into());
+        schema.set_connector_data(Box::new(ext));
+        let renderer = KingbaseOracleRenderer;
+        assert_eq!(
+            renderer.render_drop_index(None, schema.walk(owned)),
+            "ALTER TABLE \"items\" DROP CONSTRAINT \"actual_constraint\""
+        );
+        assert_eq!(
+            renderer.render_drop_index(None, schema.walk(standalone)),
+            "DROP INDEX \"standalone_unique\""
+        );
+    }
+
+    #[test]
+    fn multiple_enum_additions_do_not_inherit_postgresql_version_advice() {
+        let mut previous = SqlSchema::default();
+        let ns = previous.push_namespace("public".into());
+        let old = previous.push_enum(ns, "State".into(), None);
+        previous.push_enum_variant(old, "old".into());
+        let mut next = previous.clone();
+        next.push_enum_variant(old, "new1".into());
+        next.push_enum_variant(old, "new2".into());
+        let alter = AlterEnum {
+            id: MigrationPair::new(old, old),
+            created_variants: vec!["new1".into(), "new2".into()],
+            dropped_variants: vec![],
+            previous_usages_as_default: vec![],
+        };
+        let statements = KingbaseOracleRenderer.render_alter_enum(&alter, MigrationPair::new(&previous, &next));
+        assert_eq!(statements.len(), 2);
+        assert!(
+            statements
+                .iter()
+                .all(|s| s.starts_with("ALTER TYPE ") && !s.contains("PostgreSQL"))
+        );
+    }
 
     #[test]
     fn renders_oracle_native_type_names() {
@@ -592,10 +922,10 @@ mod tests {
     }
 
     #[test]
-    fn renders_binary_defaults_as_decode_calls() {
+    fn renders_binary_defaults_as_decoding_calls() {
         assert_eq!(
             render_default(&DefaultValue::value(PrismaValue::Bytes(vec![0xab, 0xcd]))),
-            "decode('abcd', 'hex')"
+            "decoding('abcd', 'hex')"
         );
     }
 
@@ -604,6 +934,18 @@ mod tests {
         assert_eq!(
             render_default(&DefaultValue::value(PrismaValue::String("'potassium'\\path".into()))),
             "'''potassium''\\path'"
+        );
+    }
+    #[test]
+    fn rebuilding_an_index_without_an_explicit_namespace_still_qualifies_it() {
+        let mut schema = SqlSchema::default();
+        let namespace = schema.push_namespace("tenant".into());
+        let table = schema.push_table("items".into(), namespace, None);
+        let index = schema.push_index(table, "items_name".into());
+        schema.set_connector_data(Box::new(sql::kingbase_oracle::KingbaseOracleSchemaExt::default()));
+        assert_eq!(
+            KingbaseOracleRenderer.render_drop_index(None, schema.walk(index)),
+            "DROP INDEX \"tenant\".\"items_name\""
         );
     }
 }

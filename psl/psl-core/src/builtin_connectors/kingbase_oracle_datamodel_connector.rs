@@ -24,6 +24,7 @@ use KingbaseOracleType::*;
 pub const CAPABILITIES: ConnectorCapabilities = make_bitflags!(ConnectorCapability::{
     Enums |
     Json |
+    AdvancedJsonNullability |
     JsonFiltering |
     JsonFilteringArrayPath |
     JsonFilteringAlphanumeric |
@@ -161,15 +162,10 @@ impl Connector for KingbaseOracleDatamodelConnector {
             Number(PrecisionAndScale(_, scale)) if *scale > 1000 => {
                 errors.push_error(error.new_argument_m_out_of_range_error("Scale must be between 0 and 1000.", span))
             }
-            Number(PrecisionAndScale(precision, scale)) if scale > precision => errors
-                .push_error(error.new_argument_m_out_of_range_error("Scale must not be larger than precision.", span)),
             Float(Some(precision)) if *precision == 0 || *precision > 53 => {
                 errors.push_error(error.new_argument_m_out_of_range_error("Precision must be between 1 and 53.", span))
             }
-            VarChar2(Some(length)) if *length == 0 || *length > 4_000 => {
-                errors.push_error(error.new_argument_m_out_of_range_error("Length must be between 1 and 4,000.", span))
-            }
-            Char(Some(length)) | NChar(Some(length)) | NVarChar2(Some(length))
+            VarChar2(Some(length)) | Char(Some(length)) | NChar(Some(length)) | NVarChar2(Some(length))
                 if *length == 0 || *length > 10_485_760 =>
             {
                 errors.push_error(
@@ -210,7 +206,23 @@ impl Connector for KingbaseOracleDatamodelConnector {
         span: Span,
         diagnostics: &mut Diagnostics,
     ) -> Option<NativeTypeInstance> {
+        if name == "Number" && args.get(1).is_some_and(|scale| scale.starts_with('-')) {
+            let native_type = NativeTypeInstance::new(Number(Unspecified));
+            diagnostics.push_error(self.native_instance_error(&native_type).new_argument_m_out_of_range_error(
+                "Negative NUMBER scale is not supported: this Kingbase Oracle version does not preserve Oracle rounding semantics.", span,
+            ));
+            return None;
+        }
         match KingbaseOracleType::from_parts(name, args) {
+            // C010 raises precision to scale. Match the type returned by
+            // introspection so an unchanged schema does not repeatedly ALTER it.
+            // Keep invalid arguments intact for the normal bounds diagnostics.
+            Ok(Number(PrecisionAndScale(precision, scale))) if (1..=1000).contains(&precision) && scale <= 1000 => {
+                Some(NativeTypeInstance::new(Number(PrecisionAndScale(
+                    precision.max(scale),
+                    scale,
+                ))))
+            }
             Ok(native_type) => Some(NativeTypeInstance::new(native_type)),
             Err(error) => {
                 diagnostics.push_error(error.into_datamodel_error(span));

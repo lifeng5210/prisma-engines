@@ -68,7 +68,7 @@ impl SqlSchemaDialect {
     /// Creates a Kingbase Oracle-compatible schema dialect.
     #[cfg(feature = "kingbase-oracle")]
     pub fn kingbase_oracle() -> Self {
-        Self::new(Box::new(flavour::KingbaseOracleDialect::default()))
+        Self::new(Box::new(flavour::KingbaseOracleDialect))
     }
 
     /// Creates a SQLite schema dialect with the default settings.
