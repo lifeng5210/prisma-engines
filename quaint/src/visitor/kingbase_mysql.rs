@@ -25,7 +25,7 @@ impl KingbaseMysql {
         } = template;
         let (sql, parameter_fragments) = template_sql(fragments);
 
-        let sql = rewrite_full_text_search(sql, &mut parameters)?;
+        let sql = rewrite_full_text_search(sql, &parameters)?;
         let sql = cast_sum_parameters(sql, &parameters);
         promote_json_numeric_comparison_params(&sql, &mut parameters);
         let sql = cast_json_comparison_expressions(sql);
@@ -63,17 +63,10 @@ impl KingbaseMysql {
     }
 }
 
-/// Rewrites the MySQL visitor's `MATCH (...) AGAINST (... IN BOOLEAN MODE)`
-/// output to Kingbase's PostgreSQL-compatible full-text syntax.
-///
-/// MySQL Boolean Mode is not the same language as PostgreSQL's
-/// `websearch_to_tsquery`: bare MySQL terms are optional (OR), while bare
-/// PostgreSQL terms are required (AND). Convert the supported Boolean Mode
-/// subset to a `tsquery` before binding it instead of silently changing which
-/// rows match. We keep the `simple` configuration fixed because it makes the
-/// `to_tsvector` expression immutable, allowing the same expression to back a
-/// GIN index.
-fn rewrite_full_text_search(sql: String, parameters: &mut [Value<'_>]) -> crate::Result<String> {
+/// Rewrites MySQL MATCH SQL to Kingbase full-text functions while preserving
+/// search parameters verbatim. Both Kingbase providers accept native tsquery
+/// expressions. The fixed `simple` configuration matches MySQL-mode GIN indexes.
+fn rewrite_full_text_search(sql: String, parameters: &[Value<'_>]) -> crate::Result<String> {
     const MATCH: &str = "MATCH";
     const AGAINST: &str = "AGAINST";
     const BOOLEAN_MODE: &str = "IN BOOLEAN MODE";
@@ -124,18 +117,9 @@ fn rewrite_full_text_search(sql: String, parameters: &mut [Value<'_>]) -> crate:
         let document = fulltext_document(&sql[match_open + 1..columns_end]);
         let query = sql[against_open + 1..mode_start].trim();
         let query_parameter_index = fulltext_query_parameter_index(query, &sql)?;
-        // Concrete values are converted here. Opaque Query Compiler values
-        // retain a bind-time marker so the Kingbase adapter applies the same
-        // MySQL Boolean Mode conversion to each execution of a cached plan.
-        if let Some(query) = fulltext_query_parameter(parameters, query_parameter_index)? {
-            let tsquery = mysql_boolean_mode_to_tsquery(query)?;
-            set_fulltext_query_parameter(parameters, query_parameter_index, tsquery)?;
-        } else {
-            parameters[query_parameter_index].native_column_type = Some(NativeColumnType {
-                name: Cow::Borrowed("PRISMA_MYSQL_BOOLEAN_QUERY"),
-                length: None,
-            });
-        }
+        // Validate the parameter shape without interpreting its search language.
+        // Concrete and Query Compiler parameters both reach to_tsquery unchanged.
+        fulltext_query_parameter(parameters, query_parameter_index)?;
         let tsquery_function = "to_tsquery";
 
         output.push_str(&sql[cursor..match_start]);
@@ -189,278 +173,11 @@ fn fulltext_query_parameter<'a>(parameters: &'a [Value<'_>], index: usize) -> cr
     }
 }
 
-fn set_fulltext_query_parameter(
-    parameters: &mut [Value<'_>],
-    index: usize,
-    tsquery: Option<String>,
-) -> crate::Result<()> {
-    let parameter = parameters
-        .get_mut(index)
-        .ok_or_else(|| fulltext_conversion_error("Kingbase MySQL full-text search parameter could not be updated"))?;
-
-    let ValueType::Text(Some(query)) = &mut parameter.typed else {
-        return Err(fulltext_conversion_error(
-            "Kingbase MySQL full-text search requires a non-null string search value",
-        ));
-    };
-
-    // MySQL returns no rows for a Boolean query containing only prohibited
-    // terms. A contradiction is a valid tsquery and preserves that behavior.
-    *query = Cow::Owned(tsquery.unwrap_or_else(|| "'__prisma_never_match__' & !'__prisma_never_match__'".to_owned()));
-    Ok(())
-}
-
 fn fulltext_conversion_error(message: impl Into<String>) -> Error {
     let message = message.into();
     let mut builder = Error::builder(ErrorKind::conversion(message.clone()));
     builder.set_original_message(message);
     builder.build()
-}
-
-#[derive(Clone, Copy)]
-enum BooleanModeModifier {
-    Optional,
-    Required,
-    Prohibited,
-}
-
-struct BooleanModeTerm {
-    modifier: BooleanModeModifier,
-    expression: String,
-}
-
-/// Translate the Boolean Mode subset whose matching semantics can be expressed
-/// with a PostgreSQL `tsquery`. Relevance-only modifiers (`>`, `<`, `~`) and
-/// proximity searches cannot be represented faithfully, so reject them rather
-/// than returning a different result set.
-fn mysql_boolean_mode_to_tsquery(query: &str) -> crate::Result<Option<String>> {
-    let mut parser = MySqlBooleanModeParser::new(query);
-    let terms = parser.parse_terms(false)?;
-
-    if parser.next_char().is_some() {
-        return Err(fulltext_conversion_error(
-            "Kingbase MySQL full-text search contains an unexpected closing parenthesis",
-        ));
-    }
-
-    Ok(compose_boolean_mode_terms(terms))
-}
-
-struct MySqlBooleanModeParser<'a> {
-    chars: std::iter::Peekable<std::str::Chars<'a>>,
-}
-
-impl<'a> MySqlBooleanModeParser<'a> {
-    fn new(query: &'a str) -> Self {
-        Self {
-            chars: query.chars().peekable(),
-        }
-    }
-
-    fn next_char(&mut self) -> Option<char> {
-        self.chars.next()
-    }
-
-    fn peek_char(&mut self) -> Option<char> {
-        self.chars.peek().copied()
-    }
-
-    fn skip_whitespace(&mut self) {
-        while self.peek_char().is_some_and(char::is_whitespace) {
-            self.next_char();
-        }
-    }
-
-    fn parse_terms(&mut self, stop_at_closing_parenthesis: bool) -> crate::Result<Vec<BooleanModeTerm>> {
-        let mut terms = Vec::new();
-
-        loop {
-            self.skip_whitespace();
-
-            match self.peek_char() {
-                None => {
-                    if stop_at_closing_parenthesis {
-                        return Err(fulltext_conversion_error(
-                            "Kingbase MySQL full-text search contains an unclosed parenthesis",
-                        ));
-                    }
-                    return Ok(terms);
-                }
-                Some(')') if stop_at_closing_parenthesis => {
-                    self.next_char();
-                    return Ok(terms);
-                }
-                Some(')') => return Ok(terms),
-                _ => terms.push(self.parse_term()?),
-            }
-        }
-    }
-
-    fn parse_term(&mut self) -> crate::Result<BooleanModeTerm> {
-        let modifier = match self.peek_char() {
-            Some('+') => {
-                self.next_char();
-                BooleanModeModifier::Required
-            }
-            Some('-') => {
-                self.next_char();
-                BooleanModeModifier::Prohibited
-            }
-            Some('~' | '>' | '<' | '@') => {
-                return Err(fulltext_conversion_error(
-                    "Kingbase MySQL full-text search does not support MySQL relevance or proximity modifiers",
-                ));
-            }
-            _ => BooleanModeModifier::Optional,
-        };
-
-        self.skip_whitespace();
-        let expression = match self.next_char() {
-            Some('(') => {
-                let terms = self.parse_terms(true)?;
-                compose_boolean_mode_terms(terms).ok_or_else(|| {
-                    fulltext_conversion_error(
-                        "Kingbase MySQL full-text search group must contain a positive search term",
-                    )
-                })?
-            }
-            Some('"') => self.parse_phrase()?,
-            Some(character) => self.parse_word(character)?,
-            None => {
-                return Err(fulltext_conversion_error(
-                    "Kingbase MySQL full-text search modifier is missing a search term",
-                ));
-            }
-        };
-
-        Ok(BooleanModeTerm { modifier, expression })
-    }
-
-    fn parse_phrase(&mut self) -> crate::Result<String> {
-        let mut words = Vec::new();
-        let mut word = String::new();
-
-        loop {
-            match self.next_char() {
-                Some('"') => {
-                    if !word.is_empty() {
-                        words.push(tsquery_lexeme(&word, false)?);
-                    }
-                    break;
-                }
-                Some(character) if character.is_whitespace() => {
-                    if !word.is_empty() {
-                        words.push(tsquery_lexeme(&word, false)?);
-                        word.clear();
-                    }
-                }
-                Some(character) => word.push(character),
-                None => {
-                    return Err(fulltext_conversion_error(
-                        "Kingbase MySQL full-text search contains an unterminated phrase",
-                    ));
-                }
-            }
-        }
-
-        if words.is_empty() {
-            return Err(fulltext_conversion_error(
-                "Kingbase MySQL full-text search phrase must contain a word",
-            ));
-        }
-
-        if matches!(self.peek_char(), Some('@')) {
-            return Err(fulltext_conversion_error(
-                "Kingbase MySQL full-text search does not support MySQL proximity modifiers",
-            ));
-        }
-
-        Ok(format!("({})", words.join(" <-> ")))
-    }
-
-    fn parse_word(&mut self, first: char) -> crate::Result<String> {
-        let mut word = String::from(first);
-        while self
-            .peek_char()
-            .is_some_and(|character| character.is_alphanumeric() || character == '_')
-        {
-            word.push(self.next_char().unwrap());
-        }
-
-        let prefix = matches!(self.peek_char(), Some('*'));
-        if prefix {
-            self.next_char();
-        }
-
-        if self
-            .peek_char()
-            .is_some_and(|character| !character.is_whitespace() && character != '(' && character != ')')
-        {
-            return Err(fulltext_conversion_error(
-                "Kingbase MySQL full-text search contains an unsupported Boolean Mode token",
-            ));
-        }
-
-        tsquery_lexeme(&word, prefix)
-    }
-}
-
-fn tsquery_lexeme(word: &str, prefix: bool) -> crate::Result<String> {
-    if word.is_empty()
-        || !word
-            .chars()
-            .all(|character| character.is_alphanumeric() || character == '_')
-    {
-        return Err(fulltext_conversion_error(
-            "Kingbase MySQL full-text search supports only word, phrase, prefix, required, prohibited, and grouped terms",
-        ));
-    }
-
-    let mut lexeme = format!("'{}'", word.replace('\\', "\\\\").replace('\'', "''"));
-    if prefix {
-        lexeme.push_str(":*");
-    }
-    Ok(lexeme)
-}
-
-fn compose_boolean_mode_terms(terms: Vec<BooleanModeTerm>) -> Option<String> {
-    let mut required = Vec::new();
-    let mut optional = Vec::new();
-    let mut prohibited = Vec::new();
-
-    for term in terms {
-        match term.modifier {
-            BooleanModeModifier::Required => required.push(term.expression),
-            BooleanModeModifier::Optional => optional.push(term.expression),
-            BooleanModeModifier::Prohibited => prohibited.push(term.expression),
-        }
-    }
-
-    let required_expression = join_tsquery_terms(&required, " & ");
-    let optional_expression = join_tsquery_terms(&optional, " | ");
-
-    let mut expression = match (required_expression.as_deref(), optional_expression.as_deref()) {
-        (Some(required), Some(optional)) => format!("({required}) & (({required}) | ({optional}))"),
-        (Some(required), None) => required.to_owned(),
-        (None, Some(optional)) => optional.to_owned(),
-        (None, None) => return None,
-    };
-
-    if let Some(prohibited) = join_tsquery_terms(&prohibited, " | ") {
-        expression = format!("({expression}) & !({prohibited})");
-    }
-
-    Some(expression)
-}
-
-fn join_tsquery_terms(terms: &[String], separator: &str) -> Option<String> {
-    (!terms.is_empty()).then(|| {
-        terms
-            .iter()
-            .map(|term| format!("({term})"))
-            .collect::<Vec<_>>()
-            .join(separator)
-    })
 }
 
 fn fulltext_document(columns: &str) -> String {
@@ -606,13 +323,16 @@ fn cast_sum_parameters(sql: String, params: &[Value<'_>]) -> String {
 
 fn sum_parameter_type(param: &Value<'_>) -> Option<&'static str> {
     match param.typed {
-        // MySQL SUM() promotes exact integer inputs to DECIMAL. Kingbase's
-        // SUM(INT4/INT8) instead returns INT8/NUMERIC respectively, so cast
-        // integer parameters to NUMERIC before aggregation.
-        ValueType::Int32(_) | ValueType::Int64(_) => Some("NUMERIC"),
+        // The ordinary query path leaves wire parameter types unspecified.
+        // Disambiguate SUM using the actual value type; the server chooses the
+        // aggregate's return type. Do not promote integers to MySQL DECIMAL.
+        ValueType::Int32(_) => Some("INTEGER"),
+        ValueType::Int64(_) => Some("BIGINT"),
         ValueType::Float(_) => Some("FLOAT4"),
         ValueType::Double(_) => Some("FLOAT8"),
-        ValueType::Numeric(_) => Some("NUMERIC"),
+        // C010's unqualified NUMERIC defaults to (10,0). Kingbase's
+        // documented FIXED type without modifiers preserves decimal scale.
+        ValueType::Numeric(_) => Some("FIXED"),
         _ => None,
     }
 }
@@ -1147,6 +867,23 @@ mod tests {
     };
 
     #[test]
+    fn sum_parameters_keep_their_original_types() {
+        for (parameter, sql) in [
+            (Value::int32(1), "SELECT SUM(CAST(? AS INTEGER))"),
+            (Value::int64(1), "SELECT SUM(CAST(? AS BIGINT))"),
+            (Value::float(1.5), "SELECT SUM(CAST(? AS FLOAT4))"),
+            (Value::double(1.5), "SELECT SUM(CAST(? AS FLOAT8))"),
+            (Value::numeric("1.5".parse().unwrap()), "SELECT SUM(CAST(? AS FIXED))"),
+            (Value::from(None::<i32>), "SELECT SUM(CAST(? AS INTEGER))"),
+        ] {
+            let (actual, params) =
+                KingbaseMysql::build(Select::default().value(crate::ast::sum(parameter.clone()))).unwrap();
+            assert_eq!(actual, sql);
+            assert_eq!(params, vec![parameter]);
+        }
+    }
+
+    #[test]
     fn function_shaped_identifiers_are_preserved() {
         for name in [
             "uuid()",
@@ -1235,37 +972,39 @@ mod tests {
     #[test]
     fn full_text_filters_use_kingbase_syntax() {
         let search: Expression = text_search(&[Column::from("name"), Column::from("email")]).into();
-        let query = Select::from_table("User").so_that(search.matches("John Smith"));
+        let query = Select::from_table("User").so_that(search.matches("John & Smith"));
         let (sql, params) = KingbaseMysql::build(query).unwrap();
 
         assert_eq!(
             "SELECT `User`.* FROM `User` WHERE to_tsvector('simple', textcat(COALESCE(`name`, ''), textcat(' ', COALESCE(`email`, '')))) @@ to_tsquery('simple', ?)",
             sql
         );
-        assert_eq!(params, vec![Value::text("('John') | ('Smith')")]);
+        assert_eq!(params, vec![Value::text("John & Smith")]);
     }
 
     #[test]
-    fn full_text_filters_preserve_mysql_boolean_mode_matching() {
+    fn full_text_filters_preserve_native_tsquery_parameters() {
         let search: Expression = text_search(&[Column::from("name")]).into();
 
-        for (query, expected_tsquery) in [
-            ("John Smith", "('John') | ('Smith')"),
-            ("+John Smith", "(('John')) & ((('John')) | (('Smith')))"),
-            ("+John -Smith", "(('John')) & !(('Smith'))"),
-            ("-Smith", "'__prisma_never_match__' & !'__prisma_never_match__'"),
-            ("John*", "('John':*)"),
-            ("\"John Smith\"", "(('John' <-> 'Smith'))"),
+        for query in [
+            "John & Smith",
+            "John | Smith",
+            "John & !Smith",
+            "!Smith",
+            "John:*",
+            "John <-> Smith",
+            "John <2> Smith",
+            "(John | April) & !Smith",
+            "'John':A",
         ] {
             let (_, params) =
                 KingbaseMysql::build(Select::from_table("User").so_that(search.clone().matches(query))).unwrap();
-
-            assert_eq!(params, vec![Value::text(expected_tsquery)]);
+            assert_eq!(params, vec![Value::text(query)]);
         }
     }
 
     #[test]
-    fn full_text_filters_mark_dynamic_mysql_boolean_parameters() {
+    fn full_text_filters_preserve_dynamic_string_parameters() {
         let search: Expression = text_search(&[Column::from("name")]).into();
         let query =
             Select::from_table("User").so_that(search.matches(Value::opaque("search".to_owned(), OpaqueType::Text)));
@@ -1279,30 +1018,28 @@ mod tests {
             params[0].typed,
             ValueType::Opaque(ref opaque) if opaque.typ() == &OpaqueType::Text
         ));
-        assert_eq!(
-            params[0].native_column_type.as_ref().unwrap().name,
-            "PRISMA_MYSQL_BOOLEAN_QUERY"
-        );
+        assert!(params[0].native_column_type.is_none());
     }
 
     #[test]
-    fn full_text_filters_reject_mysql_boolean_mode_operators_without_a_kingbase_equivalent() {
+    fn full_text_query_syntax_is_validated_by_the_database() {
         let search: Expression = text_search(&[Column::from("name")]).into();
-
-        for query in ["~John", ">John", "\"John Smith\"@2"] {
-            assert!(KingbaseMysql::build(Select::from_table("User").so_that(search.clone().matches(query))).is_err());
+        for query in ["John Smith", "+John +Smith", "(John", ""] {
+            let (_, params) =
+                KingbaseMysql::build(Select::from_table("User").so_that(search.clone().matches(query))).unwrap();
+            assert_eq!(params, vec![Value::text(query)]);
         }
     }
 
     #[test]
     fn full_text_relevance_uses_kingbase_syntax() {
-        let relevance: Expression = text_search_relevance(&[Column::from("name")], "John Smith").into();
+        let relevance: Expression = text_search_relevance(&[Column::from("name")], "John & Smith").into();
         let (sql, params) = KingbaseMysql::build(Select::from_table("User").value(relevance)).unwrap();
 
         assert_eq!(
             "SELECT ts_rank(to_tsvector('simple', COALESCE(`name`, '')), to_tsquery('simple', ?)) FROM `User`",
             sql
         );
-        assert_eq!(params, vec![Value::text("('John') | ('Smith')")]);
+        assert_eq!(params, vec![Value::text("John & Smith")]);
     }
 }

@@ -1,4 +1,5 @@
 use psl::builtin_connectors::KINGBASE_MYSQL;
+use quaint::prelude::Queryable;
 use sql_migration_tests::test_api::*;
 use sql_schema_describer::ColumnTypeFamily;
 use std::{borrow::Cow, fmt::Write};
@@ -69,9 +70,7 @@ const SAFE_CASTS: Cases = &[
         quaint::ValueType::Bytes(Some(Cow::Borrowed(b""))),
         &[
             "SmallInt",
-            "UnsignedSmallInt",
             "TinyInt",
-            "UnsignedTinyInt",
             "Int",
             "MediumInt",
             "TinyText",
@@ -156,16 +155,13 @@ const SAFE_CASTS: Cases = &[
             "TinyText",
             "Blob",
             // integers
-            "UnsignedTinyInt",
             "Decimal(10,5)",
             "TinyInt",
             "Int",
             "Json",
             "UnsignedInt",
             "SmallInt",
-            "UnsignedSmallInt",
             "MediumInt",
-            "UnsignedMediumInt",
             "Year",
         ],
     ),
@@ -181,16 +177,13 @@ const SAFE_CASTS: Cases = &[
             "TinyText",
             "Blob",
             // integers
-            "UnsignedTinyInt",
             "Decimal(10,5)",
             "TinyInt",
             "Int",
             "Json",
             "UnsignedInt",
             "SmallInt",
-            "UnsignedSmallInt",
             "MediumInt",
-            "UnsignedMediumInt",
             "Year",
             // Time
             "Time(0)",
@@ -229,14 +222,7 @@ const SAFE_CASTS: Cases = &[
     (
         "Time",
         quaint::ValueType::Int32(Some(20)),
-        &[
-            "VarChar(20)",
-            "BigInt",
-            "Int",
-            "UnsignedSmallInt",
-            "TinyInt",
-            "Decimal(20,5)",
-        ],
+        &["VarChar(20)", "BigInt", "Int", "TinyInt", "Decimal(20,5)"],
     ),
     (
         "Year",
@@ -263,8 +249,6 @@ const SAFE_CASTS: Cases = &[
             "SmallInt",
             "UnsignedBigInt",
             "UnsignedInt",
-            "UnsignedMediumInt",
-            "UnsignedSmallInt",
             "Float",
             "Double",
         ],
@@ -282,21 +266,18 @@ const RISKY_CASTS: Cases = &[
             "TinyInt",
             "UnsignedBigInt",
             "UnsignedInt",
-            "UnsignedMediumInt",
-            "UnsignedSmallInt",
-            "UnsignedTinyInt",
         ],
     ),
     ("BigInt", quaint::ValueType::Int64(Some(2000)), &["Year"]),
     (
         "Binary(8)",
         quaint::ValueType::Bytes(Some(Cow::Borrowed(b"08088044"))),
-        &["Bit(32)", "Int", "UnsignedBigInt", "UnsignedInt", "UnsignedMediumInt"],
+        &["Bit(32)", "Int", "UnsignedBigInt", "UnsignedInt"],
     ),
     (
         "Binary(1)",
         quaint::ValueType::Bytes(Some(Cow::Borrowed(b"0"))),
-        &["Time(0)", "SmallInt", "TinyInt", "UnsignedSmallInt", "UnsignedTinyInt"],
+        &["Time(0)", "SmallInt", "TinyInt"],
     ),
     (
         "Binary(4)",
@@ -426,9 +407,6 @@ const IMPOSSIBLE_CASTS: Cases = &[
             "Time(0)",
             "Timestamp(0)",
             "UnsignedInt",
-            "UnsignedMediumInt",
-            "UnsignedSmallInt",
-            "UnsignedTinyInt",
             "UnsignedBigInt",
             "Year",
         ],
@@ -436,30 +414,12 @@ const IMPOSSIBLE_CASTS: Cases = &[
     (
         "Date",
         quaint::ValueType::Text(Some(Cow::Borrowed("2020-01-12"))),
-        &[
-            "TinyInt",
-            "UnsignedTinyInt",
-            "Year",
-            "SmallInt",
-            "UnsignedSmallInt",
-            "UnsignedMediumInt",
-            "MediumInt",
-        ],
+        &["TinyInt", "Year", "SmallInt", "MediumInt"],
     ),
     (
         "DateTime(0)",
         quaint::ValueType::Text(Some(Cow::Borrowed("2020-01-08 08:00:00"))),
-        &[
-            "TinyInt",
-            "UnsignedTinyInt",
-            "Int",
-            "UnsignedInt",
-            "SmallInt",
-            "UnsignedSmallInt",
-            "MediumInt",
-            "UnsignedMediumInt",
-            "Year",
-        ],
+        &["TinyInt", "Int", "UnsignedInt", "SmallInt", "MediumInt", "Year"],
     ),
     (
         "Double",
@@ -483,9 +443,6 @@ const IMPOSSIBLE_CASTS: Cases = &[
             "TinyInt",
             "UnsignedBigInt",
             "UnsignedInt",
-            "UnsignedMediumInt",
-            "UnsignedSmallInt",
-            "UnsignedTinyInt",
             "Float",
             "Double",
         ],
@@ -508,9 +465,6 @@ const IMPOSSIBLE_CASTS: Cases = &[
             "Time(0)",
             "Timestamp(0)",
             "UnsignedInt",
-            "UnsignedMediumInt",
-            "UnsignedSmallInt",
-            "UnsignedTinyInt",
             "UnsignedBigInt",
             "Year",
         ],
@@ -533,9 +487,6 @@ const IMPOSSIBLE_CASTS: Cases = &[
             "Time(0)",
             "Timestamp(0)",
             "UnsignedInt",
-            "UnsignedMediumInt",
-            "UnsignedSmallInt",
-            "UnsignedTinyInt",
             "UnsignedBigInt",
             "Year",
         ],
@@ -559,9 +510,6 @@ const IMPOSSIBLE_CASTS: Cases = &[
             "Time(0)",
             "Timestamp(0)",
             "UnsignedInt",
-            "UnsignedMediumInt",
-            "UnsignedSmallInt",
-            "UnsignedTinyInt",
             "UnsignedBigInt",
             "Year",
         ],
@@ -569,14 +517,7 @@ const IMPOSSIBLE_CASTS: Cases = &[
     (
         "Year",
         quaint::ValueType::Int32(Some(2001)),
-        &[
-            "TinyInt",
-            "UnsignedTinyInt",
-            "Date",
-            "Time(0)",
-            "DateTime(0)",
-            "Timestamp(0)",
-        ],
+        &["TinyInt", "Date", "Time(0)", "DateTime(0)", "Timestamp(0)"],
     ),
 ];
 
@@ -609,9 +550,6 @@ fn native_type_name_to_prisma_scalar_type_name(scalar_type: &str) -> &'static st
         ("TinyText", "String"),
         ("UnsignedBigInt", "BigInt"),
         ("UnsignedInt", "Int"),
-        ("UnsignedMediumInt", "Int"),
-        ("UnsignedSmallInt", "Int"),
-        ("UnsignedTinyInt", "Int"),
         ("VarBinary", "Bytes"),
         ("VarChar", "String"),
         ("Year", "Int"),
@@ -670,11 +608,8 @@ fn is_numeric_type(native_type: &str) -> bool {
         "Int"
             | "UnsignedInt"
             | "SmallInt"
-            | "UnsignedSmallInt"
             | "TinyInt"
-            | "UnsignedTinyInt"
             | "MediumInt"
-            | "UnsignedMediumInt"
             | "BigInt"
             | "UnsignedBigInt"
             | "Decimal"
@@ -689,40 +624,6 @@ fn is_datetime_type(native_type: &str) -> bool {
         native_type_base(native_type),
         "Date" | "Time" | "DateTime" | "Timestamp"
     )
-}
-
-fn datetime_numeric_cast_supported(previous: &str, next: &str) -> bool {
-    let required_digits = match native_type_base(previous) {
-        "Date" => 8,
-        "Time" => 6,
-        "DateTime" | "Timestamp" => 14,
-        _ => return false,
-    };
-
-    let capacity = match native_type_base(next) {
-        "TinyInt" | "UnsignedTinyInt" => 3,
-        "SmallInt" | "UnsignedSmallInt" => 5,
-        "MediumInt" | "UnsignedMediumInt" => 7,
-        "Int" | "UnsignedInt" => 10,
-        "BigInt" | "UnsignedBigInt" => 19,
-        "Decimal" => next
-            .split_once('(')
-            .and_then(|(_, arguments)| {
-                let (precision, scale) = arguments.trim_end_matches(')').split_once(',')?;
-                Some(
-                    precision
-                        .parse::<u32>()
-                        .ok()?
-                        .saturating_sub(scale.parse::<u32>().ok()?),
-                )
-            })
-            .unwrap_or(10),
-        "Float" | "Double" => 38,
-        "Year" => 4,
-        _ => return false,
-    };
-
-    capacity >= required_digits
 }
 
 fn explicit_cast_supported_by_names(previous: &str, next: &str) -> bool {
@@ -749,10 +650,6 @@ fn explicit_cast_supported_by_names(previous: &str, next: &str) -> bool {
     }
 
     if is_datetime_type(previous) && (native_type_base(next) == "Json" || is_bit_type(next)) {
-        return false;
-    }
-
-    if is_datetime_type(previous) && is_numeric_type(next) && !datetime_numeric_cast_supported(previous, next) {
         return false;
     }
 
@@ -882,11 +779,17 @@ fn run_casts_with_existing_data(api: &mut TestApi, cases: Cases, cast_kind: Cast
     };
 
     for (from_type, test_value, to_types) in cases {
-        let (no_op, remaining): (Vec<_>, Vec<_>) = to_types.iter().copied().partition(|to_type| *from_type == *to_type);
+        let (native_temporal, to_types): (Vec<_>, Vec<_>) = to_types
+            .iter()
+            .copied()
+            .partition(|to_type| is_datetime_type(from_type) && is_numeric_type(to_type));
+        for target in native_temporal {
+            run_native_temporal_cast(api, from_type, test_value, target, &colnames, &mut buffers);
+        }
+        let (no_op, remaining): (Vec<_>, Vec<_>) = to_types.into_iter().partition(|to_type| *from_type == *to_type);
         let mut groups = Vec::new();
 
-        // Only identical native types are no-ops. Small unsigned domains
-        // retain distinct ranges and must execute an actual type change.
+        // Only identical native types are no-ops.
         if !no_op.is_empty() {
             groups.push((no_op, CastKind::Safe));
         }
@@ -934,6 +837,75 @@ fn run_casts_with_existing_data(api: &mut TestApi, cases: Cases, cast_kind: Cast
     }
 }
 
+// The server is the independent oracle for temporal conversions. In
+// particular insufficient target capacity must fail, never delete the column.
+fn run_native_temporal_cast(
+    api: &mut TestApi,
+    source: &str,
+    value: &quaint::ValueType<'_>,
+    target: &str,
+    columns: &[String],
+    buffers: &mut CastBuffers<'_>,
+) {
+    let sql_type = match target {
+        "UnsignedInt" => "sys.uint4".to_owned(),
+        "UnsignedBigInt" => "sys.uint8".to_owned(),
+        _ => target.to_ascii_uppercase(),
+    };
+    let insert = expand_cases(
+        source,
+        value,
+        (&[target], false),
+        &mut buffers.dm1,
+        &mut buffers.dm2,
+        columns,
+    );
+    api.schema_push_w_datasource(buffers.dm1.clone()).send().assert_green();
+    api.raw_cmd(&insert);
+    let conn = tok(quaint::single::Quaint::new(api.connection_string())).unwrap();
+    let original = tok(conn.query_raw("SELECT col0::text AS value FROM `Test`", &[])).unwrap();
+    let expected = tok(conn.query_raw(
+        &format!("SELECT CAST(CAST(col0 AS {sql_type}) AS TEXT) AS value FROM `Test`"),
+        &[],
+    ));
+    match expected {
+        Ok(expected) => {
+            api.schema_push_w_datasource(buffers.dm2.clone())
+                .force(true)
+                .send()
+                .assert_executable()
+                .assert_has_executed_steps();
+            let actual = tok(conn.query_raw("SELECT col0::text AS value FROM `Test`", &[])).unwrap();
+            assert_eq!(
+                actual.first().unwrap()[0],
+                expected.first().unwrap()[0],
+                "{source} -> {target}"
+            );
+            api.schema_push_w_datasource(buffers.dm2.clone())
+                .send()
+                .assert_green()
+                .assert_no_steps();
+        }
+        Err(native_error) => {
+            let error = api
+                .schema_push_w_datasource(buffers.dm2.clone())
+                .force(true)
+                .send_unwrap_err();
+            assert!(
+                error.to_string().contains(native_error.original_message().unwrap()),
+                "{source} -> {target}: {error}, native: {native_error}"
+            );
+            let actual = tok(conn.query_raw("SELECT col0::text AS value FROM `Test`", &[])).unwrap();
+            assert_eq!(actual.first().unwrap()[0], original.first().unwrap()[0]);
+            api.schema_push_w_datasource(buffers.dm1.clone())
+                .send()
+                .assert_green()
+                .assert_no_steps();
+        }
+    }
+    api.raw_cmd("DROP TABLE `Test`");
+}
+
 fn run_cast_group(
     api: &mut TestApi,
     from_type: &str,
@@ -974,35 +946,6 @@ fn run_cast_group(
 
     api.schema_push_w_datasource(dm1.clone()).send().assert_green();
     api.raw_cmd(&insert);
-
-    // A cast can exist while this particular source value exceeds the target
-    // range. It must fail and preserve the source, rather than expect success
-    // from the former unbounded uint4 alias.
-    let value = match test_value {
-        quaint::ValueType::Int32(Some(value)) => Some(i64::from(*value)),
-        quaint::ValueType::Int64(Some(value)) => Some(*value),
-        _ => None,
-    };
-    if let Some(value) = value
-        && to_types.iter().any(|target| match *target {
-            "UnsignedTinyInt" => !(0..=255).contains(&value),
-            "UnsignedSmallInt" => !(0..=65535).contains(&value),
-            "UnsignedMediumInt" => !(0..=16777215).contains(&value),
-            _ => false,
-        })
-        && !matches!(cast_kind, CastKind::Impossible)
-    {
-        let error = api.schema_push_w_datasource(dm2.clone()).force(true).send_unwrap_err();
-        assert!(error.to_string().contains("_range"), "{error}");
-        api.schema_push_w_datasource(dm1.clone())
-            .send()
-            .assert_green()
-            .assert_no_steps();
-        api.query_raw(&format!("SELECT `{}`::bigint AS n FROM `Test`", colnames[0]), &[])
-            .assert_single_row(|row| row.assert_int_value("n", value));
-        api.raw_cmd("DROP TABLE `Test`");
-        return;
-    }
 
     match cast_kind {
         CastKind::Safe => api.schema_push_w_datasource(dm2.clone()).send().assert_green(),
@@ -1120,18 +1063,14 @@ fn all_supported_native_types_can_be_created_and_reintrospected(api: TestApi) {
             intValue          Int?     @db.Int
             unsignedInt       Int?     @db.UnsignedInt
             smallInt          Int?     @db.SmallInt
-            unsignedSmallInt  Int?     @db.UnsignedSmallInt
             tinyInt           Int?     @db.TinyInt
-            unsignedTinyInt   Int?     @db.UnsignedTinyInt
             mediumInt         Int?     @db.MediumInt
-            unsignedMediumInt Int?     @db.UnsignedMediumInt
             bigInt             BigInt?  @db.BigInt
             unsignedBigInt     BigInt?  @db.UnsignedBigInt
             decimalValue       Decimal? @db.Decimal(5, 3)
             floatValue         Float?   @db.Float
             doubleValue        Float?   @db.Double
             tinyIntBool        Boolean? @db.TinyInt
-            unsignedTinyBool   Boolean? @db.UnsignedTinyInt
             bitBool            Boolean? @db.Bit(1)
             bitValue           Bytes?   @db.Bit(8)
             charValue          String?  @db.Char(10)
@@ -1160,28 +1099,23 @@ fn all_supported_native_types_can_be_created_and_reintrospected(api: TestApi) {
         .assert_green()
         .assert_has_executed_steps();
     api.raw_cmd(
-        "INSERT INTO `NativeTypes` (`id`, `unsignedTinyInt`, `unsignedSmallInt`, `unsignedMediumInt`) VALUES (1, 255, 65535, 16777215)",
+        "INSERT INTO `NativeTypes` (`id`, `unsignedInt`, `unsignedBigInt`) VALUES (1, 4294967295, 9223372036854775807)",
     );
     api.assert_schema().assert_table("NativeTypes", |table| {
         let expected_native_types = [
             ("id", Some("Int")),
             ("intValue", Some("Int")),
-            // uint4/uint8 preserve unsigned values; validated bounded domains
-            // additionally retain the smaller MySQL types and their ranges.
+            // Only server-native uint4/uint8 are supported unsigned types.
             ("unsignedInt", Some("UnsignedInt")),
             ("smallInt", Some("SmallInt")),
-            ("unsignedSmallInt", Some("UnsignedSmallInt")),
             ("tinyInt", Some("TinyInt")),
-            ("unsignedTinyInt", Some("UnsignedTinyInt")),
             ("mediumInt", Some("MediumInt")),
-            ("unsignedMediumInt", Some("UnsignedMediumInt")),
             ("bigInt", Some("BigInt")),
             ("unsignedBigInt", Some("UnsignedBigInt")),
             ("decimalValue", Some("Decimal(5,3)")),
             ("floatValue", Some("Float")),
             ("doubleValue", Some("Double")),
             ("tinyIntBool", None),
-            ("unsignedTinyBool", None),
             ("bitBool", Some("Bit(1)")),
             ("bitValue", Some("Bit(8)")),
             ("charValue", Some("Char(10)")),
@@ -1206,7 +1140,7 @@ fn all_supported_native_types_can_be_created_and_reintrospected(api: TestApi) {
 
         expected_native_types
             .into_iter()
-            .fold(table.assert_columns_count(36), |table, (name, native_type)| {
+            .fold(table.assert_columns_count(32), |table, (name, native_type)| {
                 table.assert_column(name, |column| match native_type {
                     Some(native_type) => column.assert_native_type(native_type, KINGBASE_MYSQL),
                     None => column.assert_type_family(ColumnTypeFamily::Boolean),

@@ -942,3 +942,59 @@ fn kingbase_mysql_uses_independent_native_type_defaults() {
         );
     }
 }
+
+#[test]
+fn small_unsigned_native_types_are_rejected() {
+    let schema = indoc! {r#"
+        datasource db {
+          provider = "kingbase-mysql"
+        }
+
+        model Counter {
+          id Int @id
+          tiny Int @db.UnsignedTinyInt
+          small Int @db.UnsignedSmallInt
+          medium Int @db.UnsignedMediumInt
+        }
+    "#};
+    let expected = expect![[r#"
+        [1;91merror[0m: [1mError validating: Small unsigned integer native types are not supported by this Kingbase MySQL connector. Use a supported native type or migrate the column explicitly; Prisma does not emulate these types with domains or triggers.[0m
+          [1;94m-->[0m  [4mschema.prisma:7[0m
+        [1;94m   | [0m
+        [1;94m 6 | [0m  id Int @id
+        [1;94m 7 | [0m  tiny Int [1;91m@db.UnsignedTinyInt[0m
+        [1;94m   | [0m
+        [1;91merror[0m: [1mError validating: Small unsigned integer native types are not supported by this Kingbase MySQL connector. Use a supported native type or migrate the column explicitly; Prisma does not emulate these types with domains or triggers.[0m
+          [1;94m-->[0m  [4mschema.prisma:8[0m
+        [1;94m   | [0m
+        [1;94m 7 | [0m  tiny Int @db.UnsignedTinyInt
+        [1;94m 8 | [0m  small Int [1;91m@db.UnsignedSmallInt[0m
+        [1;94m   | [0m
+        [1;91merror[0m: [1mError validating: Small unsigned integer native types are not supported by this Kingbase MySQL connector. Use a supported native type or migrate the column explicitly; Prisma does not emulate these types with domains or triggers.[0m
+          [1;94m-->[0m  [4mschema.prisma:9[0m
+        [1;94m   | [0m
+        [1;94m 8 | [0m  small Int @db.UnsignedSmallInt
+        [1;94m 9 | [0m  medium Int [1;91m@db.UnsignedMediumInt[0m
+        [1;94m   | [0m
+    "#]];
+    expect_error(schema, &expected);
+}
+
+#[test]
+fn server_native_unsigned_types_and_boolean_remain_supported() {
+    assert_valid(indoc! {r#"
+        datasource db {
+          provider = "kingbase-mysql"
+        }
+
+        model Counter {
+          id Int @id
+          small Int @db.SmallInt
+          tiny Int @db.TinyInt
+          medium Int @db.MediumInt
+          unsigned Int @db.UnsignedInt
+          bigUnsigned BigInt @db.UnsignedBigInt
+          enabled Boolean
+        }
+    "#});
+}

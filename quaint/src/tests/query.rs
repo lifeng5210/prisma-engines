@@ -1466,8 +1466,39 @@ async fn newdecimal_conversion_is_handled_correctly(api: &mut dyn TestApi) -> cr
     let select = Select::default().value(sum(Value::int32(1)).alias("theone"));
     let result = api.conn().select(select).await?;
 
-    assert_eq!(Value::numeric("1.0".parse().unwrap()), result.into_single().unwrap()[0]);
+    let expected = if api.connector_tag().contains(Tags::KINGBASE_MYSQL) {
+        Value::int64(1)
+    } else {
+        Value::numeric("1.0".parse().unwrap())
+    };
+    assert_eq!(expected, result.into_single().unwrap()[0]);
 
+    if api.connector_tag().contains(Tags::KINGBASE_MYSQL) {
+        // Compare AST rendering against a direct server query, with explicit
+        // expected return types independently verified from server metadata.
+        for (parameter, expected) in [
+            (Value::int64(2), Value::numeric("2".parse().unwrap())),
+            (Value::float(1.5), Value::float(1.5)),
+            (Value::double(1.5), Value::double(1.5)),
+            (
+                Value::numeric("1.5".parse().unwrap()),
+                Value::numeric("1.5".parse().unwrap()),
+            ),
+            (
+                Value::numeric("12345678901234567890.1234567890123456789".parse().unwrap()),
+                Value::numeric("12345678901234567890.1234567890123456789".parse().unwrap()),
+            ),
+        ] {
+            let direct = api
+                .conn()
+                .query_raw_typed("SELECT SUM(?)", std::slice::from_ref(&parameter))
+                .await?;
+            assert_eq!(expected, direct.into_single().unwrap()[0]);
+            let select = Select::default().value(sum(parameter).alias("total"));
+            let actual = api.conn().select(select).await?;
+            assert_eq!(expected, actual.into_single().unwrap()[0]);
+        }
+    }
     Ok(())
 }
 
@@ -3111,8 +3142,12 @@ async fn json_gt_gte_lt_lte_fun_on_kingbase_oracle(api: &mut dyn TestApi) -> cra
     json_gt_gte_lt_lte(api, "json").await
 }
 
-#[cfg(feature = "postgresql")]
-#[test_each_connector(tags("postgresql"))]
+#[cfg(any(
+    feature = "postgresql",
+    feature = "kingbase-mysql-native",
+    feature = "kingbase-oracle-native"
+))]
+#[test_each_connector(tags("postgresql", "kingbase-mysql", "kingbase-oracle"))]
 async fn text_search_fun(api: &mut dyn TestApi) -> crate::Result<()> {
     let table = api
         .create_temp_table("name varchar(255), ingredients varchar(255)")
@@ -3158,11 +3193,50 @@ async fn text_search_fun(api: &mut dyn TestApi) -> crate::Result<()> {
     assert_eq!(row["name"], Value::from("Chicken Curry"));
     assert_eq!(row["ingredients"], Value::from("Chicken, Curry, Rice"));
 
+    if api
+        .connector_tag()
+        .intersects(Tags::KINGBASE_MYSQL | Tags::KINGBASE_ORACLE)
+    {
+        for (query, expected) in [
+            ("chicken & curry", vec!["Chicken Curry"]),
+            ("chicken | salad", vec!["Caesar Salad", "Chicken Curry"]),
+            ("chicken & !salad", vec!["Chicken Curry"]),
+            ("chicken <-> curry", vec!["Chicken Curry"]),
+            ("chick:*", vec!["Caesar Salad", "Chicken Curry"]),
+            ("!chicken", vec![]),
+        ] {
+            let search: Expression = text_search(&[col!("name"), col!("ingredients")]).into();
+            let rows = api
+                .conn()
+                .select(Select::from_table(&table).so_that(search.matches(query)))
+                .await?;
+            let mut names: Vec<_> = rows
+                .into_iter()
+                .map(|row| row["name"].as_str().unwrap().to_owned())
+                .collect();
+            names.sort();
+            assert_eq!(names, expected, "{query}");
+        }
+
+        // Malformed native tsquery is rejected by the database, not rewritten.
+        let search: Expression = text_search(&[col!("name")]).into();
+        let error = api
+            .conn()
+            .select(Select::from_table(&table).so_that(search.matches("chicken curry")))
+            .await
+            .unwrap_err();
+        assert_eq!(error.original_code(), Some("42601"));
+    }
+
     Ok(())
 }
 
-#[cfg(feature = "postgresql")]
-#[test_each_connector(tags("postgresql"))]
+#[cfg(any(
+    feature = "postgresql",
+    feature = "kingbase-mysql-native",
+    feature = "kingbase-oracle-native"
+))]
+#[test_each_connector(tags("postgresql", "kingbase-mysql", "kingbase-oracle"))]
 async fn text_search_relevance_fun(api: &mut dyn TestApi) -> crate::Result<()> {
     let table = api
         .create_temp_table("name varchar(255), ingredients varchar(255)")

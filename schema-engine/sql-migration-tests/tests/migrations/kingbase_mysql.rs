@@ -310,127 +310,14 @@ fn kb_remaining_shared_index_names_are_table_scoped(mut api: TestApi) {
 }
 
 #[test_connector(tags(KingbaseMysql))]
-fn kb_remaining_small_unsigned_ranges_round_trip(mut api: TestApi) {
-    use quaint::prelude::Queryable;
-    let source = "model SmallUnsigned {\n id Int @id\n tiny Int? @db.UnsignedTinyInt\n small Int? @db.UnsignedSmallInt\n medium Int? @db.UnsignedMediumInt\n }";
-    api.schema_push_w_datasource(source).send().assert_green();
-    api.schema_push_w_datasource(source)
-        .send()
-        .assert_green()
-        .assert_no_steps();
-    api.raw_cmd("INSERT INTO `SmallUnsigned` VALUES (1,255,65535,16777215),(2,NULL,NULL,NULL)");
-    let conn = tok(quaint::single::Quaint::new(api.connection_string())).unwrap();
-    for (column, maximum) in [("tiny", 255), ("small", 65535), ("medium", 16777215)] {
-        for value in [-1, maximum + 1] {
-            let error =
-                tok(conn.raw_cmd(&format!("UPDATE `SmallUnsigned` SET `{column}`={value} WHERE id=1"))).unwrap_err();
-            assert!(
-                matches!(error.original_code(), Some("23514" | "22003" | "22P02")),
-                "{error:?}"
-            );
-        }
-        api.query_raw(
-            &format!("SELECT `{column}`::bigint AS n FROM `SmallUnsigned` WHERE id=1"),
-            &[],
-        )
-        .assert_single_row(|row| row.assert_int_value("n", maximum));
-    }
-    api.schema_push_w_datasource(source)
-        .send()
-        .assert_green()
-        .assert_no_steps();
-    let widened = source.replace("UnsignedTinyInt", "UnsignedSmallInt");
-    api.schema_push_w_datasource(&widened)
-        .force(true)
-        .send()
-        .assert_executable()
-        .assert_has_executed_steps();
-    api.raw_cmd("UPDATE `SmallUnsigned` SET tiny=256 WHERE id=1");
-    api.schema_push_w_datasource(&widened)
-        .send()
-        .assert_green()
-        .assert_no_steps();
-    let error = api.schema_push_w_datasource(source).force(true).send_unwrap_err();
-    assert!(error.to_string().contains("__prisma_uint8_range"), "{error}");
-    api.query_raw("SELECT tiny::bigint AS n FROM `SmallUnsigned` WHERE id=1", &[])
-        .assert_single_row(|row| row.assert_int_value("n", 256));
-    api.schema_push_w_datasource(&widened)
-        .send()
-        .assert_green()
-        .assert_no_steps();
-}
-
-#[test_connector(tags(KingbaseMysql))]
-fn kb_remaining_small_unsigned_autoincrement_and_relations(mut api: TestApi) {
-    use quaint::prelude::Queryable;
-    for (native, maximum) in [
-        ("UnsignedTinyInt", 255),
-        ("UnsignedSmallInt", 65535),
-        ("UnsignedMediumInt", 16777215),
-    ] {
-        let schema = format!(
-            "model AutoParent {{\n id Int @id @default(autoincrement()) @db.{native}\n children AutoChild[]\n }}\n\
-            model AutoChild {{\n id Int @id\n parentId Int @db.{native}\n parent AutoParent @relation(fields:[parentId],references:[id])\n }}"
-        );
-        api.schema_push_w_datasource(&schema).send().assert_green();
-        api.raw_cmd("INSERT INTO `AutoParent` DEFAULT VALUES");
-        api.raw_cmd("INSERT INTO `AutoChild` VALUES (1,1)");
-        let conn = tok(quaint::single::Quaint::new(api.connection_string())).unwrap();
-        tok(conn.execute_raw("UPDATE `AutoChild` SET parentId=? WHERE id=?", &[1.into(), 1.into()])).unwrap();
-        let error = tok(conn.raw_cmd(&format!("INSERT INTO `AutoParent` (id) VALUES ({})", maximum + 1))).unwrap_err();
-        assert_eq!(error.original_code(), Some("23514"), "{error:?}");
-        api.query_raw("SELECT id::bigint AS n FROM `AutoParent`", &[])
-            .assert_single_row(|row| row.assert_int_value("n", 1));
-        api.schema_push_w_datasource(&schema)
-            .send()
-            .assert_green()
-            .assert_no_steps();
-        if native == "UnsignedTinyInt" {
-            let widened = schema.replace("UnsignedTinyInt", "UnsignedSmallInt");
-            api.schema_push_w_datasource(&widened)
-                .force(true)
-                .send()
-                .assert_executable()
-                .assert_warnings(&["You are about to alter the column `id` on the `AutoParent` table, which contains 1 non-null values. The data in that column will be cast from `UnsignedTinyInt` to `UnsignedSmallInt`.".into(), "You are about to alter the column `parentId` on the `AutoChild` table, which contains 1 non-null values. The data in that column will be cast from `UnsignedTinyInt` to `UnsignedSmallInt`.".into()]);
-            api.raw_cmd("INSERT INTO `AutoParent` (id) VALUES (256)");
-            let narrowed = widened.replace(
-                "@default(autoincrement()) @db.UnsignedSmallInt",
-                "@default(autoincrement()) @db.UnsignedTinyInt",
-            );
-            let error = api.schema_push_w_datasource(&narrowed).force(true).send_unwrap_err();
-            assert!(error.to_string().contains("Value out of range"), "{error}");
-            api.schema_push_w_datasource(&widened)
-                .send()
-                .assert_green()
-                .assert_no_steps();
-            let error = tok(conn.raw_cmd("INSERT INTO `AutoParent` (id) VALUES (65536)")).unwrap_err();
-            assert_eq!(
-                error.original_code(),
-                Some("23514"),
-                "guard must survive rollback: {error:?}"
-            );
-            api.query_raw("SELECT count(*)::int AS n FROM `AutoParent`", &[])
-                .assert_single_row(|row| row.assert_int_value("n", 2));
-        }
-        api.raw_cmd("DROP TABLE `AutoChild`; DROP TABLE `AutoParent`");
-    }
-}
-
-#[test_connector(tags(KingbaseMysql))]
-fn kb_remaining_unsigned_domain_collision_is_rejected(mut api: TestApi) {
-    api.raw_cmd("CREATE DOMAIN public.__prisma_uint8 AS sys.uint4 CHECK(VALUE <= 999)");
-    let schema = "model Collision {\n id Int @id\n value Int @db.UnsignedTinyInt\n }";
-    let error = api.schema_push_w_datasource(schema).send_unwrap_err();
-    assert!(error.to_string().contains("incompatible definition"), "{error}");
-}
-
-#[test_connector(tags(KingbaseMysql))]
 fn kb_remaining_native_metadata_migrations_replay(mut api: TestApi) {
     let migrations = api.create_migrations_directory();
     let initial = api.datamodel_with_provider(
-        "model Left {\n id Int @id @default(autoincrement()) @db.UnsignedTinyInt\n value Int @db.UnsignedTinyInt\n @@unique([value], map: \"shared\")\n }\n model Right {\n id Int @id\n value Int @db.UnsignedTinyInt\n @@index([value], map: \"shared\")\n }",
+        "model Left {\n id Int @id @default(autoincrement())\n value Int @db.UnsignedInt\n @@unique([value], map: \"shared\")\n }\n model Right {\n id Int @id\n value Int @db.UnsignedInt\n @@index([value], map: \"shared\")\n }",
     );
-    let widened = initial.replace("UnsignedTinyInt", "UnsignedSmallInt");
+    let widened = initial
+        .replace("@db.UnsignedInt", "@db.BigInt")
+        .replace("value Int", "value BigInt");
     let renamed = widened.replace("\"shared\"", "\"renamed\"");
     for (name, schema) in [("01_init", &initial), ("02_widen", &widened), ("03_rename", &renamed)] {
         api.create_migration(name, schema, &migrations).send_sync();
@@ -787,309 +674,109 @@ fn descending_unique_index_migrations_can_be_replayed(api: TestApi) {
 }
 
 #[test_connector(tags(KingbaseMysql))]
-fn tinyblob_values_can_be_migrated_to_bits(api: TestApi) {
-    assert_blob_values_can_be_migrated_to_bits(api, "TinyBlob");
-}
-
-#[test_connector(tags(KingbaseMysql))]
-fn temporal_values_fit_decimal_integer_capacity(mut api: TestApi) {
-    use psl::parser_database::NoExtensionTypes;
-    use schema_core::schema_connector::DiffTarget;
-
+fn temporal_values_use_native_numeric_conversion(mut api: TestApi) {
     for (native, precision, input, expected) in [
         ("Date", 10, "2026-10-24", "20261024.00"),
-        ("Time(3)", 8, "12:34:56.789", "123456.00"),
+        ("Time(3)", 8, "12:34:56.789", "123456.79"),
         ("DateTime(3)", 16, "2026-10-24 12:34:56.789", "20261024123456.00"),
-        ("Timestamp(3)", 16, "2026-10-24 12:34:56.789", "20261024123456.00"),
+        ("Timestamp(3)", 16, "2026-10-24 12:34:56.789", "20261024123456.80"),
     ] {
         let source = format!("model TemporalDecimal {{\n id Int @id\n value DateTime? @db.{native}\n }}");
-        let target = api.datamodel_with_provider(&format!(
-            "model TemporalDecimal {{\n id Int @id\n value Decimal? @db.Decimal({precision},2)\n }}"
-        ));
+        let target = format!("model TemporalDecimal {{\n id Int @id\n value Decimal? @db.Decimal({precision},2)\n }}");
         api.schema_push_w_datasource(&source).send().assert_green();
         api.raw_cmd(&format!(
             "INSERT INTO `TemporalDecimal` VALUES (1, '{input}'), (2, NULL)"
         ));
-
-        let warnings = [format!(
-            "You are about to alter the column `value` on the `TemporalDecimal` table, which contains 1 non-null values. \
-             The data in that column will be cast from `{native}` to `Decimal({precision},2)`."
-        ).into()];
-        api.schema_push(target.clone())
-            .send()
-            .assert_executable()
-            .assert_warnings(&warnings)
-            .assert_no_steps();
-        api.schema_push_w_datasource(&source)
-            .send()
-            .assert_green()
-            .assert_no_steps();
-        let script = api.connector_diff(
-            DiffTarget::Database,
-            DiffTarget::Datamodel(vec![("schema.prisma".into(), target.clone().into())], &NoExtensionTypes),
-            None,
-        );
-        assert!(script.contains("USING"), "{script}");
-        assert!(!script.contains("DROP COLUMN"), "{script}");
-        api.schema_push(target.clone())
+        // Independently evaluate the server CAST before executing generated DDL.
+        api.query_raw(&format!("SELECT CASE WHEN CAST(value AS DECIMAL({precision},2)) = {expected} THEN 1 ELSE 0 END AS matches FROM `TemporalDecimal` WHERE id=1"), &[])
+            .assert_single_row(|row| row.assert_int_value("matches", 1));
+        api.schema_push_w_datasource(&target)
             .force(true)
             .send()
             .assert_executable()
-            .assert_warnings(&warnings)
             .assert_has_executed_steps();
-        api.query_raw(
-            &format!("SELECT COUNT(*)::int AS n FROM `TemporalDecimal` WHERE (id = 1 AND value = {expected}) OR (id = 2 AND value IS NULL)"),
-            &[],
-        ).assert_single_row(|row| row.assert_int_value("n", 2));
-        api.schema_push(target).send().assert_green().assert_no_steps();
+        api.query_raw(&format!("SELECT COUNT(*)::int AS n FROM `TemporalDecimal` WHERE (id=1 AND value={expected}) OR (id=2 AND value IS NULL)"), &[])
+            .assert_single_row(|row| row.assert_int_value("n", 2));
+        api.schema_push_w_datasource(&target)
+            .send()
+            .assert_green()
+            .assert_no_steps();
         api.raw_cmd("DROP TABLE `TemporalDecimal`");
     }
 }
 
 #[test_connector(tags(KingbaseMysql))]
-fn undersized_temporal_decimal_rebuild_checks_required_rows(mut api: TestApi) {
-    let source = "model TemporalDecimal {\n id Int @id\n value DateTime @db.Date\n }";
-    let target = "model TemporalDecimal {\n id Int @id\n value Decimal @db.Decimal(8,2)\n }";
-    api.schema_push_w_datasource(source).send().assert_green();
-    // No data to lose: an empty required column can be recreated.
-    api.schema_push_w_datasource(target)
-        .send()
-        .assert_green()
-        .assert_has_executed_steps();
-    api.schema_push_w_datasource(target)
-        .send()
-        .assert_green()
-        .assert_no_steps();
-    api.raw_cmd("DROP TABLE `TemporalDecimal`");
-
-    api.schema_push_w_datasource(source).send().assert_green();
-    api.raw_cmd("INSERT INTO `TemporalDecimal` VALUES (1, '2026-10-24')");
-    let errors = ["Changed the type of `value` on the `TemporalDecimal` table. No cast exists, the column would be dropped and recreated, which cannot be done since the column is required and there is data in the table.".to_owned()];
-    for force in [false, true] {
-        api.schema_push_w_datasource(target)
-            .force(force)
-            .send()
-            .assert_unexecutable(&errors)
-            .assert_no_steps();
+fn native_temporal_overflow_preserves_columns_and_rows(mut api: TestApi) {
+    use psl::parser_database::NoExtensionTypes;
+    use schema_core::schema_connector::DiffTarget;
+    for (arity, default) in [("", ""), ("?", ""), ("", "@default(0)")] {
+        let source = format!("model TemporalDecimal {{\n id Int @id\n value DateTime{arity} @db.Date\n }}");
+        let target = api.datamodel_with_provider(&format!(
+            "model TemporalDecimal {{\n id Int @id\n value Decimal{arity} @db.Decimal(8,2) {default}\n }}"
+        ));
+        api.schema_push_w_datasource(&source).send().assert_green();
+        api.raw_cmd("INSERT INTO `TemporalDecimal` VALUES (1, '2026-10-24')");
+        let script = api.connector_diff(
+            DiffTarget::Database,
+            DiffTarget::Datamodel(vec![("schema.prisma".into(), target.clone().into())], &NoExtensionTypes),
+            None,
+        );
+        assert!(
+            !script.contains("DROP COLUMN") && !script.contains("to_char"),
+            "{script}"
+        );
+        let error = api.schema_push(target).force(true).send_unwrap_err();
+        assert!(error.to_string().contains("numeric field overflow"), "{error}");
         api.query_raw(
-            "SELECT to_char(value, 'YYYY-MM-DD') AS original FROM `TemporalDecimal` WHERE id = 1",
+            "SELECT to_char(value, 'YYYY-MM-DD') AS original FROM `TemporalDecimal` WHERE id=1",
             &[],
         )
         .assert_single_row(|row| row.assert_text_value("original", "2026-10-24"));
-        api.schema_push_w_datasource(source)
+        api.schema_push_w_datasource(&source)
             .send()
             .assert_green()
             .assert_no_steps();
+        api.raw_cmd("DROP TABLE `TemporalDecimal`");
     }
 }
 
 #[test_connector(tags(KingbaseMysql))]
-fn undersized_temporal_decimal_rebuild_warns_before_discarding_values(mut api: TestApi) {
-    let source = "model TemporalDecimal {\n id Int @id\n value DateTime? @db.Date\n }";
-    let target = "model TemporalDecimal {\n id Int @id\n value Decimal? @db.Decimal(8,2)\n }";
-    api.schema_push_w_datasource(source).send().assert_green();
-    api.raw_cmd("INSERT INTO `TemporalDecimal` VALUES (1, '2026-10-24')");
-    let warnings = ["The `value` column on the `TemporalDecimal` table would be dropped and recreated. This will lead to data loss.".into()];
-    api.schema_push_w_datasource(target)
-        .send()
-        .assert_executable()
-        .assert_warnings(&warnings)
-        .assert_no_steps();
-    api.query_raw(
-        "SELECT to_char(value, 'YYYY-MM-DD') AS original FROM `TemporalDecimal` WHERE id = 1",
-        &[],
-    )
-    .assert_single_row(|row| row.assert_text_value("original", "2026-10-24"));
-    // Explicitly forced destructive migration: the row/id survives, the old
-    // value does not. This must never be asserted as value-preserving casting.
-    api.schema_push_w_datasource(target)
-        .force(true)
-        .send()
-        .assert_executable()
-        .assert_warnings(&warnings)
-        .assert_has_executed_steps();
-    api.query_raw(
-        "SELECT COUNT(*)::int AS n FROM `TemporalDecimal` WHERE id = 1 AND value IS NULL",
-        &[],
-    )
-    .assert_single_row(|row| row.assert_int_value("n", 1));
-    api.schema_push_w_datasource(target)
-        .send()
-        .assert_green()
-        .assert_no_steps();
-}
-
-#[test_connector(tags(KingbaseMysql))]
-fn blob_values_can_be_migrated_to_bits(api: TestApi) {
-    assert_blob_values_can_be_migrated_to_bits(api, "Blob");
-}
-
-#[test_connector(tags(KingbaseMysql))]
-fn mediumblob_values_can_be_migrated_to_bits(api: TestApi) {
-    assert_blob_values_can_be_migrated_to_bits(api, "MediumBlob");
-}
-
-#[test_connector(tags(KingbaseMysql))]
-fn longblob_values_can_be_migrated_to_bits(api: TestApi) {
-    assert_blob_values_can_be_migrated_to_bits(api, "LongBlob");
-}
-
-fn assert_blob_values_can_be_migrated_to_bits(mut api: TestApi, native_type: &str) {
+fn blob_to_bit_uses_native_errors_and_preserves_source(mut api: TestApi) {
     use psl::parser_database::NoExtensionTypes;
     use schema_core::schema_connector::DiffTarget;
-
-    api.raw_cmd("SET sql_mode = 'STRICT_ALL_TABLES'");
-    let source = format!(
-        "model BlobCast {{\n id Int @id\n b1 Bytes? @db.{native_type}\n b8 Bytes? @db.{native_type}\n \
-         b16 Bytes? @db.{native_type}\n b64 Bytes? @db.{native_type}\n }}"
-    );
-    let target = api.datamodel_with_provider(
-        "model BlobCast {\n id Int @id\n b1 Boolean? @db.Bit(1)\n b8 Bytes? @db.Bit(8)\n \
-         b16 Bytes? @db.Bit(16)\n b64 Bytes? @db.Bit(64)\n }",
-    );
-    api.schema_push_w_datasource(&source).send().assert_green();
-    api.raw_cmd(&format!(
-        r#"INSERT INTO `BlobCast` VALUES
-        (1, NULL, NULL, NULL, NULL),
-        (2, '', '', '', ''),
-        (3, '\xff'::bytea, '\xff'::bytea, '\xff'::bytea, '\xff'::bytea),
-        (4, '1', '255', '256', '18446744073709551615'),
-        (5, '1e2', '12.7', '12abc', '-1'),
-        (6, 'abc', '  +42  ', '\x31320033'::bytea, '9223372036854775808'),
-        (7, '0', '0', '0', '-9223372036854775809'),
-        (8, concat(repeat('0', 100), '1')::{native_type}, concat(repeat('0', 100), '255')::{native_type},
-         concat(repeat('0', 100), '65535')::{native_type}, repeat('9', 100)::{native_type})"#,
-    ));
-
-    let warnings: Vec<_> = [1, 8, 16, 64]
-        .map(|width| {
-            format!(
-                "You are about to alter the column `b{width}` on the `BlobCast` table, which contains 7 non-null values. \
-                 The data in that column will be cast from `{native_type}` to `Bit({width})`."
-            )
-            .into()
-        })
-        .into();
-    api.schema_push(target.clone())
-        .send()
-        .assert_executable()
-        .assert_warnings(&warnings)
-        .assert_no_steps();
-    api.query_raw("SELECT b8::text AS original FROM `BlobCast` WHERE id = 4", &[])
-        .assert_single_row(|row| row.assert_text_value("original", "255"));
-
-    let script = api.connector_diff(
-        DiffTarget::Database,
-        DiffTarget::Datamodel(vec![("schema.prisma".into(), target.clone().into())], &NoExtensionTypes),
-        None,
-    );
-    assert!(script.contains("USING"));
-    assert!(!script.contains("DROP COLUMN"));
-    api.schema_push(target.clone())
-        .force(true)
-        .send()
-        .assert_executable()
-        .assert_warnings(&warnings)
-        .assert_has_executed_steps();
-
-    // Expected decimal-prefix conversion results were independently checked on
-    // MySQL 8.0.46, including signed saturation and non-UTF-8 / NUL bytes.
-    let expected = [
-        [0, 0, 0, 0],
-        [0, 0, 0, 0],
-        [1, 255, 256, i64::MAX],
-        [1, 12, 12, -1],
-        [0, 42, 12, i64::MAX],
-        [0, 0, 0, i64::MIN],
-        [1, 255, 65535, i64::MAX],
-    ];
-    for (offset, values) in expected.into_iter().enumerate() {
-        for (width, value) in [1, 8, 16, 64].into_iter().zip(values) {
-            api.query_raw(
-                &format!(
-                    "SELECT CASE WHEN b{width} IS NOT DISTINCT FROM ({value})::bigint::BIT({width}) \
-                     THEN 1 ELSE 0 END AS matches FROM `BlobCast` WHERE id = {}",
-                    offset + 2,
-                ),
-                &[],
-            )
-            .assert_single_row(|row| row.assert_int_value("matches", 1));
+    for native in ["TinyBlob", "Blob", "MediumBlob", "LongBlob"] {
+        for (scalar, width) in [("Boolean", 1), ("Bytes", 8), ("Bytes", 64)] {
+            for mode in ["", "STRICT_ALL_TABLES"] {
+                api.raw_cmd(&format!("SET sql_mode = '{mode}'"));
+                let source = format!("model BlobCast {{\n id Int @id\n value Bytes? @db.{native}\n }}");
+                let target = api.datamodel_with_provider(&format!(
+                    "model BlobCast {{\n id Int @id\n value {scalar}? @db.Bit({width})\n }}"
+                ));
+                api.schema_push_w_datasource(&source).send().assert_green();
+                let script = api.connector_diff(
+                    DiffTarget::Database,
+                    DiffTarget::Datamodel(vec![("schema.prisma".into(), target.clone().into())], &NoExtensionTypes),
+                    None,
+                );
+                assert!(
+                    script.contains("MODIFY") && !script.contains("DROP COLUMN") && !script.contains("USING"),
+                    "{script}"
+                );
+                // Unsupported casts fail even on an empty table.
+                let error = api.schema_push(target.clone()).force(true).send_unwrap_err();
+                assert!(error.to_string().contains("cannot be cast automatically"), "{error}");
+                api.raw_cmd("INSERT INTO `BlobCast` VALUES (1,'12abc'), (2,NULL), (3,'256')");
+                let error = api.schema_push(target).force(true).send_unwrap_err();
+                assert!(error.to_string().contains("cannot be cast automatically"), "{error}");
+                api.query_raw("SELECT COUNT(*)::int AS n FROM `BlobCast` WHERE (id=1 AND value::text='12abc') OR (id=2 AND value IS NULL) OR (id=3 AND value::text='256')", &[])
+                    .assert_single_row(|row| row.assert_int_value("n", 3));
+                api.schema_push_w_datasource(&source)
+                    .send()
+                    .assert_green()
+                    .assert_no_steps();
+                api.raw_cmd("DROP TABLE `BlobCast`");
+            }
         }
-    }
-    api.query_raw(
-        "SELECT CASE WHEN b1 IS NULL AND b8 IS NULL AND b16 IS NULL AND b64 IS NULL \
-         THEN 1 ELSE 0 END AS matches FROM `BlobCast` WHERE id = 1",
-        &[],
-    )
-    .assert_single_row(|row| row.assert_int_value("matches", 1));
-    api.query_raw("SELECT COUNT(*)::int AS n FROM `BlobCast`", &[])
-        .assert_single_row(|row| row.assert_int_value("n", 8));
-    api.schema_push(target).send().assert_green().assert_no_steps();
-}
-
-#[test_connector(tags(KingbaseMysql))]
-fn empty_blob_columns_can_be_migrated_to_bits(mut api: TestApi) {
-    let source = "model EmptyBlob {\n id Int @id\n a Bytes @db.TinyBlob\n b Bytes @db.Blob\n \
-                  c Bytes @db.MediumBlob\n d Bytes @db.LongBlob\n }";
-    let target = "model EmptyBlob {\n id Int @id\n a Boolean @db.Bit(1)\n b Bytes @db.Bit(8)\n \
-                  c Bytes @db.Bit(16)\n d Bytes @db.Bit(64)\n }";
-    api.schema_push_w_datasource(source).send().assert_green();
-    api.schema_push_w_datasource(target)
-        .send()
-        .assert_green()
-        .assert_has_executed_steps();
-    api.schema_push_w_datasource(target)
-        .send()
-        .assert_green()
-        .assert_no_steps();
-}
-
-#[test_connector(tags(KingbaseMysql))]
-fn blob_to_bit_overflow_in_strict_mode_preserves_source(mut api: TestApi) {
-    // C010 accepts STRICT_ALL_TABLES, but rejects STRICT_TRANS_TABLES.
-    api.raw_cmd("SET sql_mode = 'STRICT_ALL_TABLES'");
-    for value in ["256", "-1"] {
-        for native_type in ["TinyBlob", "Blob", "MediumBlob", "LongBlob"] {
-            let source = format!("model BlobRange {{\n id Int @id\n v Bytes @db.{native_type}\n }}");
-            let target = "model BlobRange {\n id Int @id\n v Bytes @db.Bit(8)\n }";
-            api.schema_push_w_datasource(&source).send().assert_green();
-            api.raw_cmd(&format!("INSERT INTO `BlobRange` VALUES (1, '{value}')"));
-            let error = api.schema_push_w_datasource(target).force(true).send_unwrap_err();
-            assert!(error.to_string().contains("out of range for BIT(8)"), "{error}");
-            api.query_raw("SELECT v::text AS original FROM `BlobRange` WHERE id = 1", &[])
-                .assert_single_row(|row| row.assert_text_value("original", value));
-            api.schema_push_w_datasource(&source)
-                .send()
-                .assert_green()
-                .assert_no_steps();
-            api.raw_cmd("DROP TABLE `BlobRange`");
-        }
-    }
-}
-
-#[test_connector(tags(KingbaseMysql))]
-fn blob_to_bit_overflow_without_strict_mode_saturates(mut api: TestApi) {
-    api.raw_cmd("SET sql_mode = ''");
-    for native_type in ["TinyBlob", "Blob", "MediumBlob", "LongBlob"] {
-        let source = format!("model BlobRange {{\n id Int @id\n v Bytes @db.{native_type}\n }}");
-        let target = "model BlobRange {\n id Int @id\n v Bytes @db.Bit(8)\n }";
-        api.schema_push_w_datasource(&source).send().assert_green();
-        api.raw_cmd("INSERT INTO `BlobRange` VALUES (1, '256'), (2, '-1')");
-        api.schema_push_w_datasource(target)
-            .force(true)
-            .send()
-            .assert_executable()
-            .assert_has_executed_steps();
-        api.query_raw(
-            "SELECT COUNT(*)::int AS n FROM `BlobRange` WHERE v = 255::bigint::BIT(8)",
-            &[],
-        )
-        .assert_single_row(|row| row.assert_int_value("n", 2));
-        api.schema_push_w_datasource(target)
-            .send()
-            .assert_green()
-            .assert_no_steps();
-        api.raw_cmd("DROP TABLE `BlobRange`");
     }
 }
 
@@ -2063,4 +1750,52 @@ fn foreign_keys_and_their_covering_index_can_be_deleted_together(api: TestApi) {
     api.assert_schema().assert_table("Transaction", |table| {
         table.assert_foreign_keys_count(0).assert_indexes_count(0)
     });
+}
+
+#[test_connector(tags(KingbaseMysql))]
+fn legacy_unsigned_objects_are_not_recreated_or_dropped(mut api: TestApi) {
+    use quaint::prelude::Queryable;
+    api.raw_cmd(r#"CREATE DOMAIN public.__prisma_uint8 AS sys.uint4 CHECK(VALUE <= 255);
+CREATE DOMAIN public.__prisma_uint16 AS sys.uint4 CHECK(VALUE <= 65535);
+CREATE DOMAIN public.__prisma_uint24 AS sys.uint4 CHECK(VALUE <= 16777215);
+CREATE TABLE legacy_ranges(id INTEGER PRIMARY KEY, tiny public.__prisma_uint8, small public.__prisma_uint16, medium public.__prisma_uint24);
+INSERT INTO legacy_ranges VALUES (7,255,65535,16777215);
+CREATE TABLE legacy_auto(id INTEGER GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY);
+CREATE FUNCTION public.__prisma_unsigned_auto_guard() RETURNS trigger LANGUAGE plpgsql AS 'DECLARE v bigint; BEGIN v := jsonb_extract_path_text(to_jsonb(NEW),TG_ARGV[0])::bigint; IF v < 0 OR v > TG_ARGV[1]::bigint THEN RAISE EXCEPTION ''Value out of range for small unsigned integer'' USING ERRCODE=''23514''; END IF; RETURN NEW; END;';
+CREATE TRIGGER __prisma_unsigned_auto AFTER INSERT OR UPDATE ON legacy_auto FOR EACH ROW EXECUTE FUNCTION public.__prisma_unsigned_auto_guard('id','255');
+INSERT INTO legacy_auto VALUES (7);"#);
+    let schema = r#"
+        model legacy_ranges {
+          id Int @id
+          tiny Unsupported("\"public\".\"__prisma_uint8\"")?
+          small Unsupported("\"public\".\"__prisma_uint16\"")?
+          medium Unsupported("\"public\".\"__prisma_uint24\"")?
+        }
+        model legacy_auto {
+          id Unsupported("INTEGER") @id
+          @@ignore
+        }
+    "#;
+    api.schema_push_w_datasource(schema)
+        .send()
+        .assert_green()
+        .assert_no_steps();
+    api.query_raw(
+        "SELECT tiny::bigint AS tiny, small::bigint AS small, medium::bigint AS medium FROM legacy_ranges WHERE id=7",
+        &[],
+    )
+    .assert_single_row(|row| {
+        row.assert_int_value("tiny", 255)
+            .assert_int_value("small", 65535)
+            .assert_int_value("medium", 16777215)
+    });
+    let conn = tok(quaint::single::Quaint::new(api.connection_string())).unwrap();
+    let error = tok(conn.raw_cmd("INSERT INTO legacy_auto VALUES (256)")).unwrap_err();
+    assert_eq!(error.original_code(), Some("23514"));
+    api.query_raw("SELECT COUNT(*)::int AS n FROM legacy_auto WHERE id=7", &[])
+        .assert_single_row(|row| row.assert_int_value("n", 1));
+    api.schema_push_w_datasource(schema)
+        .send()
+        .assert_green()
+        .assert_no_steps();
 }

@@ -151,6 +151,11 @@ impl Connector for KingbaseMysqlDatamodelConnector {
         let error = self.native_instance_error(native_type_instance);
 
         match native_type {
+            UnsignedTinyInt | UnsignedSmallInt | UnsignedMediumInt => {
+                errors.push_error(crate::diagnostics::DatamodelError::new_validation_error(
+                    "Small unsigned integer native types are not supported by this Kingbase MySQL connector. Use a supported native type or migrate the column explicitly; Prisma does not emulate these types with domains or triggers.", span,
+                ));
+            }
             // V9R3C11 MySQL SQL reference, data types 2.2.8 (DECIMAL).
             Decimal(Some((precision, _))) if !(1..=1000).contains(precision) => {
                 errors.push_error(error.new_argument_m_out_of_range_error("Precision can range from 1 to 1000.", span))

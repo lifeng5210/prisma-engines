@@ -18,9 +18,7 @@ pub(crate) fn explicit_cast_supported(previous: Option<&KingbaseMySqlType>, next
         // BLOB values can be decoded as UTF-8 text, but there is no reliable
         // type-level conversion for arbitrary binary data to numeric, temporal,
         // or JSON values. Those changes must retain the destructive path.
-        // BIT is supported through the renderer's MySQL decimal-prefix
-        // conversion, rather than a direct BLOB-to-BIT cast.
-        return is_string(next) || is_binary(next);
+        return is_string(next) || (is_binary(next) && !is_bit(next));
     }
 
     if is_json(previous) && (is_numeric(next) || is_datetime(next) || is_bit(next)) {
@@ -43,12 +41,8 @@ pub(crate) fn explicit_cast_supported(previous: Option<&KingbaseMySqlType>, next
         return false;
     }
 
-    if is_datetime(previous) && is_numeric(next) && !datetime_numeric_cast_supported(previous, next) {
-        return false;
-    }
-
-    // Numeric-to-JSON uses to_json(), and datetime-to-numeric uses to_char()
-    // in the renderer; all remaining native families have an explicit cast
+    // Numeric-to-JSON uses to_json() in the renderer;
+    // all remaining native families have an explicit cast
     // representation in the Kingbase type system.
     true
 }
@@ -63,24 +57,6 @@ impl SqlSchemaDifferFlavour for KingbaseMysqlSchemaDifferFlavour {
 
     fn can_rename_index(&self) -> bool {
         true
-    }
-
-    fn primary_key_column_change_requires_recreation(&self, columns: MigrationPair<TableColumnWalker<'_>>) -> bool {
-        // These auto-increment types share INTEGER storage. Their range changes
-        // replace the guard atomically, without dropping the identity's PK.
-        ![columns.previous, columns.next].into_iter().all(|column| {
-            column.is_autoincrement()
-                && !column.column_type_family().is_boolean()
-                && matches!(
-                    column.column_native_type::<KingbaseMySqlType>(),
-                    Some(
-                        KingbaseMySqlType::Int
-                            | KingbaseMySqlType::UnsignedTinyInt
-                            | KingbaseMySqlType::UnsignedSmallInt
-                            | KingbaseMySqlType::UnsignedMediumInt
-                    )
-                )
-        })
     }
 
     fn can_cope_with_foreign_key_column_becoming_non_nullable(&self) -> bool {
@@ -130,6 +106,11 @@ impl SqlSchemaDifferFlavour for KingbaseMysqlSchemaDifferFlavour {
                 ) =>
             {
                 return Some(ColumnTypeChange::SafeCast);
+            }
+            // These conversions are delegated to the server. In particular an
+            // unsupported BLOB-to-BIT change must fail, never drop/recreate data.
+            (Some(previous), Some(next)) if native_conversion_attempt(previous, next) => {
+                return Some(ColumnTypeChange::RiskyCast);
             }
             (Some(previous), Some(next)) if !explicit_cast_supported(Some(previous), Some(next)) => {
                 return Some(ColumnTypeChange::NotCastable);
@@ -258,31 +239,8 @@ fn is_datetime(native_type: &KingbaseMySqlType) -> bool {
     )
 }
 
-fn datetime_numeric_cast_supported(previous: &KingbaseMySqlType, next: &KingbaseMySqlType) -> bool {
-    let required_digits = match previous {
-        KingbaseMySqlType::Date => 8,
-        KingbaseMySqlType::Time(_) => 6,
-        KingbaseMySqlType::DateTime(_) | KingbaseMySqlType::Timestamp(_) => 14,
-        _ => return false,
-    };
-
-    let capacity = match next {
-        KingbaseMySqlType::TinyInt | KingbaseMySqlType::UnsignedTinyInt => 3,
-        KingbaseMySqlType::SmallInt | KingbaseMySqlType::UnsignedSmallInt => 5,
-        KingbaseMySqlType::MediumInt | KingbaseMySqlType::UnsignedMediumInt => 7,
-        KingbaseMySqlType::Int | KingbaseMySqlType::UnsignedInt => 10,
-        KingbaseMySqlType::BigInt | KingbaseMySqlType::UnsignedBigInt => 19,
-        // DECIMAL(p, s) reserves s digits for the fractional part. The
-        // renderer's YYYYMMDD / HH24MISS / YYYYMMDDHH24MISS values need
-        // enough integer digits, not merely enough total precision.
-        KingbaseMySqlType::Decimal(Some((precision, scale))) => precision.saturating_sub(*scale),
-        KingbaseMySqlType::Decimal(None) => 10,
-        KingbaseMySqlType::Float | KingbaseMySqlType::Double => 38,
-        KingbaseMySqlType::Year => 4,
-        _ => return false,
-    };
-
-    capacity >= required_digits
+fn native_conversion_attempt(previous: &KingbaseMySqlType, next: &KingbaseMySqlType) -> bool {
+    (is_blob(previous) && is_bit(next)) || (is_datetime(previous) && is_numeric(next))
 }
 
 fn is_json(native_type: &KingbaseMySqlType) -> bool {
@@ -292,36 +250,6 @@ fn is_json(native_type: &KingbaseMySqlType) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn temporal_decimal_cast_requires_integer_capacity_after_scale() {
-        for (source, digits) in [
-            (KingbaseMySqlType::Date, 8),
-            (KingbaseMySqlType::Time(Some(3)), 6),
-            (KingbaseMySqlType::DateTime(Some(3)), 14),
-            (KingbaseMySqlType::Timestamp(Some(3)), 14),
-        ] {
-            for scale in [0, 2, 6, 1000 - digits] {
-                for (precision, expected) in [(digits + scale, true), (digits + scale - 1, false)] {
-                    assert_eq!(
-                        explicit_cast_supported(
-                            Some(&source),
-                            Some(&KingbaseMySqlType::Decimal(Some((precision, scale))))
-                        ),
-                        expected,
-                        "{source:?} -> Decimal({precision},{scale})",
-                    );
-                }
-            }
-        }
-        // A normalized Decimal(2,4) becomes (4,4), with no integer capacity.
-        for (precision, scale) in [(4, 4), (2, 4)] {
-            assert!(!explicit_cast_supported(
-                Some(&KingbaseMySqlType::Date),
-                Some(&KingbaseMySqlType::Decimal(Some((precision, scale)))),
-            ));
-        }
-    }
 
     fn temporal_decimal_migration(
         source: &str,
@@ -353,102 +281,48 @@ mod tests {
     }
 
     #[test]
-    fn sufficient_temporal_decimal_capacity_preserves_alter_column() {
-        use crate::sql_migration::{SqlMigration, SqlMigrationStep, TableChange};
-        for (source, target, format) in [
-            ("Date", "Decimal(10,2)", "YYYYMMDD"),
-            ("Time(3)", "Decimal(8,2)", "HH24MISS"),
-            ("DateTime(3)", "Decimal(16,2)", "YYYYMMDDHH24MISS"),
-            ("Timestamp(3)", "Decimal(16,2)", "YYYYMMDDHH24MISS"),
-        ] {
-            let migration = temporal_decimal_migration(source, target, "", "");
-            let migration_steps = migration.downcast_ref::<SqlMigration>();
-            let alters_column = migration_steps.steps.iter().any(|step| match step {
-                SqlMigrationStep::AlterTable(table) => table
-                    .changes
-                    .iter()
-                    .any(|change| matches!(change, TableChange::AlterColumn(_))),
-                _ => false,
-            });
-            assert!(alters_column, "{source} -> {target}");
-            let script = crate::apply_migration::render_script(
-                &migration,
-                &Default::default(),
-                &super::super::renderer::KingbaseMysqlRenderer,
-            )
-            .unwrap();
-            assert!(
-                script.contains(&format!("to_char(`value`, '{format}')::DECIMAL")),
-                "{script}"
-            );
-            assert!(!script.contains("DROP COLUMN"), "{script}");
-        }
-    }
-
-    #[test]
-    fn insufficient_temporal_decimal_capacity_plans_column_recreation() {
+    fn temporal_numeric_changes_are_delegated_without_column_recreation() {
         use crate::sql_migration::{SqlMigration, SqlMigrationStep, TableChange};
         for (source, target) in [
+            ("Date", "Decimal(10,2)"),
+            ("Time(3)", "Decimal(8,2)"),
+            ("DateTime(3)", "Decimal(16,2)"),
+            ("Timestamp(3)", "Decimal(16,2)"),
             ("Date", "Decimal(8,2)"),
-            ("Time(3)", "Decimal(6,2)"),
-            ("DateTime(3)", "Decimal(14,2)"),
-            ("Timestamp(3)", "Decimal(14,2)"),
             ("Date", "Decimal(2,4)"),
         ] {
-            let migration = temporal_decimal_migration(source, target, "", "");
-            let migration_steps = migration.downcast_ref::<SqlMigration>();
-            let recreates_column = migration_steps.steps.iter().any(|step| match step {
-                SqlMigrationStep::AlterTable(table) => table
-                    .changes
-                    .iter()
-                    .any(|change| matches!(change, TableChange::DropAndRecreateColumn { .. })),
-                _ => false,
-            });
-            assert!(recreates_column, "{source} -> {target}");
+            let migration = temporal_decimal_migration(source, target, "?", "");
+            let steps = &migration.downcast_ref::<SqlMigration>().steps;
+            assert!(
+                steps.iter().any(|step| match step {
+                    SqlMigrationStep::AlterTable(table) => table
+                        .changes
+                        .iter()
+                        .any(|change| matches!(change, TableChange::AlterColumn(_))),
+                    _ => false,
+                }),
+                "{source} -> {target}"
+            );
             let script = crate::apply_migration::render_script(
                 &migration,
                 &Default::default(),
                 &super::super::renderer::KingbaseMysqlRenderer,
             )
             .unwrap();
-            assert!(script.contains("DROP COLUMN `value`"), "{script}");
-            assert!(script.contains("ADD COLUMN `value` DECIMAL"), "{script}");
-            assert!(!script.contains("USING"), "{script}");
+            assert!(script.contains("USING (`value`::DECIMAL"), "{script}");
+            assert!(
+                !script.contains("to_char") && !script.contains("DROP COLUMN"),
+                "{script}"
+            );
         }
-    }
-
-    #[cfg(feature = "kingbase-mysql-native")]
-    #[test]
-    fn insufficient_temporal_decimal_capacity_keeps_destructive_checks() {
-        use schema_connector::{ConnectorParams, DestructiveChangeChecker};
-        // Construction/pure_check are lazy and perform no database IO.
-        let connector = crate::SqlSchemaConnector::new_kingbase_mysql(ConnectorParams::new(
-            "kingbase-mysql://probe@127.0.0.1:1/probe".into(),
-            Default::default(),
-            None,
-        ))
-        .unwrap();
-        for (arity, default, required_without_default) in [("", "", true), ("?", "", false), ("", "@default(0)", false)]
-        {
-            let diagnostics = connector.pure_check(&temporal_decimal_migration("Date", "Decimal(8,2)", arity, default));
-            if required_without_default {
-                assert_eq!(diagnostics.unexecutable_migrations.len(), 1);
-                assert!(diagnostics.unexecutable_migrations[0].description.contains("required"));
-                assert!(
-                    diagnostics.unexecutable_migrations[0]
-                        .description
-                        .contains("dropped and recreated")
-                );
-            } else {
-                assert!(diagnostics.unexecutable_migrations.is_empty());
-                assert_eq!(diagnostics.warnings.len(), 1);
-                assert!(diagnostics.warnings[0].description.contains("data loss"));
-            }
-        }
-        let diagnostics = connector.pure_check(&temporal_decimal_migration("Date", "Decimal(10,2)", "", ""));
-        assert!(diagnostics.unexecutable_migrations.is_empty());
-        assert_eq!(diagnostics.warnings.len(), 1); // Still a RiskyCast, not a claimed lossless cast.
-        assert!(!diagnostics.warnings[0].description.contains("dropped and recreated"));
+        assert!(native_conversion_attempt(
+            &KingbaseMySqlType::Blob,
+            &KingbaseMySqlType::Bit(8)
+        ));
+        assert!(!explicit_cast_supported(
+            Some(&KingbaseMySqlType::Blob),
+            Some(&KingbaseMySqlType::Bit(8))
+        ));
     }
 
     #[test]
@@ -493,7 +367,7 @@ mod tests {
             Some(&KingbaseMySqlType::Json),
             Some(&KingbaseMySqlType::Bit(64)),
         ));
-        assert!(!explicit_cast_supported(
+        assert!(explicit_cast_supported(
             Some(&KingbaseMySqlType::Date),
             Some(&KingbaseMySqlType::TinyInt),
         ));

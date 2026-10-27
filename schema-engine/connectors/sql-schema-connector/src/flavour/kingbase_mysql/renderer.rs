@@ -54,8 +54,6 @@ impl SqlRenderer for KingbaseMysqlRenderer {
         let AlterTable { table_ids, changes } = alter_table;
         let tables = schemas.walk(*table_ids);
         let mut lines = Vec::new();
-        let mut before = Vec::new();
-        let mut after = Vec::new();
 
         for change in changes {
             match change {
@@ -98,15 +96,9 @@ impl SqlRenderer for KingbaseMysqlRenderer {
                 } => {
                     let column = tables.next.walk(*column_id);
                     lines.push(format!("ADD COLUMN {}", render_column(column)));
-                    if let Some(guard) = super::unsigned::create_auto_guard(column) {
-                        after.push(guard);
-                    }
                 }
                 TableChange::DropColumn { column_id } => {
                     let column = tables.previous.walk(*column_id);
-                    if let Some(guard) = super::unsigned::drop_auto_guard(column) {
-                        before.push(guard);
-                    }
                     lines.push(
                         sql_ddl::mysql::AlterTableClause::DropColumn {
                             column_name: column.name().into(),
@@ -120,11 +112,6 @@ impl SqlRenderer for KingbaseMysqlRenderer {
                     type_change,
                 }) => {
                     let columns = schemas.walk(*column_id);
-                    let auto_type_changed = changes.type_changed() || changes.autoincrement_changed();
-                    if auto_type_changed && let Some(name) = super::unsigned::drop_auto_guard(columns.previous) {
-                        before.push(name);
-                    }
-
                     if changes.only_default_changed() && columns.next.default().is_none() {
                         lines.push(format!(
                             "ALTER COLUMN {} DROP DEFAULT",
@@ -155,20 +142,11 @@ impl SqlRenderer for KingbaseMysqlRenderer {
                             lines.push(render_modify_column(changes, new_default.as_ref(), columns.next));
                         }
                     }
-                    if auto_type_changed && let Some(guard) = super::unsigned::create_auto_guard(columns.next) {
-                        after.push(guard);
-                    }
                 }
                 TableChange::DropAndRecreateColumn { column_id, changes: _ } => {
                     let columns = schemas.walk(*column_id);
-                    if let Some(guard) = super::unsigned::drop_auto_guard(columns.previous) {
-                        before.push(guard);
-                    }
                     lines.push(format!("DROP COLUMN {}", quote_identifier(columns.previous.name())));
                     lines.push(format!("ADD COLUMN {}", render_column(columns.next)));
-                    if let Some(guard) = super::unsigned::create_auto_guard(columns.next) {
-                        after.push(guard);
-                    }
                 }
             }
         }
@@ -176,20 +154,11 @@ impl SqlRenderer for KingbaseMysqlRenderer {
         if lines.is_empty() {
             Vec::new()
         } else {
-            let mut statements = super::unsigned::initialize(tables.next);
-            let uses_guard = !before.is_empty() || !after.is_empty();
-            statements.extend(before);
-            statements.push(format!(
+            vec![format!(
                 "ALTER TABLE {} {}",
                 self.quote(tables.previous.name()),
                 lines.join(",\n    ")
-            ));
-            statements.extend(after);
-            if uses_guard {
-                vec![super::unsigned::atomic(statements)]
-            } else {
-                statements
-            }
+            )]
         }
     }
 
@@ -256,11 +225,6 @@ impl SqlRenderer for KingbaseMysqlRenderer {
             collate: None,
         }
         .to_string();
-        for column in table.columns() {
-            if let Some(guard) = super::unsigned::create_auto_guard(column) {
-                write!(rendered, ";\n{guard}").unwrap();
-            }
-        }
         for index in table
             .indexes()
             .filter(|index| !index.is_primary_key() && !super::index_is_created_separately(*index))
@@ -269,12 +233,7 @@ impl SqlRenderer for KingbaseMysqlRenderer {
                 write!(rendered, ";\n{comment}").unwrap();
             }
         }
-        let domains = super::unsigned::initialize(table);
-        if domains.is_empty() {
-            rendered
-        } else {
-            format!("{};\n{rendered}", domains.join(";\n"))
-        }
+        rendered
     }
 
     fn render_drop_and_recreate_index(&self, indexes: MigrationPair<IndexWalker<'_>>) -> Vec<String> {
@@ -450,10 +409,6 @@ fn render_column_type(column: TableColumnWalker<'_>) -> Cow<'static, str> {
         input.map_or_else(String::new, |(precision, scale)| format!("({precision}, {scale})"))
     }
 
-    if let Some(domain_type) = super::unsigned::column_type(column) {
-        return domain_type.into();
-    }
-
     match native_type {
         KingbaseMySqlType::Int => "INTEGER".into(),
         KingbaseMySqlType::SmallInt => "SMALLINT".into(),
@@ -488,11 +443,12 @@ fn render_column_type(column: TableColumnWalker<'_>) -> Cow<'static, str> {
         // Kingbase exposes unsigned integers as `sys.uint4` and `sys.uint8`.
         // MySQL mode also accepts INT/BIGINT UNSIGNED, but the tested C010
         // server rejects TINYINT/SMALLINT/MEDIUMINT UNSIGNED.
-        // Smaller integer types use bounded domains or auto-increment guards.
         KingbaseMySqlType::UnsignedInt => "sys.uint4".into(),
         KingbaseMySqlType::UnsignedSmallInt
         | KingbaseMySqlType::UnsignedTinyInt
-        | KingbaseMySqlType::UnsignedMediumInt => unreachable!("small unsigned types use validated domains"),
+        | KingbaseMySqlType::UnsignedMediumInt => {
+            unreachable!("small unsigned native types are rejected by validation")
+        }
         KingbaseMySqlType::UnsignedBigInt => "sys.uint8".into(),
     }
 }
@@ -584,23 +540,7 @@ fn render_using_expression_for_types(
         return None;
     }
 
-    let expression = if matches!(
-        previous,
-        KingbaseMySqlType::TinyBlob
-            | KingbaseMySqlType::Blob
-            | KingbaseMySqlType::MediumBlob
-            | KingbaseMySqlType::LongBlob
-    ) && let KingbaseMySqlType::Bit(size) = next
-    {
-        render_blob_to_bit_using(column, *size)
-    } else if is_datetime(previous) && is_numeric(next) {
-        let format = match previous {
-            KingbaseMySqlType::Date => "YYYYMMDD",
-            KingbaseMySqlType::Time(_) => "HH24MISS",
-            _ => "YYYYMMDDHH24MISS",
-        };
-        format!("to_char({column}, '{format}')::{target_type}")
-    } else if is_numeric(previous) && matches!(next, KingbaseMySqlType::Bit(_)) {
+    let expression = if is_numeric(previous) && matches!(next, KingbaseMySqlType::Bit(_)) {
         format!("({column})::bigint::{target_type}")
     } else if matches!(previous, KingbaseMySqlType::Bit(_)) {
         format!("({column})::text::{target_type}")
@@ -617,44 +557,6 @@ fn render_using_expression_for_types(
     };
 
     Some(expression)
-}
-
-fn render_blob_to_bit_using(column: &str, size: u32) -> String {
-    // MySQL ALTER reads a BLOB's signed decimal prefix, rather than treating its
-    // bytes as a bit string. Escape encoding preserves ASCII digits and safely
-    // terminates the prefix at NUL / non-UTF-8 bytes without decoding the BLOB.
-    let prefix =
-        format!("COALESCE(substring(encode(({column})::bytea, 'escape') FROM '^[[:space:]]*([+-]?[0-9]+)'), '0')");
-    // Remove leading zeros before bounding the decimal input. Twenty-one
-    // characters suffice to detect signed-64 overflow, even with a sign, and
-    // avoid numeric overflow on arbitrarily long decimal prefixes. Construct
-    // backreferences without depending on SQL string backslash settings.
-    let significant_prefix =
-        format!("left(regexp_replace({prefix}, '^([+-]?)0*([0-9])', concat(chr(92), '1', chr(92), '2')), 21)");
-    let integer = format!(
-        "GREATEST(-9223372036854775808::numeric(21,0), \
-         LEAST(9223372036854775807::numeric(21,0), ({significant_prefix})::numeric(21,0)))::bigint"
-    );
-
-    let value = if size == 64 {
-        // A signed bigint cast retains all 64 bits, including negative values.
-        integer
-    } else {
-        let maximum = (1_u64 << size) - 1;
-        // A direct integer-to-BIT cast silently truncates. Match MySQL instead:
-        // strict mode rejects out-of-range values; non-strict mode saturates.
-        // Keep the failing cast dependent on the row, so constant folding cannot
-        // reject a valid migration (including an empty table) at planning time.
-        format!(
-            "CASE WHEN ({integer}) BETWEEN 0 AND {maximum} THEN ({integer}) \
-             WHEN current_setting('sql_mode') LIKE '%STRICT_ALL_TABLES%' \
-             OR current_setting('sql_mode') LIKE '%STRICT_TRANS_TABLES%' \
-             THEN CAST(concat(({integer})::text, ' out of range for BIT({size})') AS bigint) \
-             ELSE {maximum}::bigint END"
-        )
-    };
-
-    format!("CASE WHEN {column} IS NULL THEN NULL ELSE ({value})::BIT({size}) END")
 }
 
 fn is_binary(native_type: &KingbaseMySqlType) -> bool {
@@ -699,16 +601,6 @@ fn is_numeric(native_type: &KingbaseMySqlType) -> bool {
             | KingbaseMySqlType::Float
             | KingbaseMySqlType::Double
             | KingbaseMySqlType::Year
-    )
-}
-
-fn is_datetime(native_type: &KingbaseMySqlType) -> bool {
-    matches!(
-        native_type,
-        KingbaseMySqlType::Date
-            | KingbaseMySqlType::Time(_)
-            | KingbaseMySqlType::DateTime(_)
-            | KingbaseMySqlType::Timestamp(_)
     )
 }
 
@@ -1057,7 +949,7 @@ mod tests {
                 "`created_at`",
                 "DOUBLE",
             ),
-            Some("to_char(`created_at`, 'YYYYMMDDHH24MISS')::DOUBLE".to_owned())
+            Some("`created_at`::DOUBLE".to_owned())
         );
         assert_eq!(
             render_using_expression_for_types(

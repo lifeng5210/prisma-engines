@@ -2,7 +2,6 @@ mod destructive_change_checker;
 mod renderer;
 mod schema_calculator;
 mod schema_differ;
-mod unsigned;
 
 #[cfg(feature = "kingbase-mysql-native")]
 mod connector;

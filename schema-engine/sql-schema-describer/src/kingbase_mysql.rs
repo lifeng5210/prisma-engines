@@ -7,7 +7,10 @@ use quaint::{
     Value,
     prelude::{Queryable, ResultRow},
 };
-use std::{collections::HashMap, sync::LazyLock};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::LazyLock,
+};
 use tracing::trace;
 
 /// Matches a default value in the schema, wrapped single quotes.
@@ -62,15 +65,6 @@ pub struct KingbaseMysqlSchemaExt {
 
 pub const UNSIGNED_AUTO_GUARD_BODY: &str = "DECLARE v bigint; BEGIN v := jsonb_extract_path_text(to_jsonb(NEW),TG_ARGV[0])::bigint; IF v < 0 OR v > TG_ARGV[1]::bigint THEN RAISE EXCEPTION 'Value out of range for small unsigned integer' USING ERRCODE='23514'; END IF; RETURN NEW; END;";
 
-pub fn unsigned_domain_spec(native: &KingbaseMySqlType) -> Option<(&'static str, u32)> {
-    match native {
-        KingbaseMySqlType::UnsignedTinyInt => Some(("__prisma_uint8", 255)),
-        KingbaseMySqlType::UnsignedSmallInt => Some(("__prisma_uint16", 65535)),
-        KingbaseMySqlType::UnsignedMediumInt => Some(("__prisma_uint24", 16777215)),
-        _ => None,
-    }
-}
-
 pub const INDEX_LOGICAL_NAME_PREFIX: &str = "prisma:logical-index:";
 
 /// Stable, schema-wide physical name for a custom, table-scoped MySQL name.
@@ -111,8 +105,8 @@ impl super::SqlSchemaDescriberBackend for SqlSchemaDescriber<'_> {
 
         self.get_constraints(&table_names, &mut sql_schema).await?;
 
-        Self::get_all_columns(&table_names, self.conn, schema, &mut sql_schema, &flavour).await?;
-        push_foreign_keys(schema, &table_names, &mut sql_schema, self.conn).await?;
+        let legacy_unsigned = Self::get_all_columns(&table_names, self.conn, schema, &mut sql_schema, &flavour).await?;
+        push_foreign_keys(schema, &table_names, &mut sql_schema, self.conn, &legacy_unsigned).await?;
         push_indexes(&table_names, schema, &mut sql_schema, self.conn).await?;
 
         sql_schema.procedures = self.get_procedures(schema).await?;
@@ -573,7 +567,7 @@ impl<'a> SqlSchemaDescriber<'a> {
         schema_name: &str,
         sql_schema: &mut SqlSchema,
         flavour: &Flavour,
-    ) -> DescriberResult<()> {
+    ) -> DescriberResult<HashSet<TableColumnId>> {
         let user_defined_enum_variants = Self::get_user_defined_enum_variants(conn, schema_name).await?;
         let domain_columns = conn
             .query_raw(
@@ -584,13 +578,19 @@ impl<'a> SqlSchemaDescriber<'a> {
         let mut managed_unsigned: HashMap<_, _> = domain_columns
             .into_iter()
             .filter_map(|row| {
-                let native = match row.get_string("domain_name")?.as_str() {
-                    "__prisma_uint8" => KingbaseMySqlType::UnsignedTinyInt,
-                    "__prisma_uint16" => KingbaseMySqlType::UnsignedSmallInt,
-                    "__prisma_uint24" => KingbaseMySqlType::UnsignedMediumInt,
+                let domain_name = row.get_string("domain_name")?;
+                let maximum = match domain_name.as_str() {
+                    "__prisma_uint8" => 255,
+                    "__prisma_uint16" => 65535,
+                    "__prisma_uint24" => 16777215,
                     _ => return None,
                 };
-                let (_, maximum) = unsigned_domain_spec(&native).unwrap();
+                let domain_schema = row.get_expect_string("domain_schema");
+                let type_name = format!(
+                    "\"{}\".\"{}\"",
+                    domain_schema.replace('"', "\"\""),
+                    domain_name.replace('"', "\"\"")
+                );
                 let expression = row
                     .get_string("range_expression")?
                     .replace("OPERATOR(sys.<=)", "<=")
@@ -601,7 +601,7 @@ impl<'a> SqlSchemaDescriber<'a> {
                             row.get_expect_string("table_name"),
                             row.get_expect_string("column_name"),
                         ),
-                        native,
+                        type_name,
                     )
                 })
             })
@@ -628,13 +628,10 @@ impl<'a> SqlSchemaDescriber<'a> {
             if arguments[0] != name.as_bytes() {
                 continue;
             }
-            let native = match arguments[1] {
-                b"255" => KingbaseMySqlType::UnsignedTinyInt,
-                b"65535" => KingbaseMySqlType::UnsignedSmallInt,
-                b"16777215" => KingbaseMySqlType::UnsignedMediumInt,
-                _ => continue,
-            };
-            managed_unsigned.insert((row.get_expect_string("table_name"), name), native);
+            if !matches!(arguments[1], b"255" | b"65535" | b"16777215") {
+                continue;
+            }
+            managed_unsigned.insert((row.get_expect_string("table_name"), name), "INTEGER".to_owned());
         }
 
         // We alias all the columns because MySQL column names are case-insensitive in queries, but the
@@ -699,12 +696,17 @@ impl<'a> SqlSchemaDescriber<'a> {
                 sql_schema,
                 &user_defined_enum_variants,
             );
-            if let Some(native) = managed_unsigned.get(&(table_name.clone(), name.clone())) {
-                tpe.family = ColumnTypeFamily::Int;
-                tpe.native_type = Some(NativeTypeInstance::new(*native));
+            if let Some(type_name) = managed_unsigned.get(&(table_name.clone(), name.clone())) {
+                // Legacy emulation objects remain in the database. Expose them
+                // through the framework's Unsupported/warning path, never as a
+                // native type now rejected by PSL or as an unrestricted integer.
+                tpe.family = ColumnTypeFamily::Unsupported(type_name.clone());
+                tpe.full_data_type.clone_from(type_name);
+                tpe.native_type = None;
             }
             let extra = col.get_string("extra").unwrap_or_default().to_lowercase();
-            let auto_increment = matches!(extra.as_str(), "auto_increment");
+            let auto_increment = matches!(extra.as_str(), "auto_increment")
+                && !managed_unsigned.contains_key(&(table_name.clone(), name.clone()));
 
             let default = match default_value {
                 None => None,
@@ -872,7 +874,13 @@ impl<'a> SqlSchemaDescriber<'a> {
             }
         }
 
-        Ok(())
+        Ok(managed_unsigned
+            .keys()
+            .filter_map(|(table, column)| {
+                let table_id = *table_ids.get(table)?;
+                Some(sql_schema.walk(table_id).column(column)?.id)
+            })
+            .collect())
     }
 
     async fn get_user_defined_enum_variants(
@@ -1271,6 +1279,7 @@ async fn push_foreign_keys(
     table_ids: &IndexMap<String, TableId>,
     sql_schema: &mut SqlSchema,
     conn: &dyn Queryable,
+    legacy_unsigned: &HashSet<TableColumnId>,
 ) -> DescriberResult<()> {
     // We alias all the columns because MySQL column names are case-insensitive in queries, but
     // the information schema column names became upper-case in MySQL 8, causing the code
@@ -1307,6 +1316,17 @@ async fn push_foreign_keys(
                 continue;
             };
         let constraint_name = row.get_expect_string("constraint_name");
+        if (legacy_unsigned.contains(&column_id) || legacy_unsigned.contains(&referenced_column_id))
+            && sql_schema.walk(column_id).column_type_family()
+                != sql_schema.walk(referenced_column_id).column_type_family()
+        {
+            // Unsupported relation fields must have the same type in PSL.
+            // Keep the actual physical types and constraints intact rather than
+            // hiding a foreign key or emitting an invalid datamodel.
+            return Err(quaint::error::Error::builder(quaint::error::ErrorKind::ConversionError(format!(
+                "Legacy small unsigned emulation in foreign key `{constraint_name}` uses incompatible physical types. Migrate the legacy columns and foreign key explicitly before introspection or schema migration; Prisma does not emulate these types."
+            ).into())).build().into());
+        }
         let on_delete_action = match row.get_expect_string("delete_rule").to_lowercase().as_str() {
             "cascade" => ForeignKeyAction::Cascade,
             "set null" => ForeignKeyAction::SetNull,
