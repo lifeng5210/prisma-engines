@@ -100,8 +100,16 @@ fn number_cannot_be_used_for_boolean_fields() {
         }
     "#};
 
-    let error = parse_unwrap_err(schema);
-    assert!(error.contains("Native type Number is not compatible with declared field type Boolean"));
+    let expectation = expect![[r#"
+        [1;91merror[0m: [1mNative type Number is not compatible with declared field type Boolean, expected field type Int or BigInt or Float or Decimal.[0m
+          [1;94m-->[0m  [4mschema.prisma:7[0m
+        [1;94m   | [0m
+        [1;94m 6 | [0m  id     Int     @id
+        [1;94m 7 | [0m  active Boolean [1;91m@db.Number(1)[0m
+        [1;94m   | [0m
+    "#]];
+
+    expect_error(schema, &expectation);
 }
 
 #[test]
@@ -117,8 +125,16 @@ fn invalid_number_precision_is_rejected() {
         }
     "#};
 
-    let error = parse_unwrap_err(schema);
-    assert!(error.contains("Precision must be between 1 and 1000."));
+    let expectation = expect![[r#"
+        [1;91merror[0m: [1mArgument M is out of range for native type `Number(1001,1)` of Kingbase Oracle: Precision must be between 1 and 1000.[0m
+          [1;94m-->[0m  [4mschema.prisma:7[0m
+        [1;94m   | [0m
+        [1;94m 6 | [0m  id    Int     @id
+        [1;94m 7 | [0m  value Decimal [1;91m@db.Number(1001, 1)[0m
+        [1;94m   | [0m
+    "#]];
+
+    expect_error(schema, &expectation);
 }
 
 #[test]
@@ -159,7 +175,16 @@ fn normalizing_number_does_not_hide_zero_precision() {
           id Int @id
           value Decimal @db.Number(0,4)
         }"#;
-    assert!(parse_unwrap_err(schema).contains("Precision must be between 1 and 1000."));
+    let expectation = expect![[r#"
+        [1;91merror[0m: [1mArgument M is out of range for native type `Number(0,4)` of Kingbase Oracle: Precision must be between 1 and 1000.[0m
+          [1;94m-->[0m  [4mschema.prisma:6[0m
+        [1;94m   | [0m
+        [1;94m 5 | [0m          id Int @id
+        [1;94m 6 | [0m          value Decimal [1;91m@db.Number(0,4)[0m
+        [1;94m   | [0m
+    "#]];
+
+    expect_error(schema, &expectation);
 }
 
 #[test]
@@ -171,7 +196,16 @@ fn negative_number_scale_reports_the_server_semantics_limitation() {
           id Int @id
           value Decimal @db.Number(6,-2)
         }"#;
-    assert!(parse_unwrap_err(schema).contains("does not preserve Oracle rounding semantics"));
+    let expectation = expect![[r#"
+        [1;91merror[0m: [1mArgument M is out of range for native type `Number` of Kingbase Oracle: Negative NUMBER scale is not supported: this Kingbase Oracle version does not preserve Oracle rounding semantics.[0m
+          [1;94m-->[0m  [4mschema.prisma:6[0m
+        [1;94m   | [0m
+        [1;94m 5 | [0m          id Int @id
+        [1;94m 6 | [0m          value Decimal [1;91m@db.Number(6,-2)[0m
+        [1;94m   | [0m
+    "#]];
+
+    expect_error(schema, &expectation);
 }
 
 #[test]
@@ -187,8 +221,16 @@ fn float_precision_above_53_is_rejected() {
         }
     "#};
 
-    let error = parse_unwrap_err(schema);
-    assert!(error.contains("Precision must be between 1 and 53."));
+    let expectation = expect![[r#"
+        [1;91merror[0m: [1mArgument M is out of range for native type `Float(54)` of Kingbase Oracle: Precision must be between 1 and 53.[0m
+          [1;94m-->[0m  [4mschema.prisma:7[0m
+        [1;94m   | [0m
+        [1;94m 6 | [0m  id    Int   @id
+        [1;94m 7 | [0m  value Float [1;91m@db.Float(54)[0m
+        [1;94m   | [0m
+    "#]];
+
+    expect_error(schema, &expectation);
 }
 
 #[test]
@@ -204,8 +246,16 @@ fn varchar2_length_above_server_limit_is_rejected() {
         }
     "#};
 
-    let error = parse_unwrap_err(schema);
-    assert!(error.contains("Length must be between 1 and 10,485,760."));
+    let expectation = expect![[r#"
+        [1;91merror[0m: [1mArgument M is out of range for native type `VarChar2(10485761)` of Kingbase Oracle: Length must be between 1 and 10,485,760.[0m
+          [1;94m-->[0m  [4mschema.prisma:7[0m
+        [1;94m   | [0m
+        [1;94m 6 | [0m  id    Int    @id
+        [1;94m 7 | [0m  value String [1;91m@db.VarChar2(10485761)[0m
+        [1;94m   | [0m
+    "#]];
+
+    expect_error(schema, &expectation);
 }
 
 #[test]
@@ -223,8 +273,28 @@ fn timestamp_precision_above_six_is_rejected() {
         }
     "#};
 
-    let error = parse_unwrap_err(schema);
-    assert_eq!(error.matches("Precision must be between 0 and 6.").count(), 3);
+    let expectation = expect![[r#"
+        [1;91merror[0m: [1mArgument M is out of range for native type `Timestamp(7)` of Kingbase Oracle: Precision must be between 0 and 6.[0m
+          [1;94m-->[0m  [4mschema.prisma:7[0m
+        [1;94m   | [0m
+        [1;94m 6 | [0m  id        Int      @id
+        [1;94m 7 | [0m  localTime DateTime [1;91m@db.Timestamp(7)[0m
+        [1;94m   | [0m
+        [1;91merror[0m: [1mArgument M is out of range for native type `TimestampTz(7)` of Kingbase Oracle: Precision must be between 0 and 6.[0m
+          [1;94m-->[0m  [4mschema.prisma:8[0m
+        [1;94m   | [0m
+        [1;94m 7 | [0m  localTime DateTime @db.Timestamp(7)
+        [1;94m 8 | [0m  zonedTime DateTime [1;91m@db.TimestampTz(7)[0m
+        [1;94m   | [0m
+        [1;91merror[0m: [1mArgument M is out of range for native type `TimestampLocalTz(7)` of Kingbase Oracle: Precision must be between 0 and 6.[0m
+          [1;94m-->[0m  [4mschema.prisma:9[0m
+        [1;94m   | [0m
+        [1;94m 8 | [0m  zonedTime DateTime @db.TimestampTz(7)
+        [1;94m 9 | [0m  dbTime    DateTime [1;91m@db.TimestampLocalTz(7)[0m
+        [1;94m   | [0m
+    "#]];
+
+    expect_error(schema, &expectation);
 }
 
 #[test]
@@ -247,8 +317,9 @@ fn supported_lob_types_can_be_used_as_unique_keys() {
 
 #[test]
 fn json_types_cannot_be_used_as_keys_with_or_without_an_explicit_native_type() {
-    let schemas = [
-        indoc! {r#"
+    let cases = [
+        (
+            indoc! {r#"
             datasource db {
               provider = "kingbase-oracle"
             }
@@ -258,7 +329,17 @@ fn json_types_cannot_be_used_as_keys_with_or_without_an_explicit_native_type() {
               metadata Json @unique
             }
         "#},
-        indoc! {r#"
+            expect![[r#"
+                [1;91merror[0m: [1mNative type `Json` cannot be unique in Kingbase Oracle.[0m
+                  [1;94m-->[0m  [4mschema.prisma:7[0m
+                [1;94m   | [0m
+                [1;94m 6 | [0m  id       Int  @id
+                [1;94m 7 | [0m  metadata Json [1;91m@unique[0m
+                [1;94m   | [0m
+            "#]],
+        ),
+        (
+            indoc! {r#"
             datasource db {
               provider = "kingbase-oracle"
             }
@@ -268,11 +349,19 @@ fn json_types_cannot_be_used_as_keys_with_or_without_an_explicit_native_type() {
               metadata Json @unique @db.Json
             }
         "#},
+            expect![[r#"
+                [1;91merror[0m: [1mNative type `Json` cannot be unique in Kingbase Oracle.[0m
+                  [1;94m-->[0m  [4mschema.prisma:7[0m
+                [1;94m   | [0m
+                [1;94m 6 | [0m  id       Int  @id
+                [1;94m 7 | [0m  metadata Json [1;91m@unique [0m@db.Json
+                [1;94m   | [0m
+            "#]],
+        ),
     ];
 
-    for schema in schemas {
-        let error = parse_unwrap_err(schema);
-        assert!(error.contains("Native type `Json` cannot be unique in Kingbase Oracle."));
+    for (schema, expectation) in cases {
+        expect_error(schema, &expectation);
     }
 }
 

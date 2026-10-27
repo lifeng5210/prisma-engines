@@ -24,33 +24,35 @@ fn set_default_schema(provider: &str, mode: &str, arity: &str, default: &str, ac
 
 #[test]
 fn set_default_has_no_unsupported_warning_for_database_foreign_keys() {
-    for mode in ["", "relationMode = \"foreignKeys\""] {
-        for arity in ["", "?"] {
-            for default in ["", "@default(1)"] {
-                for actions in [
-                    "onDelete: SetDefault",
-                    "onUpdate: SetDefault",
-                    "onDelete: SetDefault, onUpdate: SetDefault",
-                ] {
-                    let source = set_default_schema("kingbase-mysql", mode, arity, default, actions);
-                    let schema = psl::validate_without_extensions(source.clone().into());
-                    assert!(
-                        schema.diagnostics.errors().is_empty(),
-                        "{source}\n{:?}",
-                        schema.diagnostics
-                    );
-                    // assert_valid alone would miss the old false warning.
-                    assert!(
-                        schema.diagnostics.warnings().is_empty(),
-                        "{source}\n{:?}",
-                        schema.diagnostics
-                    );
-                    let relation = schema.assert_has_model("Child").assert_has_relation_field("parent");
-                    if actions.contains("onDelete") {
-                        relation.assert_relation_delete_strategy(SetDefault);
-                    }
-                    if actions.contains("onUpdate") {
-                        relation.assert_relation_update_strategy(SetDefault);
+    for provider in ["kingbase-mysql", "kingbase-oracle"] {
+        for mode in ["", "relationMode = \"foreignKeys\""] {
+            for arity in ["", "?"] {
+                for default in ["", "@default(1)"] {
+                    for actions in [
+                        "onDelete: SetDefault",
+                        "onUpdate: SetDefault",
+                        "onDelete: SetDefault, onUpdate: SetDefault",
+                    ] {
+                        let source = set_default_schema(provider, mode, arity, default, actions);
+                        let schema = psl::validate_without_extensions(source.clone().into());
+                        assert!(
+                            schema.diagnostics.errors().is_empty(),
+                            "{source}\n{:?}",
+                            schema.diagnostics
+                        );
+                        // assert_valid alone would miss the old false warning.
+                        assert!(
+                            schema.diagnostics.warnings().is_empty(),
+                            "{source}\n{:?}",
+                            schema.diagnostics
+                        );
+                        let relation = schema.assert_has_model("Child").assert_has_relation_field("parent");
+                        if actions.contains("onDelete") {
+                            relation.assert_relation_delete_strategy(SetDefault);
+                        }
+                        if actions.contains("onUpdate") {
+                            relation.assert_relation_update_strategy(SetDefault);
+                        }
                     }
                 }
             }

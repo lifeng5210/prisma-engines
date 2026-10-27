@@ -628,12 +628,12 @@ fn should_fail_on_argument_for_bit_0_type() {
     "#};
 
     let expectation = expect![[r#"
-        error: Argument M is out of range for native type `Bit(0)` of Kingbase MySQL: M can range from 1 to 64.
-          -->  schema.prisma:7
-           | 
-         6 |   id        Int   @id
-         7 |   firstName Bytes @db.Bit(0)
-           | 
+        [1;91merror[0m: [1mArgument M is out of range for native type `Bit(0)` of Kingbase MySQL: M can range from 1 to 64.[0m
+          [1;94m-->[0m  [4mschema.prisma:7[0m
+        [1;94m   | [0m
+        [1;94m 6 | [0m  id        Int   @id
+        [1;94m 7 | [0m  firstName Bytes [1;91m@db.Bit(0)[0m
+        [1;94m   | [0m
     "#]];
 
     expect_error(schema, &expectation);
@@ -653,12 +653,12 @@ fn should_fail_on_argument_for_bit_65_type() {
     "#};
 
     let expectation = expect![[r#"
-        error: Argument M is out of range for native type `Bit(65)` of Kingbase MySQL: M can range from 1 to 64.
-          -->  schema.prisma:7
-           | 
-         6 |   id        Int   @id
-         7 |   firstName Bytes @db.Bit(65)
-           | 
+        [1;91merror[0m: [1mArgument M is out of range for native type `Bit(65)` of Kingbase MySQL: M can range from 1 to 64.[0m
+          [1;94m-->[0m  [4mschema.prisma:7[0m
+        [1;94m   | [0m
+        [1;94m 6 | [0m  id        Int   @id
+        [1;94m 7 | [0m  firstName Bytes [1;91m@db.Bit(65)[0m
+        [1;94m   | [0m
     "#]];
 
     expect_error(schema, &expectation);
@@ -678,12 +678,12 @@ fn should_only_allow_bit_one_for_booleans() {
     "#};
 
     let expectation = expect![[r#"
-        error: Argument M is out of range for native type `Bit(2)` of Kingbase MySQL: only Bit(1) can be used as Boolean.
-          -->  schema.prisma:7
-           | 
-         6 |   id        Int     @id
-         7 |   firstName Boolean @db.Bit(2)
-           | 
+        [1;91merror[0m: [1mArgument M is out of range for native type `Bit(2)` of Kingbase MySQL: only Bit(1) can be used as Boolean.[0m
+          [1;94m-->[0m  [4mschema.prisma:7[0m
+        [1;94m   | [0m
+        [1;94m 6 | [0m  id        Int     @id
+        [1;94m 7 | [0m  firstName Boolean [1;91m@db.Bit(2)[0m
+        [1;94m   | [0m
     "#]];
 
     expect_error(schema, &expectation);
@@ -703,12 +703,12 @@ fn should_fail_on_argument_out_of_range_for_char_type() {
     "#};
 
     let expectation = expect![[r#"
-        error: Argument M is out of range for native type `Char(10485761)` of Kingbase MySQL: M can range from 0 to 10,485,760.
-          -->  schema.prisma:7
-           | 
-         6 |   id        Int    @id
-         7 |   firstName String @db.Char(10485761)
-           | 
+        [1;91merror[0m: [1mArgument M is out of range for native type `Char(10485761)` of Kingbase MySQL: M can range from 0 to 10,485,760.[0m
+          [1;94m-->[0m  [4mschema.prisma:7[0m
+        [1;94m   | [0m
+        [1;94m 6 | [0m  id        Int    @id
+        [1;94m 7 | [0m  firstName String [1;91m@db.Char(10485761)[0m
+        [1;94m   | [0m
     "#]];
 
     expect_error(schema, &expectation);
@@ -728,12 +728,12 @@ fn should_fail_on_argument_out_of_range_for_varchar_type() {
     "#};
 
     let expectation = expect![[r#"
-        error: Argument M is out of range for native type `VarChar(10485761)` of Kingbase MySQL: M can range from 0 to 10,485,760.
-          -->  schema.prisma:7
-           | 
-         6 |   id        Int    @id
-         7 |   firstName String @db.VarChar(10485761)
-           | 
+        [1;91merror[0m: [1mArgument M is out of range for native type `VarChar(10485761)` of Kingbase MySQL: M can range from 0 to 10,485,760.[0m
+          [1;94m-->[0m  [4mschema.prisma:7[0m
+        [1;94m   | [0m
+        [1;94m 6 | [0m  id        Int    @id
+        [1;94m 7 | [0m  firstName String [1;91m@db.VarChar(10485761)[0m
+        [1;94m   | [0m
     "#]];
 
     expect_error(schema, &expectation);
@@ -753,12 +753,12 @@ fn should_fail_on_argument_out_of_range_for_decimal_type() {
     "#};
 
     let expectation = expect![[r#"
-        error: Argument M is out of range for native type `Decimal(1001,20)` of Kingbase MySQL: Precision can range from 1 to 1000.
-          -->  schema.prisma:7
-           | 
-         6 |   id        Int     @id
-         7 |   firstName Decimal @db.Decimal(1001,20)
-           | 
+        [1;91merror[0m: [1mArgument M is out of range for native type `Decimal(1001,20)` of Kingbase MySQL: Precision can range from 1 to 1000.[0m
+          [1;94m-->[0m  [4mschema.prisma:7[0m
+        [1;94m   | [0m
+        [1;94m 6 | [0m  id        Int     @id
+        [1;94m 7 | [0m  firstName Decimal [1;91m@db.Decimal(1001,20)[0m
+        [1;94m   | [0m
     "#]];
 
     expect_error(schema, &expectation);
@@ -775,12 +775,12 @@ fn should_fail_on_argument_out_of_range_for_decimal_type() {
     "#};
 
     let expectation = expect![[r#"
-        error: Argument M is out of range for native type `Decimal(44,1001)` of Kingbase MySQL: Scale can range from 0 to 1000.
-          -->  schema.prisma:7
-           | 
-         6 |   id        Int     @id
-         7 |   firstName Decimal @db.Decimal(44,1001)
-           | 
+        [1;91merror[0m: [1mArgument M is out of range for native type `Decimal(44,1001)` of Kingbase MySQL: Scale can range from 0 to 1000.[0m
+          [1;94m-->[0m  [4mschema.prisma:7[0m
+        [1;94m   | [0m
+        [1;94m 6 | [0m  id        Int     @id
+        [1;94m 7 | [0m  firstName Decimal [1;91m@db.Decimal(44,1001)[0m
+        [1;94m   | [0m
     "#]];
 
     expect_error(schema, &expectation);
@@ -873,12 +873,12 @@ fn should_fail_on_incompatible_scalar_type_with_tiny_int() {
     "#;
 
     let expectation = expect![[r#"
-        error: Native type TinyInt is not compatible with declared field type DateTime, expected field type Boolean or Int.
-          -->  schema.prisma:8
-           | 
-         7 |           id     Int      @id
-         8 |           bigInt DateTime @db.TinyInt
-           | 
+        [1;91merror[0m: [1mNative type TinyInt is not compatible with declared field type DateTime, expected field type Boolean or Int.[0m
+          [1;94m-->[0m  [4mschema.prisma:8[0m
+        [1;94m   | [0m
+        [1;94m 7 | [0m          id     Int      @id
+        [1;94m 8 | [0m          bigInt DateTime [1;91m@db.TinyInt[0m
+        [1;94m   | [0m
     "#]];
 
     expect_error(dml, &expectation);
@@ -917,15 +917,28 @@ fn kingbase_mysql_uses_independent_native_type_defaults() {
         }
     "#};
     let validated_schema = parse_schema(schema);
-    let native_type = KINGBASE_MYSQL
-        .default_native_type_for_scalar_type(
-            &psl::parser_database::ScalarFieldType::BuiltInScalar(ScalarType::String),
-            &validated_schema,
-        )
-        .unwrap();
-
-    assert_eq!(
-        native_type,
-        NativeTypeInstance::new::<KingbaseMySqlType>(KingbaseMySqlType::VarChar(191)),
-    );
+    use psl::builtin_connectors::KingbaseMySqlType::*;
+    let expected = [
+        (ScalarType::Int, Int),
+        (ScalarType::BigInt, BigInt),
+        (ScalarType::Float, Double),
+        (ScalarType::Decimal, Decimal(Some((65, 30)))),
+        (ScalarType::Boolean, TinyInt),
+        (ScalarType::String, VarChar(191)),
+        (ScalarType::DateTime, DateTime(Some(3))),
+        (ScalarType::Bytes, LongBlob),
+        (ScalarType::Json, Json),
+    ];
+    for (scalar_type, expected_native_type) in expected {
+        let native_type = KINGBASE_MYSQL
+            .default_native_type_for_scalar_type(
+                &psl::parser_database::ScalarFieldType::BuiltInScalar(scalar_type),
+                &validated_schema,
+            )
+            .unwrap();
+        assert_eq!(
+            native_type,
+            NativeTypeInstance::new::<KingbaseMySqlType>(expected_native_type)
+        );
+    }
 }
