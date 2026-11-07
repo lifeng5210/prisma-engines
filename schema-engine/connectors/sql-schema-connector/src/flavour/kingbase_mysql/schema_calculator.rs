@@ -42,8 +42,8 @@ impl SqlSchemaCalculatorFlavour for KingbaseMysqlSchemaCalculatorFlavour {
 
     fn push_connector_data(&self, context: &mut Context<'_>) {
         let schema = &mut context.schema.describer_schema;
-        // Only inline unique indexes create constraints. Descending unique
-        // indexes are created separately; described databases use sys_constraint.
+        // A freshly created table owns its inline unique indexes as constraints.
+        // Described databases retain actual ownership from sys_constraint.
         let physical_index_names: std::collections::HashMap<_, _> = schema
             .table_walkers()
             .flat_map(|table| table.indexes())

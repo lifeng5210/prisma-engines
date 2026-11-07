@@ -18,7 +18,9 @@ SELECT
     indexaccess.amname AS index_type,
     rawindex.indisprimary AS is_primary,
     indexconstraint.conname AS constraint_name,
-    sys_catalog.sys_get_expr(rawindex.indexprs, rawindex.indrelid) AS index_expression
+    sys_catalog.sys_get_expr(rawindex.indexprs, rawindex.indrelid) AS index_expression,
+    rawindex.indexprs :: text AS index_expression_nodes,
+    sys_catalog.sys_get_indexdef(rawindex.indexrelid, keys.ordinality :: INT, true) AS index_column_definition
 FROM
     sys_catalog.sys_index AS rawindex
     INNER JOIN sys_catalog.sys_class AS tableinfo ON tableinfo.oid = rawindex.indrelid

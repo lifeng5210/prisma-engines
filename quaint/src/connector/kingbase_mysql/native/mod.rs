@@ -423,6 +423,49 @@ mod tests {
     use crate::{connector::Queryable, single::Quaint, tests::test_api::kingbase_mysql::CONN_STR};
 
     #[tokio::test]
+    async fn r3_bit_byte_parameters_preserve_non_byte_aligned_values() {
+        let connection = Quaint::new(CONN_STR.as_str()).await.unwrap();
+        connection.raw_cmd("BEGIN").await.unwrap();
+        let outcome = async {
+            for (width, bytes, text) in [
+                (7, vec![1], "01"),
+                (8, vec![0xaa], "aa"),
+                (9, vec![1, 1], "0101"),
+                (17, vec![1, 1, 1], "010101"),
+                (64, vec![0xff; 8], "ffffffffffffffff"),
+            ] {
+                let table = format!("r3_bits_{}", uuid::Uuid::new_v4().simple());
+                connection
+                    .raw_cmd(&format!(
+                        "CREATE TEMPORARY TABLE `{table}`(id INT PRIMARY KEY,value BIT({width}))"
+                    ))
+                    .await?;
+                connection
+                    .execute_raw(
+                        &format!("INSERT INTO `{table}` VALUES(1,?)"),
+                        &[Value::bytes(bytes.clone())],
+                    )
+                    .await?;
+                // Check binding independently of the driver's BIT result codec.
+                let result = connection
+                    .query_raw(&format!("SELECT HEX(value) FROM `{table}`"), &[])
+                    .await?;
+                assert_eq!(result.first().unwrap()[0].as_str().unwrap().to_ascii_lowercase(), text);
+                if width >= 8 {
+                    let result = connection
+                        .query_raw(&format!("SELECT value FROM `{table}`"), &[])
+                        .await?;
+                    assert_eq!(result.first().unwrap()[0].as_bytes(), Some(bytes.as_slice()));
+                }
+            }
+            Ok::<(), Error>(())
+        }
+        .await;
+        connection.raw_cmd("ROLLBACK").await.unwrap();
+        outcome.unwrap();
+    }
+
+    #[tokio::test]
     async fn logical_index_names_survive_unique_errors_and_transaction_rollback() {
         let namespace = format!("kb_error_{}", uuid::Uuid::new_v4().simple());
         let mut url: url::Url = CONN_STR.parse().unwrap();
@@ -553,6 +596,112 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(result.first().unwrap()[0].as_bool(), Some(true));
+    }
+
+    #[tokio::test]
+    async fn r3_mysql_json_typed_parameters_and_results_roundtrip() {
+        let connection = Quaint::new(CONN_STR.as_str()).await.unwrap();
+        let table = format!("r3_json_{}", uuid::Uuid::new_v4().simple());
+        connection.raw_cmd("BEGIN").await.unwrap();
+        let outcome = async {
+            connection
+                .raw_cmd(&format!(
+                    "CREATE TEMPORARY TABLE `{table}` (id INTEGER PRIMARY KEY, value JSON)"
+                ))
+                .await?;
+            let values = [
+                serde_json::json!({"n": "123"}),
+                serde_json::json!([1, "123", null]),
+                serde_json::json!("null"),
+                serde_json::json!("123"),
+                serde_json::json!(123),
+                serde_json::json!(u64::MAX),
+                serde_json::json!(true),
+                serde_json::json!(false),
+                serde_json::Value::Null,
+            ];
+            for (index, value) in values.iter().enumerate() {
+                let parameter = Value::json(value.clone());
+                let result = connection
+                    .query_raw_typed("SELECT CAST(? AS JSON) AS value", &[parameter.clone()])
+                    .await?;
+                assert_eq!(result.types(), &[ColumnType::Json]);
+                assert_eq!(result.first().unwrap()[0].as_json(), Some(value));
+                connection
+                    .execute_raw_typed(
+                        &format!("INSERT INTO `{table}` VALUES (?,?)"),
+                        &[Value::int32(index as i32), parameter],
+                    )
+                    .await?;
+            }
+            let rows = connection
+                .query_raw(&format!("SELECT value FROM `{table}` ORDER BY id"), &[])
+                .await?;
+            assert_eq!(rows.types(), &[ColumnType::Json]);
+            assert_eq!(rows.len(), values.len());
+            for (row, value) in rows.into_iter().zip(&values) {
+                assert_eq!(row[0].as_json(), Some(value));
+            }
+            for (expression, expected) in [
+                ("JSON_EXTRACT(value, '$.n')", serde_json::json!("123")),
+                ("JSON_ARRAYAGG(value)", serde_json::json!([{"n": "123"}])),
+                ("JSON_OBJECTAGG('n', value)", serde_json::json!({"n": {"n": "123"}})),
+            ] {
+                let result = connection
+                    .query_raw(&format!("SELECT {expression} AS value FROM `{table}` WHERE id=0"), &[])
+                    .await?;
+                assert_eq!(result.types(), &[ColumnType::Json]);
+                assert_eq!(result.first().unwrap()[0].as_json(), Some(&expected));
+            }
+            let sql_null = connection.query_raw("SELECT CAST(NULL AS JSON) AS value", &[]).await?;
+            assert_eq!(sql_null.types(), &[ColumnType::Json]);
+            assert!(sql_null.first().unwrap()[0].is_null());
+            let empty = connection
+                .query_raw("SELECT CAST('null' AS JSON) AS value WHERE false", &[])
+                .await?;
+            assert_eq!(empty.types(), &[ColumnType::Json]);
+            assert!(empty.is_empty());
+            let described = connection
+                .describe_query("SELECT CAST('null' AS JSON) AS value")
+                .await?;
+            assert_eq!(described.columns[0].typ, ColumnType::Json);
+            for sql in [
+                "SELECT ARRAY['null'::sys.mysql_json] AS value",
+                "SELECT NULL::sys.mysql_json[] AS value",
+                "SELECT ARRAY['null'::sys.mysql_json] AS value WHERE false",
+            ] {
+                assert!(matches!(
+                    connection.query_raw(sql, &[]).await.unwrap_err().kind(),
+                    ErrorKind::UnsupportedColumnType { .. }
+                ));
+            }
+            Ok::<_, Error>(())
+        }
+        .await;
+        connection.raw_cmd("ROLLBACK").await.unwrap();
+        outcome.unwrap();
+    }
+
+    #[tokio::test]
+    async fn decimal_sum_without_cast_uses_the_inferred_text_parameter() {
+        let connection = Quaint::new(CONN_STR.as_str()).await.unwrap();
+        let described = connection.describe_query("SELECT SUM(?)").await.unwrap();
+        assert_eq!(described.parameters.len(), 1);
+        assert_eq!(described.parameters[0].typ, ColumnType::Text);
+
+        for (parameter, expected) in [
+            (Value::numeric("1.25".parse().unwrap()), Some(1.25)),
+            (Value::numeric("-1.25".parse().unwrap()), Some(-1.25)),
+            (Value::numeric("1E-31".parse().unwrap()), Some(1e-31)),
+            (Value::null_numeric(), None),
+        ] {
+            let query = crate::ast::Select::default().value(crate::ast::sum(parameter));
+            let result = connection.query(query.into()).await.unwrap();
+            assert_eq!(result.types(), &[ColumnType::Double]);
+            let row = result.first().unwrap();
+            assert_eq!(row[0].as_f64(), expected);
+            assert_eq!(row[0].is_null(), expected.is_none());
+        }
     }
 
     #[tokio::test]

@@ -6,14 +6,34 @@ use psl::{
 };
 
 #[test]
-fn kingbase_mysql_rejects_index_length_prefixes() {
+fn kingbase_mysql_accepts_ordinary_and_unique_index_length_prefixes() {
     for attribute in [
         "@@index([value(length: 8)])",
         "@@unique([value(length: 8)])",
-        "@@id([id, value(length: 8)])",
         "@unique(length: 8)",
-        "@id(length: 8)",
+        "@@index([value(length: 8, sort: Desc), id])",
+        "@@unique([value(length: 8), id])",
     ] {
+        for (scalar, native) in [
+            ("String", "VarChar(32)"),
+            ("String", "Text"),
+            ("Bytes", "VarBinary(32)"),
+            ("Bytes", "Blob"),
+        ] {
+            let field_attribute = if attribute.starts_with("@@") { "" } else { attribute };
+            let model_attribute = if attribute.starts_with("@@") { attribute } else { "" };
+            assert_valid(&format!(
+                "datasource db {{\n provider = \"kingbase-mysql\"\n }}\n \
+                 model Test {{\n id Int @id\n value {scalar} @db.{native} {field_attribute}\n \
+                 {model_attribute}\n }}"
+            ));
+        }
+    }
+}
+
+#[test]
+fn kingbase_mysql_rejects_primary_key_length_prefixes() {
+    for attribute in ["@@id([id, value(length: 8)])", "@id(length: 8)"] {
         let field_attribute = if attribute.starts_with("@@") { "" } else { attribute };
         let model_attribute = if attribute.starts_with("@@") { attribute } else { "" };
         let id_attribute = if attribute.contains("@id") { "" } else { "@id" };
@@ -24,9 +44,32 @@ fn kingbase_mysql_rejects_index_length_prefixes() {
         );
         let error = parse_unwrap_err(&schema);
         assert!(
-            error.contains("length argument is not supported"),
+            error
+                .contains("The length argument is not supported in the primary key with the Kingbase MySQL connector."),
             "{attribute}: {error}"
         );
+    }
+}
+
+#[test]
+fn kingbase_mysql_prefix_capability_preserves_shared_type_and_fulltext_validation() {
+    for (field, attribute, expected) in [
+        (
+            "value Int",
+            "@@index([value(length: 8)])",
+            "only allowed with field types `String` or `Bytes`",
+        ),
+        (
+            "value String",
+            "@@fulltext([value(length: 8)])",
+            "not supported in a @@fulltext attribute",
+        ),
+    ] {
+        let schema = format!(
+            "datasource db {{\n provider = \"kingbase-mysql\"\n }}\n \
+             model Test {{\n id Int @id\n {field}\n {attribute}\n }}"
+        );
+        assert!(parse_unwrap_err(&schema).contains(expected));
     }
 }
 
@@ -517,7 +560,7 @@ fn tinyblob_type_can_be_a_primary_key() {
 }
 
 #[test]
-fn text_should_fail_on_length_prefixed_index() {
+fn text_supports_length_prefixed_index() {
     let dml = indoc! {r#"
         datasource db {
           provider = "kingbase-mysql"
@@ -531,11 +574,11 @@ fn text_should_fail_on_length_prefixed_index() {
         }
     "#};
 
-    assert!(parse_unwrap_err(dml).contains("length argument is not supported"))
+    assert_valid(dml);
 }
 
 #[test]
-fn text_should_fail_on_length_prefixed_unique() {
+fn text_supports_length_prefixed_unique() {
     let dml = indoc! {r#"
         datasource db {
           provider = "kingbase-mysql"
@@ -547,7 +590,7 @@ fn text_should_fail_on_length_prefixed_unique() {
         }
     "#};
 
-    assert!(parse_unwrap_err(dml).contains("length argument is not supported"))
+    assert_valid(dml);
 }
 
 #[test]
@@ -566,7 +609,7 @@ fn text_should_fail_on_length_prefixed_pk() {
 }
 
 #[test]
-fn bytes_should_fail_on_length_prefixed_index() {
+fn bytes_supports_length_prefixed_index() {
     let dml = indoc! {r#"
         datasource db {
           provider = "kingbase-mysql"
@@ -580,11 +623,11 @@ fn bytes_should_fail_on_length_prefixed_index() {
         }
     "#};
 
-    assert!(parse_unwrap_err(dml).contains("length argument is not supported"))
+    assert_valid(dml);
 }
 
 #[test]
-fn bytes_should_fail_on_length_prefixed_unique() {
+fn bytes_supports_length_prefixed_unique() {
     let dml = indoc! {r#"
         datasource db {
           provider = "kingbase-mysql"
@@ -596,7 +639,7 @@ fn bytes_should_fail_on_length_prefixed_unique() {
         }
     "#};
 
-    assert!(parse_unwrap_err(dml).contains("length argument is not supported"))
+    assert_valid(dml);
 }
 
 #[test]
@@ -944,40 +987,59 @@ fn kingbase_mysql_uses_independent_native_type_defaults() {
 }
 
 #[test]
-fn small_unsigned_native_types_are_rejected() {
-    let schema = indoc! {r#"
+fn small_unsigned_native_types_are_supported_on_int_fields() {
+    assert_valid(indoc! {r#"
         datasource db {
           provider = "kingbase-mysql"
         }
 
         model Counter {
           id Int @id
-          tiny Int @db.UnsignedTinyInt
-          small Int @db.UnsignedSmallInt
-          medium Int @db.UnsignedMediumInt
+          tiny Int @default(255) @db.UnsignedTinyInt
+          small Int? @db.UnsignedSmallInt
+          medium Int @default(16777215) @db.UnsignedMediumInt
         }
-    "#};
-    let expected = expect![[r#"
-        [1;91merror[0m: [1mError validating: Small unsigned integer native types are not supported by this Kingbase MySQL connector. Use a supported native type or migrate the column explicitly; Prisma does not emulate these types with domains or triggers.[0m
-          [1;94m-->[0m  [4mschema.prisma:7[0m
-        [1;94m   | [0m
-        [1;94m 6 | [0m  id Int @id
-        [1;94m 7 | [0m  tiny Int [1;91m@db.UnsignedTinyInt[0m
-        [1;94m   | [0m
-        [1;91merror[0m: [1mError validating: Small unsigned integer native types are not supported by this Kingbase MySQL connector. Use a supported native type or migrate the column explicitly; Prisma does not emulate these types with domains or triggers.[0m
-          [1;94m-->[0m  [4mschema.prisma:8[0m
-        [1;94m   | [0m
-        [1;94m 7 | [0m  tiny Int @db.UnsignedTinyInt
-        [1;94m 8 | [0m  small Int [1;91m@db.UnsignedSmallInt[0m
-        [1;94m   | [0m
-        [1;91merror[0m: [1mError validating: Small unsigned integer native types are not supported by this Kingbase MySQL connector. Use a supported native type or migrate the column explicitly; Prisma does not emulate these types with domains or triggers.[0m
-          [1;94m-->[0m  [4mschema.prisma:9[0m
-        [1;94m   | [0m
-        [1;94m 8 | [0m  small Int @db.UnsignedSmallInt
-        [1;94m 9 | [0m  medium Int [1;91m@db.UnsignedMediumInt[0m
-        [1;94m   | [0m
-    "#]];
-    expect_error(schema, &expected);
+    "#});
+}
+
+#[test]
+fn small_and_medium_unsigned_autoincrement_are_supported() {
+    for native in ["UnsignedSmallInt", "UnsignedMediumInt"] {
+        assert_valid(&format!(
+            "datasource db {{\n provider = \"kingbase-mysql\"\n }}\nmodel Counter {{\n id Int @id @default(autoincrement()) @db.{native}\n }}"
+        ));
+    }
+}
+
+#[test]
+fn unsigned_tinyint_autoincrement_is_rejected() {
+    let error = parse_unwrap_err(indoc! {r#"
+        datasource db {
+          provider = "kingbase-mysql"
+        }
+
+        model Counter {
+          id Int @id @default(autoincrement()) @db.UnsignedTinyInt
+        }
+    "#});
+    assert!(error.contains("Kingbase MySQL does not support autoincrement() on UnsignedTinyInt."));
+}
+
+#[test]
+fn unsigned_tinyint_is_not_a_boolean_native_type() {
+    let error = parse_unwrap_err(indoc! {r#"
+        datasource db {
+          provider = "kingbase-mysql"
+        }
+
+        model Counter {
+          id Int @id
+          enabled Boolean @db.UnsignedTinyInt
+        }
+    "#});
+    assert!(error.contains(
+        "Native type UnsignedTinyInt is not compatible with declared field type Boolean, expected field type Int."
+    ));
 }
 
 #[test]

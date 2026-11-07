@@ -4,20 +4,8 @@ use crate::{getters::Getter, parsers::Parser, *};
 use indexmap::IndexMap;
 use psl::{builtin_connectors::KingbaseMySqlType, datamodel_connector::NativeTypeInstance};
 use quaint::prelude::{Queryable, ResultRow};
-use std::{
-    collections::{HashMap, HashSet},
-    sync::LazyLock,
-};
+use std::{collections::HashMap, sync::LazyLock};
 use tracing::trace;
-
-/// Matches a default value in the schema, wrapped single quotes.
-///
-/// Example:
-///
-/// ```ignore
-/// 'this is a test'
-/// ```
-static DEFAULT_QUOTES: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"'(.*)'").unwrap());
 
 fn is_mariadb(version: &str) -> bool {
     version.contains("MariaDB")
@@ -26,6 +14,12 @@ fn is_mariadb(version: &str) -> bool {
 enum Flavour {
     Mysql,
     MariaDb,
+}
+
+struct EnumColumn {
+    namespace: String,
+    name: String,
+    variants: Vec<String>,
 }
 
 impl Flavour {
@@ -60,8 +54,6 @@ pub struct KingbaseMysqlSchemaExt {
     pub primary_key_constraint_names: HashMap<IndexId, String>,
 }
 
-pub const UNSIGNED_AUTO_GUARD_BODY: &str = "DECLARE v bigint; BEGIN v := jsonb_extract_path_text(to_jsonb(NEW),TG_ARGV[0])::bigint; IF v < 0 OR v > TG_ARGV[1]::bigint THEN RAISE EXCEPTION 'Value out of range for small unsigned integer' USING ERRCODE='23514'; END IF; RETURN NEW; END;";
-
 pub const INDEX_LOGICAL_NAME_PREFIX: &str = "prisma:logical-index:";
 
 /// Stable, schema-wide physical name for a custom, table-scoped MySQL name.
@@ -75,6 +67,112 @@ pub fn physical_index_name(table: &str, logical_name: &str) -> String {
             (hash ^ u64::from(byte)).wrapping_mul(0x100000001b3)
         });
     format!("_prisma_idx_{hash:016x}")
+}
+
+/// Compare numeric default cast chains after removing only casts that preserve
+/// the exact literal. This does not evaluate expressions or rewrite their SQL.
+/// Callers must restrict this comparison to numeric columns.
+pub fn numeric_default_expressions_match(previous: &str, next: &str) -> bool {
+    use sqlparser::{
+        ast::{CastKind, DataType, ExactNumberInfo, Expr, UnaryOperator, Value},
+        dialect::PostgreSqlDialect,
+        parser::Parser as SqlParser,
+        tokenizer::Token,
+    };
+
+    #[derive(PartialEq)]
+    struct NumericExpression {
+        literal: bigdecimal::BigDecimal,
+        casts: Vec<(u64, i64)>,
+        quoted: bool,
+    }
+
+    fn normalize(expression: &Expr) -> Option<NumericExpression> {
+        match expression {
+            Expr::Nested(inner) => normalize(inner),
+            Expr::Value(value) => {
+                let (literal, quoted) = match &value.value {
+                    Value::Number(number, false) => (number, false),
+                    Value::SingleQuotedString(number) => (number, true),
+                    _ => return None,
+                };
+                Some(NumericExpression {
+                    literal: literal.parse().ok()?,
+                    casts: Vec::new(),
+                    quoted,
+                })
+            }
+            Expr::UnaryOp {
+                op: UnaryOperator::Minus | UnaryOperator::Plus,
+                expr,
+            } => {
+                let mut inner = normalize(expr)?;
+                if inner.quoted || !inner.casts.is_empty() {
+                    return None;
+                }
+                if matches!(
+                    expression,
+                    Expr::UnaryOp {
+                        op: UnaryOperator::Minus,
+                        ..
+                    }
+                ) {
+                    inner.literal = -inner.literal;
+                }
+                Some(inner)
+            }
+            Expr::Cast {
+                kind: kind @ (CastKind::DoubleColon | CastKind::Cast),
+                expr,
+                data_type,
+                array: false,
+                format: None,
+            } => {
+                let (DataType::Numeric(info) | DataType::Decimal(info)) = data_type else {
+                    return None;
+                };
+                let mut inner = normalize(expr)?;
+                inner.quoted = false;
+                let (precision, scale) = match info {
+                    // A parameterless MySQL CAST can supply implicit precision.
+                    // Only the explicitly sized CAST forms are normalized here.
+                    ExactNumberInfo::None if matches!(kind, CastKind::Cast) => return None,
+                    ExactNumberInfo::None => return Some(inner),
+                    ExactNumberInfo::Precision(p) => (*p, 0),
+                    ExactNumberInfo::PrecisionAndScale(p, s) => (*p, *s),
+                };
+                if !(1..=1000).contains(&precision) || !(0..=1000).contains(&scale) {
+                    return None;
+                }
+                // After a semantic cast, the original literal no longer proves
+                // that a later typmod is harmless. Keep the remaining chain.
+                if !inner.casts.is_empty()
+                    || !SqlSchemaDescriber::numeric_default_fits_cast(
+                        &inner.literal,
+                        &format!("numeric({precision},{scale})"),
+                    )
+                {
+                    inner.casts.push((precision, scale));
+                }
+                Some(inner)
+            }
+            _ => None,
+        }
+    }
+
+    let parse = |input: &str| {
+        let mut parser = SqlParser::new(&PostgreSqlDialect {}).try_with_sql(input).ok()?;
+        let expression = parser.parse_expr().ok()?;
+        if parser.peek_token().token != Token::EOF {
+            return None;
+        }
+        let normalized = normalize(&expression)?;
+        (!normalized.quoted).then_some(normalized)
+    };
+    match (parse(previous), parse(next)) {
+        (Some(previous), Some(next)) => previous == next,
+        _ => false,
+    }
 }
 
 pub struct SqlSchemaDescriber<'a> {
@@ -100,10 +198,10 @@ impl super::SqlSchemaDescriberBackend for SqlSchemaDescriber<'_> {
         sql_schema.tables.reserve(table_names.len());
         sql_schema.table_columns.reserve(table_names.len());
 
-        self.get_constraints(&table_names, &mut sql_schema).await?;
+        self.get_constraints(schema, &table_names, &mut sql_schema).await?;
 
-        let legacy_unsigned = Self::get_all_columns(&table_names, self.conn, schema, &mut sql_schema, &flavour).await?;
-        push_foreign_keys(schema, &table_names, &mut sql_schema, self.conn, &legacy_unsigned).await?;
+        Self::get_all_columns(&table_names, self.conn, schema, &mut sql_schema, &flavour).await?;
+        push_foreign_keys(schema, &table_names, &mut sql_schema, self.conn).await?;
         push_indexes(&table_names, schema, &mut sql_schema, self.conn).await?;
 
         sql_schema.procedures = self.get_procedures(schema).await?;
@@ -128,6 +226,15 @@ async fn push_indexes(
     let sql = include_str!("kingbase_mysql/indexes_query.sql");
 
     let rows = conn.query_raw(sql, &[schema_name.into()]).await?;
+    push_index_rows(table_ids, sql_schema, rows);
+    Ok(())
+}
+
+fn push_index_rows(
+    table_ids: &IndexMap<String, TableId>,
+    sql_schema: &mut SqlSchema,
+    rows: quaint::connector::ResultSet,
+) {
     // `SqlSchema` walkers expect indexes to be grouped by table id. The
     // catalog query's collation is not guaranteed to match the binary sort
     // used when table ids are assigned, so normalize the order here instead
@@ -153,6 +260,7 @@ async fn push_indexes(
     let mut ext = KingbaseMysqlSchemaExt::default();
     let mut current_index_id: Option<IndexId> = None;
     let mut skip_current_index = false;
+    let mut expression_position = 0;
 
     let remove_last_index = |schema: &mut SqlSchema, ext: &mut KingbaseMysqlSchemaExt, index_id: IndexId| {
         ext.unique_constraint_names.remove(&index_id);
@@ -176,7 +284,7 @@ async fn push_indexes(
             .and_then(|comment| comment.strip_prefix(INDEX_LOGICAL_NAME_PREFIX).map(str::to_owned))
             .filter(|logical| !logical.is_empty() && physical_name.starts_with("_prisma_idx_"))
             .unwrap_or_else(|| physical_name.clone());
-        let length = row.get_u32("partial");
+        let mut length = row.get_u32("partial");
 
         let sort_order = row.get_string("column_order").map(|v| match v.as_ref() {
             "A" => SQLSortOrder::Asc,
@@ -189,6 +297,7 @@ async fn push_indexes(
         if seq_in_index == 1 {
             current_index_id = None;
             skip_current_index = false;
+            expression_position = 0;
         }
 
         if seq_in_index == 1
@@ -216,9 +325,24 @@ async fn push_indexes(
             continue;
         }
 
-        let column_name = if let Some(name) = row.get_string("column_name") {
-            name
-        } else {
+        let column_name = row.get_string("column_name").or_else(|| {
+            let position = expression_position;
+            expression_position += 1;
+            if !index_expression_is_prefix(row.get_string("index_expression_nodes").as_deref(), position) {
+                return None;
+            }
+            let (name, prefix_length) = prefix_index_column(row.get_string("index_column_definition").as_deref()?)?;
+            let column = sql_schema.walk(table_id).column(&name)?;
+            if !matches!(
+                column.column_type_family(),
+                ColumnTypeFamily::String | ColumnTypeFamily::Binary
+            ) {
+                return None;
+            }
+            length = Some(prefix_length);
+            Some(name)
+        });
+        let Some(column_name) = column_name else {
             // Prisma does not model arbitrary expression indexes. Skip the
             // whole index, including any later ordinary columns, rather than
             // attaching those columns to the previous index.
@@ -277,8 +401,71 @@ async fn push_indexes(
     }
 
     sql_schema.set_connector_data(Box::new(ext));
+}
 
-    Ok(())
+/// A function call such as `abs(8)` can have the same deparsed spelling as a
+/// prefix on a column named `abs`. Only R3's PREFIXINDEX nodes are prefixes.
+/// Positions count expression keys, excluding ordinary columns in indkey.
+fn index_expression_is_prefix(nodes: Option<&str>, position: usize) -> bool {
+    let Some(nodes) = nodes else { return false };
+    let mut depth = 0_u32;
+    let mut quoted = false;
+    let mut escaped = false;
+    let mut expression = 0;
+    for (offset, character) in nodes.char_indices() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        if character == '\\' {
+            escaped = true;
+        } else if character == '"' {
+            quoted = !quoted;
+        } else if !quoted {
+            match character {
+                '{' => {
+                    if depth == 0 {
+                        if expression == position {
+                            return nodes[offset + 1..].split_whitespace().next() == Some("PREFIXINDEX");
+                        }
+                        expression += 1;
+                    }
+                    depth += 1;
+                }
+                '}' => match depth.checked_sub(1) {
+                    Some(next) => depth = next,
+                    None => return false,
+                },
+                _ => (),
+            }
+        }
+    }
+    false
+}
+
+fn prefix_index_column(definition: &str) -> Option<(String, u32)> {
+    let (identifier, length) = definition.strip_suffix(')')?.rsplit_once('(')?;
+    let length: u32 = length.parse().ok()?;
+    if length == 0 {
+        return None;
+    }
+    let name = if let Some(quoted) = identifier.strip_prefix('"') {
+        let mut characters = quoted.strip_suffix('"')?.chars().peekable();
+        let mut name = String::new();
+        while let Some(character) = characters.next() {
+            if character == '"' && characters.next() != Some('"') {
+                return None;
+            }
+            name.push(character);
+        }
+        name
+    } else {
+        if identifier.is_empty() || !identifier.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '$') {
+            return None;
+        }
+        identifier.to_owned()
+    };
+    Some((name, length))
 }
 
 fn fulltext_index_columns(index_expression: Option<&str>) -> Option<Vec<String>> {
@@ -564,73 +751,8 @@ impl<'a> SqlSchemaDescriber<'a> {
         schema_name: &str,
         sql_schema: &mut SqlSchema,
         flavour: &Flavour,
-    ) -> DescriberResult<HashSet<TableColumnId>> {
+    ) -> DescriberResult<()> {
         let user_defined_enum_variants = Self::get_user_defined_enum_variants(conn, schema_name).await?;
-        let domain_columns = conn
-            .query_raw(
-                include_str!("kingbase_mysql/unsigned_domains_query.sql"),
-                &[schema_name.into()],
-            )
-            .await?;
-        let mut managed_unsigned: HashMap<_, _> = domain_columns
-            .into_iter()
-            .filter_map(|row| {
-                let domain_name = row.get_string("domain_name")?;
-                let maximum = match domain_name.as_str() {
-                    "__prisma_uint8" => 255,
-                    "__prisma_uint16" => 65535,
-                    "__prisma_uint24" => 16777215,
-                    _ => return None,
-                };
-                let domain_schema = row.get_expect_string("domain_schema");
-                let type_name = format!(
-                    "\"{}\".\"{}\"",
-                    domain_schema.replace('"', "\"\""),
-                    domain_name.replace('"', "\"\"")
-                );
-                let expression = row
-                    .get_string("range_expression")?
-                    .replace("OPERATOR(sys.<=)", "<=")
-                    .replace(' ', "");
-                (expression == format!("(VALUE<={maximum})")).then(|| {
-                    (
-                        (
-                            row.get_expect_string("table_name"),
-                            row.get_expect_string("column_name"),
-                        ),
-                        type_name,
-                    )
-                })
-            })
-            .collect();
-
-        let auto_columns = conn
-            .query_raw(
-                include_str!("kingbase_mysql/unsigned_auto_increment_query.sql"),
-                &[schema_name.into()],
-            )
-            .await?;
-        for row in auto_columns {
-            if row.get_expect_string("body") != UNSIGNED_AUTO_GUARD_BODY {
-                continue;
-            }
-            let Some(arguments) = row.get("trigger_arguments").and_then(|value| value.as_bytes()) else {
-                continue;
-            };
-            let arguments: Vec<_> = arguments.split(|byte| *byte == 0).collect();
-            if arguments.len() != 3 || !arguments[2].is_empty() {
-                continue;
-            }
-            let name = row.get_expect_string("column_name");
-            if arguments[0] != name.as_bytes() {
-                continue;
-            }
-            if !matches!(arguments[1], b"255" | b"65535" | b"16777215") {
-                continue;
-            }
-            managed_unsigned.insert((row.get_expect_string("table_name"), name), "INTEGER".to_owned());
-        }
-
         // We alias all the columns because MySQL column names are case-insensitive in queries, but the
         // information schema column names became upper-case in MySQL 8, causing the code fetching
         // the result values by column name below to fail.
@@ -683,26 +805,18 @@ impl<'a> SqlSchemaDescriber<'a> {
             };
 
             let default_value = col.get("column_default");
+            let enum_column = user_defined_enum_variants.get(&(table_name.clone(), name.clone()));
 
-            let mut tpe = Self::get_column_type(
+            let tpe = Self::get_column_type(
                 (&table_name, &name),
                 (&data_type, &full_data_type),
                 precision,
                 arity,
                 sql_schema,
-                &user_defined_enum_variants,
+                enum_column,
             );
-            if let Some(type_name) = managed_unsigned.get(&(table_name.clone(), name.clone())) {
-                // Legacy emulation objects remain in the database. Expose them
-                // through the framework's Unsupported/warning path, never as a
-                // native type now rejected by PSL or as an unrestricted integer.
-                tpe.family = ColumnTypeFamily::Unsupported(type_name.clone());
-                tpe.full_data_type.clone_from(type_name);
-                tpe.native_type = None;
-            }
             let extra = col.get_string("extra").unwrap_or_default().to_lowercase();
-            let auto_increment = matches!(extra.as_str(), "auto_increment")
-                && !managed_unsigned.contains_key(&(table_name.clone(), name.clone()));
+            let auto_increment = matches!(extra.as_str(), "auto_increment");
 
             let default = match default_value {
                 None => None,
@@ -725,19 +839,11 @@ impl<'a> SqlSchemaDescriber<'a> {
                                 None if default_expression => Self::dbgenerated_expression(&default_string),
                                 None => DefaultValue::db_generated(default_string),
                             },
-                            ColumnTypeFamily::Float => match Self::parse_float(
-                                default_string
-                                    .split_once("::")
-                                    .map_or(&default_string, |(value, _)| value),
-                            ) {
-                                Some(float_value) => DefaultValue::value(float_value),
-                                None if default_expression => Self::dbgenerated_expression(&default_string),
-                                None => DefaultValue::db_generated(default_string),
-                            },
-                            ColumnTypeFamily::Decimal => match Self::parse_float(
-                                default_string
-                                    .split_once("::")
-                                    .map_or(&default_string, |(value, _)| value),
+                            ColumnTypeFamily::Float | ColumnTypeFamily::Decimal => match Self::parse_float_default(
+                                &default_string,
+                                tpe.native_type
+                                    .as_ref()
+                                    .map(|native| native.downcast_ref::<KingbaseMySqlType>()),
                             ) {
                                 Some(float_value) => DefaultValue::value(float_value),
                                 None if default_expression => Self::dbgenerated_expression(&default_string),
@@ -771,25 +877,13 @@ impl<'a> SqlSchemaDescriber<'a> {
                                     DefaultValue::db_generated(default_string)
                                 }
                             }
-                            ColumnTypeFamily::DateTime => {
-                                // Kingbase exposes literal temporal defaults with a PostgreSQL
-                                // type cast (for example `'2020-01-01'::date`). The cast is
-                                // catalog decoration; retain the literal expected by the
-                                // Prisma schema so a second schema push is idempotent.
-                                let default_string = default_string
-                                    .split_once("::")
-                                    .filter(|(_, cast)| matches!(*cast, "date" | "time" | "timestamp"))
-                                    .map_or(default_string.as_str(), |(value, _)| value);
-
-                                match Self::default_is_current_timestamp(default_string) {
-                                    true => DefaultValue::now(),
-                                    _ if default_expression => Self::dbgenerated_expression(default_string),
-                                    _ if DEFAULT_QUOTES.is_match(default_string) => {
-                                        DefaultValue::db_generated(default_string.to_owned())
-                                    }
-                                    _ => DefaultValue::db_generated(format!("'{default_string}'")),
-                                }
-                            }
+                            ColumnTypeFamily::DateTime => Self::temporal_default(
+                                &default_string,
+                                tpe.native_type
+                                    .as_ref()
+                                    .map(|native| native.downcast_ref::<KingbaseMySqlType>()),
+                                col.get_bool("default_has_explicit_cast"),
+                            ),
                             ColumnTypeFamily::Binary => match default_expression {
                                 true => Self::dbgenerated_expression(&default_string),
                                 false => DefaultValue::db_generated(default_string),
@@ -807,9 +901,11 @@ impl<'a> SqlSchemaDescriber<'a> {
                                     || (maria_db && !matches!(default_string.chars().next(), Some('\'')))
                                 {
                                     Self::dbgenerated_expression(&default_string)
-                                } else if let Some(literal) =
-                                    Self::enum_default_literal(&default_string, schema_name, &full_data_type)
-                                {
+                                } else if let Some(literal) = Self::enum_default_literal(
+                                    &default_string,
+                                    enum_column.map_or(schema_name, |column| column.namespace.as_str()),
+                                    enum_column.map_or(full_data_type.as_str(), |column| column.name.as_str()),
+                                ) {
                                     DefaultValue::value(PrismaValue::Enum(Self::unquote_default_literal(literal)))
                                 } else {
                                     DefaultValue::db_generated(default_string)
@@ -870,31 +966,34 @@ impl<'a> SqlSchemaDescriber<'a> {
             }
         }
 
-        Ok(managed_unsigned
-            .keys()
-            .filter_map(|(table, column)| {
-                let table_id = *table_ids.get(table)?;
-                Some(sql_schema.walk(table_id).column(column)?.id)
-            })
-            .collect())
+        Ok(())
     }
 
     async fn get_user_defined_enum_variants(
         conn: &dyn Queryable,
         schema_name: &str,
-    ) -> DescriberResult<HashMap<String, Vec<String>>> {
+    ) -> DescriberResult<HashMap<(String, String), EnumColumn>> {
         // Kingbase exposes MySQL ENUM columns through user-defined
         // types. The information_schema COLUMNS view only contains the generated type name,
-        // so fetch the labels from sys_enum separately.
+        // so follow each column's type OID to sys_enum, independently of search_path.
         let sql = include_str!("kingbase_mysql/enums_query.sql");
 
         let rows = conn.query_raw(sql, &[schema_name.into()]).await?;
         let mut variants = HashMap::new();
 
         for row in rows {
-            let type_name = row.get_expect_string("type_name");
+            let table_name = row.get_expect_string("table_name");
+            let column_name = row.get_expect_string("column_name");
             let enum_label = row.get_expect_string("enum_label");
-            variants.entry(type_name).or_insert_with(Vec::new).push(enum_label);
+            variants
+                .entry((table_name, column_name))
+                .or_insert_with(|| EnumColumn {
+                    namespace: row.get_expect_string("type_namespace"),
+                    name: row.get_expect_string("type_name"),
+                    variants: Vec::new(),
+                })
+                .variants
+                .push(enum_label);
         }
 
         Ok(variants)
@@ -921,6 +1020,72 @@ impl<'a> SqlSchemaDescriber<'a> {
         Self::parse_int(value)
     }
 
+    /// Only normalize casts that preserve a numeric literal at the column's
+    /// precision. KES also decorates ordinary numeric literals with typmods;
+    /// normalize those only when the literal fits without rounding or overflow.
+    fn parse_float_default(value: &str, native_type: Option<&KingbaseMySqlType>) -> Option<PrismaValue> {
+        let value = value.trim();
+        let (literal, suffix) = match Self::quoted_default_parts(value) {
+            Some(parts) => parts,
+            None if value.contains('\'') => return None,
+            None => value.find("::").map_or((value, ""), |offset| value.split_at(offset)),
+        };
+        let parsed = Self::parse_float(literal.trim())?;
+        let PrismaValue::Float(number) = &parsed else {
+            return None;
+        };
+        let mut floating_cast = false;
+        if !suffix.is_empty() {
+            let casts = suffix.strip_prefix("::")?;
+            for cast in casts.split("::") {
+                let cast = cast.trim().to_ascii_lowercase();
+                let cast = cast
+                    .strip_prefix("pg_catalog.")
+                    .or_else(|| cast.strip_prefix("sys_catalog."))
+                    .unwrap_or(&cast);
+                match cast {
+                    "numeric" | "decimal" => (),
+                    "real" if matches!(native_type, Some(KingbaseMySqlType::Float)) => floating_cast = true,
+                    "double precision" if matches!(native_type, Some(KingbaseMySqlType::Double)) => {
+                        floating_cast = true
+                    }
+                    _ if !floating_cast && Self::numeric_default_fits_cast(number, cast) => (),
+                    _ => return None,
+                }
+            }
+        }
+        Some(parsed)
+    }
+
+    fn numeric_default_fits_cast(number: &bigdecimal::BigDecimal, cast: &str) -> bool {
+        let Some((name, parameters)) = cast.split_once('(') else {
+            return false;
+        };
+        if !matches!(name.trim(), "numeric" | "decimal") {
+            return false;
+        }
+        let Some(parameters) = parameters.strip_suffix(')') else {
+            return false;
+        };
+        let (precision, scale) = parameters.split_once(',').unwrap_or((parameters, "0"));
+        let (Ok(precision), Ok(scale)) = (precision.trim().parse::<i64>(), scale.trim().parse::<i64>()) else {
+            return false;
+        };
+        if !(1..=1000).contains(&precision) || !(0..=1000).contains(&scale) {
+            return false;
+        }
+        let (coefficient, fractional_digits) = number.normalized().as_bigint_and_exponent();
+        let coefficient = coefficient.to_string();
+        if coefficient == "0" {
+            return true;
+        }
+        let digits = coefficient.trim_start_matches('-').len() as i64;
+        let Some(integer_digits) = digits.checked_sub(fractional_digits) else {
+            return false;
+        };
+        fractional_digits <= scale && integer_digits.max(0) <= (precision - scale).max(0)
+    }
+
     fn parse_big_int_default(value: &str) -> Option<PrismaValue> {
         let value = value
             .split_once("::")
@@ -936,7 +1101,7 @@ impl<'a> SqlSchemaDescriber<'a> {
         precision: Precision,
         arity: ColumnArity,
         sql_schema: &mut SqlSchema,
-        user_defined_enum_variants: &HashMap<String, Vec<String>>,
+        enum_column: Option<&EnumColumn>,
     ) -> ColumnType {
         static UNSIGNEDNESS_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new("(?i)unsigned$").unwrap());
 
@@ -948,8 +1113,14 @@ impl<'a> SqlSchemaDescriber<'a> {
             .trim()
             .to_ascii_lowercase();
         let (family, native_type) = match data_type.as_str() {
-            "uint4" => (ColumnTypeFamily::Int, Some(KingbaseMySqlType::UnsignedInt)),
-            "uint8" => (ColumnTypeFamily::BigInt, Some(KingbaseMySqlType::UnsignedBigInt)),
+            // R1 reports catalog names, while R3 reports MySQL unsigned names.
+            "uint4" | "int unsigned" | "integer unsigned" => {
+                (ColumnTypeFamily::Int, Some(KingbaseMySqlType::UnsignedInt))
+            }
+            "uint8" | "bigint unsigned" => (ColumnTypeFamily::BigInt, Some(KingbaseMySqlType::UnsignedBigInt)),
+            "tinyint unsigned" => (ColumnTypeFamily::Int, Some(KingbaseMySqlType::UnsignedTinyInt)),
+            "smallint unsigned" => (ColumnTypeFamily::Int, Some(KingbaseMySqlType::UnsignedSmallInt)),
+            "mediumint unsigned" => (ColumnTypeFamily::Int, Some(KingbaseMySqlType::UnsignedMediumInt)),
             "int" | "integer" if UNSIGNEDNESS_RE.is_match(full_data_type) => {
                 (ColumnTypeFamily::Int, Some(KingbaseMySqlType::UnsignedInt))
             }
@@ -1025,30 +1196,18 @@ impl<'a> SqlSchemaDescriber<'a> {
                 push_enum_variants(full_data_type, enum_id, sql_schema);
                 (ColumnTypeFamily::Enum(enum_id), None)
             }
-            "user-defined"
-                if full_data_type
-                    .get(..5)
-                    .is_some_and(|prefix| prefix.eq_ignore_ascii_case("enum_")) =>
-            {
-                let enum_name = format!("{table}_{column_name}");
-                let enum_id = sql_schema.push_enum(Default::default(), enum_name, None);
-
-                let variants = user_defined_enum_variants.get(full_data_type).or_else(|| {
-                    user_defined_enum_variants
-                        .iter()
-                        .find(|(type_name, _)| type_name.eq_ignore_ascii_case(full_data_type))
-                        .map(|(_, variants)| variants)
-                });
-
-                if let Some(variants) = variants {
-                    for variant in variants {
+            "user-defined" => match enum_column {
+                Some(enum_column) => {
+                    let enum_name = format!("{table}_{column_name}");
+                    let enum_id = sql_schema.push_enum(Default::default(), enum_name, None);
+                    for variant in &enum_column.variants {
                         sql_schema.push_enum_variant(enum_id, variant.clone());
                     }
+                    (ColumnTypeFamily::Enum(enum_id), None)
                 }
-
-                (ColumnTypeFamily::Enum(enum_id), None)
-            }
-            "user-defined" if full_data_type.starts_with("Set_") => (ColumnTypeFamily::String, None),
+                None if full_data_type.starts_with("Set_") => (ColumnTypeFamily::String, None),
+                None => (ColumnTypeFamily::Unsupported(full_data_type.into()), None),
+            },
             "json" => (ColumnTypeFamily::Json, Some(KingbaseMySqlType::Json)),
             "set" => (ColumnTypeFamily::String, None),
             //temporal
@@ -1128,35 +1287,29 @@ impl<'a> SqlSchemaDescriber<'a> {
     /// Namely, this currently just returns CHECK constraints.
     async fn get_constraints(
         &self,
+        schema_name: &str,
         table_names: &IndexMap<String, TableId>,
         sql_schema: &mut SqlSchema,
     ) -> DescriberResult<()> {
-        // Only MySQL 8.0.16 and above supports check constraints and has the CHECK_CONSTRAINTS table we can query.
         if !self.supports_check_constraints() {
             return Ok(());
         }
 
-        // Note: in MySQL, columns must be re-aliased, otherwise their casing would be inconsistent (and uppercased).
-        let sql = include_str!("mysql/constraints_query.sql");
+        let sql = include_str!("kingbase_mysql/constraints_query.sql");
 
-        let rows = self.conn.query_raw(sql, &[]).await?;
+        let rows = self.conn.query_raw(sql, &[schema_name.into()]).await?;
 
         for row in rows {
             let table_name = row.get_expect_string("table_name");
             let constraint_name = row.get_expect_string("constraint_name");
             let constraint_type = row.get_expect_string("constraint_type");
-            let constraint_definition = row.get_string("constraint_definition");
 
             let table_id = match table_names.get(&table_name) {
                 Some(id) => *id,
                 None => continue,
             };
 
-            if constraint_type.as_str() == "check"
-                && !constraint_definition
-                    .as_deref()
-                    .is_some_and(|definition| definition.to_ascii_lowercase().contains("is not null"))
-            {
+            if constraint_type.as_str() == "check" {
                 sql_schema.check_constraints.push((table_id, constraint_name));
             }
         }
@@ -1243,6 +1396,38 @@ impl<'a> SqlSchemaDescriber<'a> {
         literal[1..literal.len() - 1].replace("''", "'")
     }
 
+    fn temporal_default(
+        value: &str,
+        native_type: Option<&KingbaseMySqlType>,
+        has_explicit_cast: Option<bool>,
+    ) -> DefaultValue {
+        if Self::default_is_current_timestamp(value) {
+            return DefaultValue::now();
+        }
+
+        // Deparsed SQL alone cannot distinguish an implicit TIME assignment
+        // from an explicit TIME(0). Only remove decoration when the stored
+        // expression confirms there is no explicit cast; missing metadata stays SQL.
+        if has_explicit_cast == Some(false)
+            && let Some((literal, suffix)) = Self::quoted_default_parts(value)
+        {
+            let cast = match native_type {
+                Some(KingbaseMySqlType::Date) => "::date",
+                Some(KingbaseMySqlType::Time(_)) => "::time",
+                Some(KingbaseMySqlType::Timestamp(_)) => "::timestamp",
+                Some(KingbaseMySqlType::DateTime(_)) => "::datetime",
+                _ => "",
+            };
+            if suffix == cast {
+                return DefaultValue::db_generated(literal.to_owned());
+            }
+        }
+
+        // Keep functions and semantic casts as SQL, including now(): on R3
+        // now() has second precision, unlike CURRENT_TIMESTAMP(3).
+        DefaultValue::db_generated(value.to_owned())
+    }
+
     /// Tests whether an introspected default value should be categorized as current_timestamp.
     fn default_is_current_timestamp(default_str: &str) -> bool {
         static MYSQL_CURRENT_TIMESTAMP_RE: LazyLock<Regex> =
@@ -1262,7 +1447,6 @@ async fn push_foreign_keys(
     table_ids: &IndexMap<String, TableId>,
     sql_schema: &mut SqlSchema,
     conn: &dyn Queryable,
-    legacy_unsigned: &HashSet<TableColumnId>,
 ) -> DescriberResult<()> {
     // We alias all the columns because MySQL column names are case-insensitive in queries, but
     // the information schema column names became upper-case in MySQL 8, causing the code
@@ -1292,6 +1476,22 @@ async fn push_foreign_keys(
 
     for row in result_set.into_iter() {
         trace!("Got description FK row {row:#?}");
+        let table_name = row.get_expect_string("table_name");
+        if !table_ids.contains_key(&table_name) {
+            continue;
+        }
+        let referenced_schema = row.get_expect_string("referenced_table_schema");
+        // Validate before resolving table names, even when the selected schema
+        // contains a same-named target or contains no target at all.
+        if referenced_schema != schema_name {
+            return Err(DescriberErrorKind::CrossSchemaReference {
+                from: format!("{schema_name}.{table_name}"),
+                to: format!("{referenced_schema}.{}", row.get_expect_string("referenced_table_name")),
+                constraint: row.get_expect_string("constraint_name"),
+                missing_namespace: referenced_schema,
+            }
+            .into());
+        }
         let (table_id, column_id, referenced_table_id, referenced_column_id) =
             if let Some(ids) = get_ids(&row, table_ids, sql_schema) {
                 ids
@@ -1299,17 +1499,6 @@ async fn push_foreign_keys(
                 continue;
             };
         let constraint_name = row.get_expect_string("constraint_name");
-        if (legacy_unsigned.contains(&column_id) || legacy_unsigned.contains(&referenced_column_id))
-            && sql_schema.walk(column_id).column_type_family()
-                != sql_schema.walk(referenced_column_id).column_type_family()
-        {
-            // Unsupported relation fields must have the same type in PSL.
-            // Keep the actual physical types and constraints intact rather than
-            // hiding a foreign key or emitting an invalid datamodel.
-            return Err(quaint::error::Error::builder(quaint::error::ErrorKind::ConversionError(format!(
-                "Legacy small unsigned emulation in foreign key `{constraint_name}` uses incompatible physical types. Migrate the legacy columns and foreign key explicitly before introspection or schema migration; Prisma does not emulate these types."
-            ).into())).build().into());
-        }
         let on_delete_action = match row.get_expect_string("delete_rule").to_lowercase().as_str() {
             "cascade" => ForeignKeyAction::Cascade,
             "set null" => ForeignKeyAction::SetNull,
@@ -1360,7 +1549,630 @@ fn push_enum_variants(full_data_type: &str, enum_id: EnumId, sql_schema: &mut Sq
 
 #[cfg(test)]
 mod tests {
-    use super::{KingbaseMySqlType, SqlSchemaDescriber, fulltext_index_columns};
+    use super::{
+        EnumColumn, KingbaseMySqlType, SqlSchemaDescriber, fulltext_index_columns, index_expression_is_prefix,
+        numeric_default_expressions_match, prefix_index_column, push_index_rows,
+    };
+    use crate::{ColumnArity, ColumnTypeFamily, DefaultValue, Precision, PrismaValue, SqlSchema};
+
+    #[test]
+    fn enum_columns_use_catalog_metadata_instead_of_displayed_type_names() {
+        let metadata = EnumColumn {
+            namespace: "other".into(),
+            name: "Enum_status".into(),
+            variants: vec!["draft".into(), "west,east".into(), "O'Reilly".into()],
+        };
+        for displayed_type in ["Enum_status", "other.Enum_status", "\"other\".\"Enum_status\""] {
+            let mut schema = SqlSchema::default();
+            let column = SqlSchemaDescriber::get_column_type(
+                ("product", "status"),
+                ("USER-DEFINED", displayed_type),
+                Precision {
+                    character_maximum_length: None,
+                    numeric_precision: None,
+                    numeric_scale: None,
+                    time_precision: None,
+                },
+                ColumnArity::Nullable,
+                &mut schema,
+                Some(&metadata),
+            );
+            let ColumnTypeFamily::Enum(id) = column.family else {
+                panic!("expected enum for {displayed_type}");
+            };
+            let described = schema.walk(id);
+            assert_eq!(described.name(), "product_status");
+            assert_eq!(
+                described.values().collect::<Vec<_>>(),
+                vec!["draft", "west,east", "O'Reilly"]
+            );
+        }
+    }
+
+    #[test]
+    fn missing_enum_catalog_metadata_does_not_produce_an_empty_enum() {
+        let column = SqlSchemaDescriber::get_column_type(
+            ("product", "status"),
+            ("USER-DEFINED", "Enum_unknown"),
+            Precision {
+                character_maximum_length: None,
+                numeric_precision: None,
+                numeric_scale: None,
+                time_precision: None,
+            },
+            ColumnArity::Nullable,
+            &mut SqlSchema::default(),
+            None,
+        );
+        assert_eq!(column.family, ColumnTypeFamily::Unsupported("Enum_unknown".into()));
+    }
+
+    #[test]
+    fn temporal_expressions_remain_sql_without_default_generated() {
+        for expression in [
+            "CURRENT_DATE",
+            "CURRENT_TIME",
+            "now()",
+            "curdate()",
+            "make_date(2020, 1, 2)",
+            "((CURRENT_DATE)::bigint + 1)",
+            "(now())::date",
+            "CAST('2020-01-01' AS DATE)",
+            "'2020-01-01'::date + 1",
+        ] {
+            let default = SqlSchemaDescriber::temporal_default(expression, Some(&KingbaseMySqlType::Date), Some(false));
+            assert_eq!(default, DefaultValue::db_generated(expression), "{expression}");
+        }
+        for expression in ["CURRENT_TIMESTAMP", "current_timestamp()", "CURRENT_TIMESTAMP(3)"] {
+            assert_eq!(
+                SqlSchemaDescriber::temporal_default(
+                    expression,
+                    Some(&KingbaseMySqlType::DateTime(Some(3))),
+                    Some(false)
+                ),
+                DefaultValue::now(),
+                "{expression}"
+            );
+        }
+    }
+
+    #[test]
+    fn temporal_literal_casts_are_removed_only_for_the_same_column_type() {
+        for (expression, native, expected) in [
+            ("'2020-01-01'::date", KingbaseMySqlType::Date, "'2020-01-01'"),
+            ("'16:20:00'::time", KingbaseMySqlType::Time(Some(0)), "'16:20:00'"),
+            (
+                "'2020-01-01 16:20:00'::timestamp",
+                KingbaseMySqlType::Timestamp(Some(3)),
+                "'2020-01-01 16:20:00'",
+            ),
+            (
+                "'2020-01-01 16:20:00'::datetime",
+                KingbaseMySqlType::DateTime(Some(3)),
+                "'2020-01-01 16:20:00'",
+            ),
+            ("'2020-01-01'", KingbaseMySqlType::Date, "'2020-01-01'"),
+            (
+                "'2020-01-01 16:20:00'::date",
+                KingbaseMySqlType::DateTime(Some(3)),
+                "'2020-01-01 16:20:00'::date",
+            ),
+            (
+                "'16:20:00.123'::time(0)",
+                KingbaseMySqlType::Time(Some(3)),
+                "'16:20:00.123'::time(0)",
+            ),
+            (
+                "'2020-01-01'::unknown",
+                KingbaseMySqlType::Date,
+                "'2020-01-01'::unknown",
+            ),
+        ] {
+            assert_eq!(
+                SqlSchemaDescriber::temporal_default(expression, Some(&native), Some(false)),
+                DefaultValue::db_generated(expected),
+                "{expression}"
+            );
+        }
+    }
+
+    #[test]
+    fn temporal_casts_are_preserved_when_explicit_or_their_origin_is_unknown() {
+        for (expression, native, literal) in [
+            (
+                "'16:20:00.123000'::time",
+                KingbaseMySqlType::Time(Some(3)),
+                "'16:20:00.123000'",
+            ),
+            (
+                "'2020-01-01 16:20:00.123'::timestamp",
+                KingbaseMySqlType::Timestamp(Some(3)),
+                "'2020-01-01 16:20:00.123'",
+            ),
+        ] {
+            assert_eq!(
+                SqlSchemaDescriber::temporal_default(expression, Some(&native), Some(false)),
+                DefaultValue::db_generated(literal),
+            );
+            for origin in [Some(true), None] {
+                assert_eq!(
+                    SqlSchemaDescriber::temporal_default(expression, Some(&native), origin),
+                    DefaultValue::db_generated(expression),
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn prefix_keys_require_prefix_nodes_and_preserve_quoted_names() {
+        let tree =
+            r#"({FUNCEXPR :args ({CONST :value "{PREFIXINDEX fake}"})} {PREFIXINDEX :expr {VAR :varattno 2} :len 8})"#;
+        assert!(!index_expression_is_prefix(Some(tree), 0));
+        assert!(index_expression_is_prefix(Some(tree), 1));
+        assert!(!index_expression_is_prefix(Some(tree), 2));
+        assert!(!index_expression_is_prefix(None, 0));
+        for (definition, name, length) in [
+            ("value(8)", "value", 8),
+            (r#""x y"(4)"#, "x y", 4),
+            (r#""q""q"(12)"#, "q\"q", 12),
+            (r#""汉字"(3)"#, "汉字", 3),
+            (r#""a(b"(2)"#, "a(b", 2),
+        ] {
+            assert_eq!(prefix_index_column(definition), Some((name.into(), length)));
+        }
+        for expression in [
+            "lower(value)",
+            "value(0)",
+            "value(-1)",
+            "value(4294967296)",
+            "value(8) DESC",
+            "value(8)::text",
+            "schema.value(8)",
+            r#""bad"name"(8)"#,
+        ] {
+            assert_eq!(prefix_index_column(expression), None, "{expression}");
+        }
+    }
+
+    #[test]
+    fn prefix_index_rows_restore_compound_keys_and_skip_arbitrary_expressions() {
+        use crate::{Column, ColumnType, SQLSortOrder, kingbase_mysql::KingbaseMysqlSchemaExt};
+        use indexmap::IndexMap;
+        use quaint::{ast::Value, connector::ResultSet};
+
+        let mut schema = SqlSchema::default();
+        let namespace = schema.push_namespace("public".into());
+        let table = schema.push_table("items".into(), namespace, None);
+        for (name, family) in [
+            ("id", ColumnTypeFamily::Int),
+            ("value", ColumnTypeFamily::String),
+            ("abs", ColumnTypeFamily::String),
+            ("q\"q", ColumnTypeFamily::Binary),
+        ] {
+            schema.push_table_column(
+                table,
+                Column {
+                    name: name.into(),
+                    tpe: ColumnType::pure(family, ColumnArity::Required),
+                    auto_increment: false,
+                    description: None,
+                },
+            );
+        }
+        let columns = [
+            "table_name",
+            "index_name",
+            "index_description",
+            "column_name",
+            "partial",
+            "seq_in_index",
+            "column_order",
+            "non_unique",
+            "index_type",
+            "is_primary",
+            "constraint_name",
+            "index_expression",
+            "index_expression_nodes",
+            "index_column_definition",
+        ];
+        let mut rows = Vec::new();
+        let prefix_nodes =
+            "({PREFIXINDEX :expr {VAR :varattno 2} :len 8} {PREFIXINDEX :expr {VAR :varattno 4} :len 4})";
+        let function_nodes = "({FUNCEXPR :args ({CONST :value 8})} {PREFIXINDEX :expr {VAR :varattno 2} :len 8})";
+        // An ordinary key before and after an unsupported expression must not
+        // survive as an incorrectly shortened compound index.
+        for (index, unique, seq, name, definition, nodes) in [
+            ("_prisma_idx_prefix", true, 1, None, "value(8)", prefix_nodes),
+            ("_prisma_idx_prefix", true, 2, Some("id"), "id", prefix_nodes),
+            ("_prisma_idx_prefix", true, 3, None, r#""q""q"(4)"#, prefix_nodes),
+            ("expression", false, 1, Some("id"), "id", function_nodes),
+            ("expression", false, 2, None, "abs(8)", function_nodes),
+            ("expression", false, 3, None, "value(8)", function_nodes),
+            ("following", false, 1, Some("id"), "id", ""),
+            (
+                "prefix_then_expression",
+                false,
+                1,
+                None,
+                "value(8)",
+                "({PREFIXINDEX :expr {VAR} :len 8} {FUNCEXPR :args ({VAR})})",
+            ),
+            (
+                "prefix_then_expression",
+                false,
+                2,
+                None,
+                "lower(value)",
+                "({PREFIXINDEX :expr {VAR} :len 8} {FUNCEXPR :args ({VAR})})",
+            ),
+        ] {
+            rows.push(vec![
+                Value::text("items"),
+                Value::text(index),
+                Value::text("prisma:logical-index:logical_prefix"),
+                name.map(Value::text).unwrap_or(Value::null_text()),
+                Value::null_int32(),
+                Value::int64(seq),
+                Value::text(if seq == 3 { "D" } else { "A" }),
+                Value::boolean(!unique),
+                Value::text("btree"),
+                Value::boolean(false),
+                Value::null_text(),
+                Value::null_text(),
+                Value::text(nodes),
+                Value::text(definition),
+            ]);
+        }
+        // Catalog row order must not affect grouping or expression positions.
+        rows.reverse();
+        push_index_rows(
+            &IndexMap::from([("items".into(), table)]),
+            &mut schema,
+            ResultSet::new(columns.into_iter().map(str::to_owned).collect(), vec![], rows),
+        );
+        let indexes = schema.walk(table).indexes().collect::<Vec<_>>();
+        assert_eq!(indexes.len(), 2);
+        let prefix = indexes.iter().find(|index| index.name() == "logical_prefix").unwrap();
+        assert!(prefix.is_unique());
+        assert_eq!(
+            prefix
+                .columns()
+                .map(|column| (column.as_column().name(), column.length(), column.sort_order()))
+                .collect::<Vec<_>>(),
+            vec![
+                ("value", Some(8), Some(SQLSortOrder::Asc)),
+                ("id", None, Some(SQLSortOrder::Asc)),
+                ("q\"q", Some(4), Some(SQLSortOrder::Desc))
+            ]
+        );
+        let ext = schema.downcast_connector_data::<KingbaseMysqlSchemaExt>();
+        assert_eq!(ext.physical_index_names.get(&prefix.id).unwrap(), "_prisma_idx_prefix");
+        assert!(!ext.unique_constraint_names.contains_key(&prefix.id));
+        assert_eq!(
+            indexes
+                .iter()
+                .find(|index| index.name() == "following")
+                .unwrap()
+                .columns()
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn unsigned_integer_aliases_preserve_native_types_across_catalog_versions() {
+        for (data_type, full_data_type, family, native_type) in [
+            ("uint4", "uint4", ColumnTypeFamily::Int, KingbaseMySqlType::UnsignedInt),
+            (
+                "tinyint unsigned",
+                "tinyint unsigned",
+                ColumnTypeFamily::Int,
+                KingbaseMySqlType::UnsignedTinyInt,
+            ),
+            (
+                "smallint unsigned",
+                "smallint unsigned",
+                ColumnTypeFamily::Int,
+                KingbaseMySqlType::UnsignedSmallInt,
+            ),
+            (
+                "mediumint unsigned",
+                "mediumint unsigned",
+                ColumnTypeFamily::Int,
+                KingbaseMySqlType::UnsignedMediumInt,
+            ),
+            (
+                "int unsigned",
+                "int unsigned",
+                ColumnTypeFamily::Int,
+                KingbaseMySqlType::UnsignedInt,
+            ),
+            (
+                "integer unsigned",
+                "integer unsigned",
+                ColumnTypeFamily::Int,
+                KingbaseMySqlType::UnsignedInt,
+            ),
+            (
+                " INT UNSIGNED ",
+                "INT UNSIGNED",
+                ColumnTypeFamily::Int,
+                KingbaseMySqlType::UnsignedInt,
+            ),
+            (
+                "int",
+                "int(10) unsigned",
+                ColumnTypeFamily::Int,
+                KingbaseMySqlType::UnsignedInt,
+            ),
+            (
+                "int(10) unsigned",
+                "int(10) unsigned",
+                ColumnTypeFamily::Int,
+                KingbaseMySqlType::UnsignedInt,
+            ),
+            (
+                "uint8",
+                "uint8",
+                ColumnTypeFamily::BigInt,
+                KingbaseMySqlType::UnsignedBigInt,
+            ),
+            (
+                "bigint unsigned",
+                "bigint unsigned",
+                ColumnTypeFamily::BigInt,
+                KingbaseMySqlType::UnsignedBigInt,
+            ),
+            (
+                "BIGINT UNSIGNED",
+                "BIGINT UNSIGNED",
+                ColumnTypeFamily::BigInt,
+                KingbaseMySqlType::UnsignedBigInt,
+            ),
+            (
+                "bigint",
+                "bigint(20) unsigned",
+                ColumnTypeFamily::BigInt,
+                KingbaseMySqlType::UnsignedBigInt,
+            ),
+        ] {
+            for arity in [ColumnArity::Required, ColumnArity::Nullable] {
+                let column_type = SqlSchemaDescriber::get_column_type(
+                    ("integers", "value"),
+                    (data_type, full_data_type),
+                    Precision {
+                        character_maximum_length: None,
+                        numeric_precision: None,
+                        numeric_scale: None,
+                        time_precision: None,
+                    },
+                    arity,
+                    &mut SqlSchema::default(),
+                    None,
+                );
+                assert_eq!(column_type.family, family, "{data_type}");
+                assert_eq!(column_type.arity, arity);
+                assert_eq!(column_type.full_data_type, full_data_type);
+                assert_eq!(
+                    column_type
+                        .native_type
+                        .as_ref()
+                        .unwrap()
+                        .downcast_ref::<KingbaseMySqlType>(),
+                    &native_type,
+                    "{data_type}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn signed_integers_keep_their_mapping() {
+        for (data_type, family, native_type) in [
+            ("int", ColumnTypeFamily::Int, Some(KingbaseMySqlType::Int)),
+            ("integer", ColumnTypeFamily::Int, Some(KingbaseMySqlType::Int)),
+            ("bigint", ColumnTypeFamily::BigInt, Some(KingbaseMySqlType::BigInt)),
+            ("tinyint", ColumnTypeFamily::Int, Some(KingbaseMySqlType::TinyInt)),
+            ("smallint", ColumnTypeFamily::Int, Some(KingbaseMySqlType::SmallInt)),
+            ("mediumint", ColumnTypeFamily::Int, Some(KingbaseMySqlType::MediumInt)),
+        ] {
+            let column_type = SqlSchemaDescriber::get_column_type(
+                ("integers", "value"),
+                (data_type, data_type),
+                Precision {
+                    character_maximum_length: None,
+                    numeric_precision: None,
+                    numeric_scale: None,
+                    time_precision: None,
+                },
+                ColumnArity::Nullable,
+                &mut SqlSchema::default(),
+                None,
+            );
+            assert_eq!(column_type.family, family, "{data_type}");
+            assert_eq!(
+                column_type
+                    .native_type
+                    .as_ref()
+                    .map(|native| native.downcast_ref::<KingbaseMySqlType>()),
+                native_type.as_ref(),
+                "{data_type}"
+            );
+        }
+    }
+
+    #[test]
+    fn numeric_expression_comparison_ignores_only_lossless_catalog_casts() {
+        for (previous, next) in [
+            ("(CAST('1.25' AS DECIMAL(10,1)))", "1.25::numeric(10,1)"),
+            ("CAST(1.25 AS DECIMAL(10,1))", "(1.25::numeric(3,2))::numeric(10,1)"),
+            (
+                "CAST('-1.25' AS DECIMAL(10,1))",
+                "('-1.25'::numeric(3,2))::numeric(10,1)",
+            ),
+            (
+                "CAST(CAST('1.25' AS DECIMAL(10,1)) AS DECIMAL(65,30))",
+                "((1.25::numeric(3,2))::numeric(10,1))::numeric(65,30)",
+            ),
+            ("1.25::numeric(10,1)", "(1.25::numeric(3,2))::numeric(10,1)"),
+            ("1.23456::numeric(10,2)", "(1.23456::numeric(6,5))::numeric(10,2)"),
+            ("'-1.25'::numeric(10,1)", "('-1.25'::numeric(3,2))::numeric(10,1)"),
+            (
+                "(1.25::numeric(10,1))::numeric(65,30)",
+                "((1.25::numeric(3,2))::numeric(10,1))::numeric(65,30)",
+            ),
+            ("1.2500::numeric(10,1)", "((1.25::decimal(3,2))::decimal(10,1))"),
+            ("1e-30::numeric(31,30)", "0.000000000000000000000000000001::numeric"),
+            ("1.25::numeric(10,1)", "(1.25::numeric(3,2))::numeric(10,1)::numeric"),
+        ] {
+            assert!(numeric_default_expressions_match(previous, next), "{previous} / {next}");
+            assert!(numeric_default_expressions_match(next, previous), "{next} / {previous}");
+        }
+    }
+
+    #[test]
+    fn numeric_expression_comparison_preserves_semantic_casts_and_rejects_unknown_sql() {
+        for (previous, next) in [
+            ("CAST('1.25' AS DECIMAL(10,1))", "1.25::numeric(10,2)"),
+            ("CAST('1.35' AS DECIMAL(10,1))", "1.25::numeric(10,1)"),
+            ("CAST('1.25' AS DECIMAL(10,1))", "CAST('1.25' AS DECIMAL(10,2))"),
+            ("TRY_CAST('1.25' AS DECIMAL(10,1))", "1.25::numeric(10,1)"),
+            ("CAST('1.25' AS DOUBLE)", "1.25::numeric"),
+            ("1.25::numeric(10,1)", "1.25::numeric(10,2)"),
+            ("1.25::numeric(10,1)", "1.35::numeric(10,1)"),
+            ("1.25::numeric(10,1)", "1.3::numeric(10,1)"),
+            ("(1.25::numeric(10,1))::numeric(10,2)", "1.25::numeric(10,2)"),
+            ("1000::numeric(3,0)", "1000::numeric(4,0)"),
+            ("(1.25::real)::numeric(10,1)", "1.25::numeric(10,1)"),
+            ("'1.25'::text::numeric(10,1)", "1.25::numeric(10,1)"),
+            ("1.25::public.numeric", "1.25::numeric"),
+            ("1.25::numeric(10,-1)", "1.25::numeric(10,0)"),
+            ("1.25::numeric(0,1)", "1.25::numeric(10,1)"),
+            ("1.25::numeric(1001,1)", "1.25::numeric(10,1)"),
+            ("round(1.25,1)", "ROUND((1.25),1)"),
+            ("(1.25+1)::numeric(10,1)", "(1.25::numeric+1)::numeric(10,1)"),
+            ("CAST('1.25' AS DECIMAL)", "1.25::numeric"),
+            ("1.25::numeric(10,1) + 1", "1.25::numeric(10,1)"),
+            ("1.25::numeric(10,1); SELECT 1", "1.25::numeric(10,1)"),
+            ("'1.25::numeric(10,1)'", "1.25::numeric(10,1)"),
+        ] {
+            assert!(
+                !numeric_default_expressions_match(previous, next),
+                "{previous} / {next}"
+            );
+            assert!(
+                !numeric_default_expressions_match(next, previous),
+                "{next} / {previous}"
+            );
+        }
+    }
+
+    #[test]
+    fn numeric_defaults_only_normalize_complete_literals_and_neutral_casts() {
+        use std::str::FromStr;
+
+        for native in [
+            KingbaseMySqlType::Decimal(Some((10, 2))),
+            KingbaseMySqlType::Float,
+            KingbaseMySqlType::Double,
+        ] {
+            for (expression, expected) in [
+                ("1.25", "1.25"),
+                ("-1.25", "-1.25"),
+                ("'1.25'", "1.25"),
+                ("1.25::numeric", "1.25"),
+                ("'1.25'::numeric::decimal", "1.25"),
+                (" -1.25 :: sys_catalog.numeric ", "-1.25"),
+                ("1.25::pg_catalog.numeric", "1.25"),
+                ("1.25::numeric(3,2)", "1.25"),
+                ("'-1.25'::numeric(3,2)", "-1.25"),
+                ("1.2500::decimal(10,2)", "1.25"),
+                ("1.25::numeric(3,2)::numeric(10,2)", "1.25"),
+                ("1000::numeric(4)", "1000"),
+                ("0::numeric(1,1)", "0"),
+                ("0.001::numeric(3,3)", "0.001"),
+                ("0.001::numeric(2,3)", "0.001"),
+                ("1e-30::numeric", "1e-30"),
+                ("1e-30::numeric(31,30)", "1e-30"),
+                (
+                    "123456789012345678901234567890.125::numeric",
+                    "123456789012345678901234567890.125",
+                ),
+            ] {
+                assert_eq!(
+                    SqlSchemaDescriber::parse_float_default(expression, Some(&native)),
+                    Some(PrismaValue::Float(bigdecimal::BigDecimal::from_str(expected).unwrap())),
+                    "{expression}/{native:?}",
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn numeric_defaults_preserve_rounding_and_other_expressions() {
+        for native in [
+            KingbaseMySqlType::Decimal(Some((10, 2))),
+            KingbaseMySqlType::Float,
+            KingbaseMySqlType::Double,
+        ] {
+            for expression in [
+                "1.25::numeric(10,1)",
+                "1000::numeric(3,0)",
+                "1000::numeric(3)",
+                "1.25::numeric(2,2)",
+                "1.25::numeric(0,2)",
+                "1.25::numeric(1001,2)",
+                "1.25::numeric(10,-1)",
+                "1.25::numeric(10,2,1)",
+                "'1.25'::numeric(10,1)",
+                "1.23456::numeric(10,2)",
+                "1.25::numeric(10,1)::numeric",
+                "1.25::numeric::decimal(10,1)",
+                "(1.25::numeric(10,1))::numeric",
+                "1.25::integer::numeric",
+                "'123'::varchar(1)::numeric",
+                "1.25::custom_numeric",
+                "1.25::public.numeric",
+                "1.25::numeric[]",
+                "1.25::numeric + 2",
+                "CAST('1.25' AS DECIMAL(10,1))",
+                "round(1.25,1)",
+                "'1.25::numeric'",
+                "'1.25' || '0'",
+                "'1.25",
+                "1.25'",
+                "'1.25::numeric",
+                "1.25::",
+            ] {
+                assert_eq!(
+                    SqlSchemaDescriber::parse_float_default(expression, Some(&native)),
+                    None,
+                    "{expression}/{native:?}",
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn floating_defaults_only_normalize_casts_at_the_target_precision() {
+        for (expression, native, normalized) in [
+            ("'1.25'::real", KingbaseMySqlType::Float, true),
+            ("'1.25'::double precision", KingbaseMySqlType::Double, true),
+            ("1.25::real::numeric", KingbaseMySqlType::Float, true),
+            ("1.25::double precision::numeric", KingbaseMySqlType::Double, true),
+            ("1.25::real", KingbaseMySqlType::Double, false),
+            ("1.25::double precision", KingbaseMySqlType::Float, false),
+            ("1.25::real::double precision", KingbaseMySqlType::Double, false),
+            ("99999999::real::numeric(8,0)", KingbaseMySqlType::Float, false),
+            ("1.25::real", KingbaseMySqlType::Decimal(Some((10, 2))), false),
+        ] {
+            assert_eq!(
+                SqlSchemaDescriber::parse_float_default(expression, Some(&native)).is_some(),
+                normalized,
+                "{expression}/{native:?}",
+            );
+        }
+    }
 
     #[test]
     fn string_defaults_only_drop_neutral_character_casts() {

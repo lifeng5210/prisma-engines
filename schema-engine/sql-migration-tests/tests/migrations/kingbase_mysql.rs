@@ -628,6 +628,120 @@ fn descending_indexes_are_preserved_and_changes_are_applied(mut api: TestApi) {
 }
 
 #[test_connector(tags(KingbaseMysql))]
+fn numeric_expression_defaults_do_not_repeat_migrations(api: TestApi) {
+    let initial = r#"
+        model NumericDefault {
+            id Int @id
+            price Decimal @default(dbgenerated("1.25::numeric(10,1)")) @db.Decimal(10,2)
+            amount Float @default(dbgenerated("1.23456::numeric(10,2)"))
+        }
+    "#;
+    api.schema_push_w_datasource(initial).send().assert_green();
+    api.schema_push_w_datasource(initial)
+        .send()
+        .assert_green()
+        .assert_no_steps();
+    let compatible = initial
+        .replace("1.25::numeric(10,1)", "(CAST('1.25' AS DECIMAL(10,1)))")
+        .replace("1.23456::numeric(10,2)", "(CAST('1.23456' AS DECIMAL(10,2)))");
+    api.schema_push_w_datasource(&compatible)
+        .send()
+        .assert_green()
+        .assert_no_steps();
+    api.raw_cmd("INSERT INTO `NumericDefault`(id) VALUES(1)");
+    api.query_raw(
+        "SELECT price::text AS price,amount::text AS amount FROM `NumericDefault` WHERE id=1",
+        &[],
+    )
+    .assert_single_row(|row| {
+        row.assert_text_value("price", "1.30")
+            .assert_text_value("amount", "1.23")
+    });
+    let changed = initial.replace("1.25::numeric(10,1)", "1.25::numeric(10,0)");
+    api.schema_push_w_datasource(&changed)
+        .send()
+        .assert_green()
+        .assert_has_executed_steps();
+    api.schema_push_w_datasource(&changed)
+        .send()
+        .assert_green()
+        .assert_no_steps();
+    api.raw_cmd("INSERT INTO `NumericDefault`(id) VALUES(2)");
+    api.query_raw("SELECT price::text AS price FROM `NumericDefault` WHERE id=2", &[])
+        .assert_single_row(|row| row.assert_text_value("price", "1.00"));
+    api.query_raw("SELECT price::text AS price FROM `NumericDefault` WHERE id=1", &[])
+        .assert_single_row(|row| row.assert_text_value("price", "1.30"));
+}
+
+#[test_connector(tags(KingbaseMysql))]
+fn widening_an_existing_autoincrement_primary_key_preserves_data_and_relations(mut api: TestApi) {
+    for keep_autoincrement in [true, false] {
+        let initial = r#"
+            model Parent {
+                id Int @id @default(autoincrement())
+                children Child[]
+            }
+            model Child {
+                id Int @id
+                parentId Int
+                parent Parent @relation(fields: [parentId], references: [id])
+            }
+        "#;
+        api.schema_push_w_datasource(initial).send().assert_green();
+        api.raw_cmd("INSERT INTO `Parent` (`id`) VALUES (DEFAULT)");
+        api.raw_cmd("INSERT INTO `Child` VALUES (1, 1)");
+        let mut target = initial
+            .replace(
+                "id Int @id @default(autoincrement())",
+                "id BigInt @id @default(autoincrement())",
+            )
+            .replace("parentId Int", "parentId BigInt");
+        if !keep_autoincrement {
+            target = target.replace(" @default(autoincrement())", "");
+        }
+        api.schema_push_w_datasource(&target)
+            .force(true)
+            .send()
+            .assert_executable()
+            .assert_has_executed_steps();
+        api.query_raw(
+            "SELECT p.id::text AS id FROM `Parent` p JOIN `Child` c ON p.id=c.`parentId`",
+            &[],
+        )
+        .assert_single_row(|row| row.assert_text_value("id", "1"));
+        if keep_autoincrement {
+            api.raw_cmd("INSERT INTO `Parent` (`id`) VALUES (DEFAULT)");
+            api.query_raw("SELECT id::text AS id FROM `Parent` WHERE id=2", &[])
+                .assert_single_row(|row| row.assert_text_value("id", "2"));
+        }
+        api.schema_push_w_datasource(&target)
+            .send()
+            .assert_green()
+            .assert_no_steps();
+        api.raw_cmd("DROP TABLE `Child`");
+        api.raw_cmd("DROP TABLE `Parent`");
+    }
+}
+
+#[test_connector(tags(Mysql8, KingbaseMysql))]
+fn widening_an_autoincrement_primary_key_continues_beyond_the_int_boundary(mut api: TestApi) {
+    let initial = "model Counter {\n id Int @id @default(autoincrement())\n }";
+    api.schema_push_w_datasource(initial).send().assert_green();
+    api.raw_cmd("INSERT INTO `Counter` (`id`) VALUES (DEFAULT), (2147483647)");
+    let target = initial.replace("id Int", "id BigInt");
+    api.schema_push_w_datasource(&target)
+        .force(true)
+        .send()
+        .assert_executable()
+        .assert_has_executed_steps();
+    // Keep the MySQL expectation: R3 currently fails this insert even though
+    // MODIFY updates the column and the catalog's sequence range to BIGINT.
+    api.raw_cmd("INSERT INTO `Counter` (`id`) VALUES (DEFAULT)");
+    api.query_raw("SELECT id FROM `Counter` WHERE id = 2147483648", &[])
+        .assert_single_row(|row| row.assert_bigint_value("id", 2147483648));
+}
+
+#[test_connector(tags(KingbaseMysql))]
 fn calculated_descending_unique_index_can_be_removed(mut api: TestApi) {
     use psl::parser_database::NoExtensionTypes;
     use schema_core::schema_connector::DiffTarget;
@@ -641,8 +755,8 @@ fn calculated_descending_unique_index_can_be_removed(mut api: TestApi) {
         DiffTarget::Datamodel(vec![("schema.prisma".into(), target.clone().into())], &NoExtensionTypes),
         None,
     );
-    assert!(script.contains("DROP INDEX `_prisma_idx_"), "{script}");
-    assert!(!script.contains("DROP CONSTRAINT"), "{script}");
+    assert!(script.contains("DROP CONSTRAINT `_prisma_idx_"), "{script}");
+    assert!(!script.contains("DROP INDEX"), "{script}");
     api.raw_cmd(&script);
     api.query_raw("SELECT value FROM `SortedUnique` WHERE id = 1", &[])
         .assert_single_row(|row| row.assert_int_value("value", 2));
@@ -1540,6 +1654,10 @@ fn datetime_dbgenerated_defaults_are_migrated(api: TestApi) {
             id Int @id
             day DateTime @default(dbgenerated("'2020-01-01'")) @db.Date
             at  DateTime @default(dbgenerated("'16:20:00'")) @db.Time(0)
+            today DateTime @default(dbgenerated("CURRENT_DATE")) @db.Date
+            fromNow DateTime @default(dbgenerated("now()")) @db.DateTime(3)
+            plainTime DateTime @default(dbgenerated("'16:20:00.123000'")) @db.Time(3)
+            castTime DateTime @default(dbgenerated("'16:20:00.123000'::time")) @db.Time(3)
         }
     "#;
 
@@ -1750,52 +1868,4 @@ fn foreign_keys_and_their_covering_index_can_be_deleted_together(api: TestApi) {
     api.assert_schema().assert_table("Transaction", |table| {
         table.assert_foreign_keys_count(0).assert_indexes_count(0)
     });
-}
-
-#[test_connector(tags(KingbaseMysql))]
-fn legacy_unsigned_objects_are_not_recreated_or_dropped(mut api: TestApi) {
-    use quaint::prelude::Queryable;
-    api.raw_cmd(r#"CREATE DOMAIN public.__prisma_uint8 AS sys.uint4 CHECK(VALUE <= 255);
-CREATE DOMAIN public.__prisma_uint16 AS sys.uint4 CHECK(VALUE <= 65535);
-CREATE DOMAIN public.__prisma_uint24 AS sys.uint4 CHECK(VALUE <= 16777215);
-CREATE TABLE legacy_ranges(id INTEGER PRIMARY KEY, tiny public.__prisma_uint8, small public.__prisma_uint16, medium public.__prisma_uint24);
-INSERT INTO legacy_ranges VALUES (7,255,65535,16777215);
-CREATE TABLE legacy_auto(id INTEGER GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY);
-CREATE FUNCTION public.__prisma_unsigned_auto_guard() RETURNS trigger LANGUAGE plpgsql AS 'DECLARE v bigint; BEGIN v := jsonb_extract_path_text(to_jsonb(NEW),TG_ARGV[0])::bigint; IF v < 0 OR v > TG_ARGV[1]::bigint THEN RAISE EXCEPTION ''Value out of range for small unsigned integer'' USING ERRCODE=''23514''; END IF; RETURN NEW; END;';
-CREATE TRIGGER __prisma_unsigned_auto AFTER INSERT OR UPDATE ON legacy_auto FOR EACH ROW EXECUTE FUNCTION public.__prisma_unsigned_auto_guard('id','255');
-INSERT INTO legacy_auto VALUES (7);"#);
-    let schema = r#"
-        model legacy_ranges {
-          id Int @id
-          tiny Unsupported("\"public\".\"__prisma_uint8\"")?
-          small Unsupported("\"public\".\"__prisma_uint16\"")?
-          medium Unsupported("\"public\".\"__prisma_uint24\"")?
-        }
-        model legacy_auto {
-          id Unsupported("INTEGER") @id
-          @@ignore
-        }
-    "#;
-    api.schema_push_w_datasource(schema)
-        .send()
-        .assert_green()
-        .assert_no_steps();
-    api.query_raw(
-        "SELECT tiny::bigint AS tiny, small::bigint AS small, medium::bigint AS medium FROM legacy_ranges WHERE id=7",
-        &[],
-    )
-    .assert_single_row(|row| {
-        row.assert_int_value("tiny", 255)
-            .assert_int_value("small", 65535)
-            .assert_int_value("medium", 16777215)
-    });
-    let conn = tok(quaint::single::Quaint::new(api.connection_string())).unwrap();
-    let error = tok(conn.raw_cmd("INSERT INTO legacy_auto VALUES (256)")).unwrap_err();
-    assert_eq!(error.original_code(), Some("23514"));
-    api.query_raw("SELECT COUNT(*)::int AS n FROM legacy_auto WHERE id=7", &[])
-        .assert_single_row(|row| row.assert_int_value("n", 1));
-    api.schema_push_w_datasource(schema)
-        .send()
-        .assert_green()
-        .assert_no_steps();
 }

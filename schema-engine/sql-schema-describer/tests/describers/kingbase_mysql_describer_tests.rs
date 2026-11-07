@@ -6,6 +6,62 @@ use sql_schema_describer::ColumnTypeFamily;
 use sql_schema_describer::ForeignKeyAction;
 
 #[test_connector(tags(KingbaseMysql))]
+fn unsigned_integer_columns_preserve_native_types(api: TestApi) {
+    api.raw_cmd(
+        "CREATE TABLE unsigned_integers(id INT PRIMARY KEY,
+            unsigned_int INT UNSIGNED NOT NULL,
+            unsigned_bigint BIGINT UNSIGNED,
+            signed_int INT,
+            signed_bigint BIGINT)",
+    );
+    let schema = api.describe();
+    let table = schema.table_walker("unsigned_integers").unwrap();
+    for (name, family, native_type) in [
+        ("unsigned_int", ColumnTypeFamily::Int, KingbaseMySqlType::UnsignedInt),
+        (
+            "unsigned_bigint",
+            ColumnTypeFamily::BigInt,
+            KingbaseMySqlType::UnsignedBigInt,
+        ),
+        ("signed_int", ColumnTypeFamily::Int, KingbaseMySqlType::Int),
+        ("signed_bigint", ColumnTypeFamily::BigInt, KingbaseMySqlType::BigInt),
+    ] {
+        let column = table.column(name).unwrap();
+        assert_eq!(column.column_type_family(), &family, "{name}");
+        assert_eq!(
+            column.column_native_type::<KingbaseMySqlType>(),
+            Some(&native_type),
+            "{name}"
+        );
+    }
+}
+
+#[test_connector(tags(KingbaseMysql))]
+fn r3_small_unsigned_columns_preserve_native_types(api: TestApi) {
+    api.raw_cmd(
+        "CREATE TABLE small_unsigned_integers(id INT PRIMARY KEY,
+            tiny TINYINT UNSIGNED,
+            small SMALLINT UNSIGNED NOT NULL,
+            medium MEDIUMINT UNSIGNED NOT NULL)",
+    );
+    let schema = api.describe();
+    let table = schema.table_walker("small_unsigned_integers").unwrap();
+    for (name, native_type) in [
+        ("tiny", KingbaseMySqlType::UnsignedTinyInt),
+        ("small", KingbaseMySqlType::UnsignedSmallInt),
+        ("medium", KingbaseMySqlType::UnsignedMediumInt),
+    ] {
+        let column = table.column(name).unwrap();
+        assert_eq!(column.column_type_family(), &ColumnTypeFamily::Int, "{name}");
+        assert_eq!(
+            column.column_native_type::<KingbaseMySqlType>(),
+            Some(&native_type),
+            "{name}"
+        );
+    }
+}
+
+#[test_connector(tags(KingbaseMysql))]
 fn regression_non_literal_string_defaults_remain_expressions(api: TestApi) {
     api.raw_cmd(
         "CREATE TABLE expression_defaults(id INT PRIMARY KEY,
@@ -147,6 +203,57 @@ fn regression_include_columns_are_not_index_keys(api: TestApi) {
             .collect::<Vec<_>>(),
         vec!["id"]
     );
+}
+
+#[test_connector(tags(KingbaseMysql))]
+fn numeric_default_casts_preserve_the_server_expression(api: TestApi) {
+    api.raw_cmd(
+        "CREATE TABLE numeric_cast_defaults(id INT PRIMARY KEY,
+        plain_decimal DECIMAL(10,2) NOT NULL DEFAULT 1.25,
+        plain_double DOUBLE NOT NULL DEFAULT 1.25,
+        rounded_decimal DECIMAL(10,2) NOT NULL DEFAULT (CAST('1.25' AS DECIMAL(10,1))),
+        rounded_double DOUBLE NOT NULL DEFAULT (CAST('1.23456' AS DECIMAL(10,2))))",
+    );
+    let schema = api.describe();
+    let table = schema.table_walker("numeric_cast_defaults").unwrap();
+    let expressions = api.block_on(api.database().query_raw(
+        "SELECT column_name,column_default FROM information_schema.columns WHERE table_schema=current_schema() AND table_name='numeric_cast_defaults'", &[])).unwrap();
+    for name in ["rounded_decimal", "rounded_double"] {
+        let expression = expressions
+            .iter()
+            .find(|row| row.get("column_name").unwrap().as_str() == Some(name))
+            .unwrap();
+        assert_eq!(
+            table.column(name).unwrap().default().unwrap().kind(),
+            &sql_schema_describer::DefaultKind::DbGenerated(Some(
+                expression.get("column_default").unwrap().as_str().unwrap().to_owned()
+            )),
+            "{name}"
+        );
+    }
+    for name in ["plain_decimal", "plain_double"] {
+        assert_eq!(
+            table.column(name).unwrap().default().unwrap().as_value(),
+            Some(&PrismaValue::Float("1.25".parse().unwrap())),
+            "{name}"
+        );
+    }
+    api.raw_cmd("INSERT INTO numeric_cast_defaults(id) VALUES(1)");
+    let result = api
+        .block_on(api.database().query_raw(
+            "SELECT plain_decimal::text AS plain_decimal,plain_double::text AS plain_double,rounded_decimal::text AS rounded_decimal,rounded_double::text AS rounded_double FROM numeric_cast_defaults",
+            &[],
+        ))
+        .unwrap();
+    let row = result.into_iter().next().unwrap();
+    for (name, expected) in [
+        ("plain_decimal", "1.25"),
+        ("plain_double", "1.25"),
+        ("rounded_decimal", "1.30"),
+        ("rounded_double", "1.23"),
+    ] {
+        assert_eq!(row.get(name).unwrap().as_str(), Some(expected), "{name}");
+    }
 }
 
 #[test_connector(tags(KingbaseMysql))]
@@ -387,6 +494,114 @@ fn all_kingbase_mysql_column_types_must_work(api: TestApi) {
 }
 
 #[test_connector(tags(KingbaseMysql))]
+fn cross_schema_foreign_keys_do_not_resolve_to_same_named_local_tables(api: TestApi) {
+    assert_cross_schema_foreign_key_is_rejected(api, true);
+}
+
+#[test_connector(tags(KingbaseMysql))]
+fn cross_schema_foreign_keys_are_not_silently_skipped_without_a_local_target(api: TestApi) {
+    assert_cross_schema_foreign_key_is_rejected(api, false);
+}
+
+fn assert_cross_schema_foreign_key_is_rejected(api: TestApi, local_target: bool) {
+    let external = format!(
+        "fk_external_{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    );
+    api.raw_cmd(&format!(
+        "CREATE SCHEMA `{external}`;
+         CREATE TABLE `{external}`.fk_parent(id INT PRIMARY KEY);
+         CREATE TABLE fk_child(id INT PRIMARY KEY, parent_id INT,
+             CONSTRAINT fk_external_parent FOREIGN KEY(parent_id) REFERENCES `{external}`.fk_parent(id));"
+    ));
+    if local_target {
+        api.raw_cmd("CREATE TABLE fk_parent(id INT PRIMARY KEY)");
+    }
+
+    let error = api.describe_error();
+    api.raw_cmd(&format!("DROP TABLE fk_child; DROP SCHEMA `{external}` CASCADE"));
+    match error.kind() {
+        sql_schema_describer::DescriberErrorKind::CrossSchemaReference {
+            from,
+            to,
+            constraint,
+            missing_namespace,
+        } => {
+            assert_eq!(from, &format!("{}.fk_child", api.schema_name()));
+            assert_eq!(to, &format!("{external}.fk_parent"));
+            assert_eq!(constraint, "fk_external_parent");
+            assert_eq!(missing_namespace, &external);
+        }
+        other => panic!("expected cross-schema diagnostic, got {other:?}"),
+    }
+}
+
+#[test_connector(tags(KingbaseMysql))]
+fn same_named_foreign_keys_on_different_tables_keep_their_own_rules(api: TestApi) {
+    assert_same_named_foreign_keys_are_distinct(api, false);
+}
+
+#[test_connector(tags(KingbaseMysql))]
+fn same_named_compound_foreign_keys_do_not_duplicate_columns(api: TestApi) {
+    assert_same_named_foreign_keys_are_distinct(api, true);
+}
+
+fn assert_same_named_foreign_keys_are_distinct(api: TestApi, compound: bool) {
+    let (parent_columns, child_columns, constrained_columns, referenced_columns) = if compound {
+        (
+            "id INT, code INT, PRIMARY KEY(id, code)",
+            "parent_id INT, parent_code INT",
+            vec!["parent_id", "parent_code"],
+            vec!["id", "code"],
+        )
+    } else {
+        ("id INT PRIMARY KEY", "parent_id INT", vec!["parent_id"], vec!["id"])
+    };
+    // R3 allows the same constraint name on different tables, unlike MySQL.
+    for (suffix, delete_rule, update_rule) in [("a", "CASCADE", "CASCADE"), ("b", "SET NULL", "RESTRICT")] {
+        api.raw_cmd(&format!(
+            "CREATE TABLE fk_parent_{suffix}({parent_columns});
+             CREATE TABLE fk_child_{suffix}(id INT PRIMARY KEY, {child_columns},
+                 CONSTRAINT fk_shared FOREIGN KEY({}) REFERENCES fk_parent_{suffix}({})
+                 ON DELETE {delete_rule} ON UPDATE {update_rule});",
+            constrained_columns.join(", "),
+            referenced_columns.join(", "),
+        ));
+    }
+
+    let schema = api.describe();
+    assert_eq!(schema.walk_foreign_keys().count(), 2);
+    for (suffix, delete_rule, update_rule) in [
+        ("a", ForeignKeyAction::Cascade, ForeignKeyAction::Cascade),
+        ("b", ForeignKeyAction::SetNull, ForeignKeyAction::Restrict),
+    ] {
+        let table = schema.table_walker(&format!("fk_child_{suffix}")).unwrap();
+        let foreign_key = table.foreign_keys().next().unwrap();
+        assert_eq!(foreign_key.constraint_name(), Some("fk_shared"));
+        assert_eq!(foreign_key.referenced_table_name(), format!("fk_parent_{suffix}"));
+        assert_eq!(
+            foreign_key
+                .constrained_columns()
+                .map(|column| column.name())
+                .collect::<Vec<_>>(),
+            constrained_columns,
+        );
+        assert_eq!(
+            foreign_key
+                .referenced_columns()
+                .map(|column| column.name())
+                .collect::<Vec<_>>(),
+            referenced_columns,
+        );
+        assert_eq!(foreign_key.on_delete_action(), delete_rule);
+        assert_eq!(foreign_key.on_update_action(), update_rule);
+    }
+}
+
+#[test_connector(tags(KingbaseMysql))]
 fn multi_column_foreign_keys_are_described_in_column_order(api: TestApi) {
     api.raw_cmd(
         r#"
@@ -442,6 +657,55 @@ fn defaults_and_auto_increment_are_described(api: TestApi) {
         table.column("label").unwrap().default().unwrap().as_value()
     );
     assert!(table.column("created_at").unwrap().default().unwrap().is_now());
+}
+
+#[test_connector(tags(KingbaseMysql))]
+fn temporal_defaults_preserve_expressions_and_literal_values(api: TestApi) {
+    api.raw_cmd(
+        "CREATE TABLE temporal_defaults (
+            id INT PRIMARY KEY,
+            today DATE DEFAULT CURRENT_DATE,
+            from_now DATETIME(3) DEFAULT now(),
+            created_at TIMESTAMP(3) DEFAULT CURRENT_TIMESTAMP(3),
+            tomorrow DATE DEFAULT (CURRENT_DATE + 1),
+            day DATE DEFAULT '2020-01-01',
+            clock TIME(0) DEFAULT '16:20:00',
+            plain_time TIME(3) DEFAULT '16:20:00.123',
+            cast_time TIME(3) DEFAULT (CAST('16:20:00.123' AS TIME(0))),
+            stamp DATETIME(3) DEFAULT '2020-01-01 16:20:00'
+        )",
+    );
+
+    let schema = api.describe();
+    let table = schema.table_walker("temporal_defaults").unwrap();
+    for (name, expression) in [
+        ("today", "CURRENT_DATE"),
+        ("from_now", "now()"),
+        ("tomorrow", "((CURRENT_DATE)::bigint + 1)"),
+        ("day", "'2020-01-01'"),
+        ("clock", "'16:20:00'"),
+        ("plain_time", "'16:20:00.123000'"),
+        ("cast_time", "'16:20:00.123000'::time"),
+        ("stamp", "'2020-01-01 16:20:00'"),
+    ] {
+        assert_eq!(
+            table.column(name).unwrap().default().unwrap().kind(),
+            &sql_schema_describer::DefaultKind::DbGenerated(Some(expression.to_owned())),
+            "{name}"
+        );
+    }
+    assert!(table.column("created_at").unwrap().default().unwrap().is_now());
+
+    api.raw_cmd("INSERT INTO temporal_defaults(id) VALUES (1)");
+    let rows = api
+        .block_on(api.database().query_raw(
+            "SELECT plain_time::text AS plain_time, cast_time::text AS cast_time FROM temporal_defaults",
+            &[],
+        ))
+        .unwrap();
+    let row = rows.into_iter().next().unwrap();
+    assert_eq!(row.get("plain_time").unwrap().as_str(), Some("16:20:00.123000"));
+    assert_eq!(row.get("cast_time").unwrap().as_str(), Some("16:20:00"));
 }
 
 #[test_connector(tags(KingbaseMysql))]
@@ -532,6 +796,52 @@ fn constraints_from_other_schemas_are_not_described(api: TestApi) {
 }
 
 #[test_connector(tags(KingbaseMysql))]
+fn enum_columns_resolve_types_outside_the_selected_schema(api: TestApi) {
+    let external = format!(
+        "enum_external_{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    );
+    let selected = api.schema_name().replace('`', "``");
+    api.raw_cmd(&format!(
+        "CREATE SCHEMA `{external}`;
+         SET search_path TO `{external}`;
+         CREATE TABLE `{selected}`.external_enum (
+             id INT PRIMARY KEY,
+             status ENUM('draft','west,east','O''Reilly') DEFAULT 'draft');
+         CREATE TABLE `{external}`.unselected_table(id INT PRIMARY KEY, status ENUM('unselected'));
+         SET search_path TO `{selected}`;
+         CREATE TABLE local_enum(id INT PRIMARY KEY, status ENUM('local','published') DEFAULT 'local');"
+    ));
+
+    let qualified = api.describe();
+    api.raw_cmd(&format!("SET search_path TO `{external}`"));
+    let unqualified = api.describe();
+    api.raw_cmd(&format!(
+        "SET search_path TO `{selected}`; DROP TABLE `{selected}`.external_enum; DROP SCHEMA `{external}` CASCADE"
+    ));
+
+    for schema in [&qualified, &unqualified] {
+        assert!(schema.table_walker("unselected_table").is_none());
+        for (table_name, values, default) in [
+            ("external_enum", vec!["draft", "west,east", "O'Reilly"], "draft"),
+            ("local_enum", vec!["local", "published"], "local"),
+        ] {
+            let column = schema.table_walker(table_name).unwrap().column("status").unwrap();
+            let described_enum = column.column_type_family_as_enum().unwrap();
+            assert_eq!(described_enum.name(), format!("{table_name}_status"));
+            assert_eq!(described_enum.values().collect::<Vec<_>>(), values);
+            assert_eq!(
+                column.default().unwrap().as_value(),
+                Some(&PrismaValue::Enum(default.into()))
+            );
+        }
+    }
+}
+
+#[test_connector(tags(KingbaseMysql))]
 fn check_constraints_are_described(api: TestApi) {
     api.raw_cmd(
         r#"
@@ -550,6 +860,69 @@ fn check_constraints_are_described(api: TestApi) {
     assert_eq!(
         vec!["products_price_positive"],
         table.check_constraints().collect::<Vec<_>>()
+    );
+}
+
+#[test_connector(tags(KingbaseMysql))]
+fn user_checks_containing_not_null_are_described(api: TestApi) {
+    api.raw_cmd(
+        r#"
+        CREATE TABLE checked_product (
+            id INT PRIMARY KEY,
+            price INT NOT NULL,
+            other INT,
+            CONSTRAINT compound_check CHECK (price IS NOT NULL AND price > 0),
+            CONSTRAINT literal_check CHECK (other > 0 OR 'is not null' = 'a'),
+            CONSTRAINT simple_check CHECK (other IS NOT NULL)
+        );
+        CREATE TABLE unchecked_product (id INT PRIMARY KEY, price INT NOT NULL);
+        "#,
+    );
+
+    let schema = api.describe();
+    let checked = schema.table_walker("checked_product").unwrap();
+    assert_eq!(
+        checked.check_constraints().collect::<Vec<_>>(),
+        vec!["compound_check", "literal_check", "simple_check"]
+    );
+    assert!(checked.column("price").unwrap().arity().is_required());
+    assert!(
+        !schema
+            .table_walker("unchecked_product")
+            .unwrap()
+            .has_check_constraints()
+    );
+}
+
+#[test_connector(tags(KingbaseMysql))]
+fn check_constraints_from_other_schemas_do_not_attach_to_same_named_tables(api: TestApi) {
+    let external = format!(
+        "check_external_{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    );
+    api.raw_cmd(&format!(
+        "CREATE TABLE unchecked_product(id INT PRIMARY KEY, price INT);
+         CREATE TABLE checked_product(id INT PRIMARY KEY, price INT,
+             CONSTRAINT local_price_check CHECK(price > 0));
+         CREATE SCHEMA `{external}`;
+         CREATE TABLE `{external}`.unchecked_product(id INT PRIMARY KEY, price INT,
+             CONSTRAINT external_price_check CHECK(price > 10));
+         CREATE TABLE `{external}`.checked_product(id INT PRIMARY KEY, price INT,
+             CONSTRAINT external_other_check CHECK(price > 20));"
+    ));
+
+    let schema = api.describe();
+    api.raw_cmd(&format!("DROP SCHEMA `{external}` CASCADE"));
+
+    let unchecked = schema.table_walker("unchecked_product").unwrap();
+    assert!(!unchecked.has_check_constraints());
+    let checked = schema.table_walker("checked_product").unwrap();
+    assert_eq!(
+        checked.check_constraints().collect::<Vec<_>>(),
+        vec!["local_price_check"]
     );
 }
 
@@ -788,6 +1161,67 @@ fn unique_index_constraint_ownership_is_described(api: TestApi) {
             _ => assert_eq!(constraint_name, None),
         }
     }
+}
+
+#[test_connector(tags(KingbaseMysql))]
+fn prefix_index_lengths_and_expression_boundaries_are_described(api: TestApi) {
+    use sql_schema_describer::{
+        SQLSortOrder::{Asc, Desc},
+        kingbase_mysql::KingbaseMysqlSchemaExt,
+    };
+
+    api.raw_cmd(
+        r#"
+        CREATE TABLE `prefix_indexes` (
+            `id` INT NOT NULL PRIMARY KEY,
+            `value` VARCHAR(32) NOT NULL,
+            `q"q` VARBINARY(32) NOT NULL,
+            `abs` VARCHAR(32),
+            INDEX `inline_prefix` (`value`(8), `id`)
+        );
+        CREATE UNIQUE INDEX `unique_prefix` ON `prefix_indexes` (`value`(8) DESC, `q"q`(4));
+        CREATE INDEX `function_before_prefix` ON `prefix_indexes` ((abs(8)), `value`(8));
+        CREATE INDEX `prefix_before_function` ON `prefix_indexes` (`value`(8), (lower(`value`)));
+        CREATE INDEX `following` ON `prefix_indexes` (`id`);
+    "#,
+    );
+
+    let schema = api.describe();
+    let table = schema
+        .table_walkers()
+        .find(|table| table.name() == "prefix_indexes")
+        .unwrap();
+    // PRIMARY, two prefix indexes and the following ordinary index. Neither
+    // unsupported expression index may survive as a partial compound index.
+    assert_eq!(table.indexes().count(), 4);
+    let normal = table.indexes().find(|index| index.name() == "inline_prefix").unwrap();
+    assert_eq!(
+        normal
+            .columns()
+            .map(|column| (column.as_column().name(), column.length()))
+            .collect::<Vec<_>>(),
+        vec![("value", Some(8)), ("id", None)]
+    );
+    let unique = table.indexes().find(|index| index.name() == "unique_prefix").unwrap();
+    assert!(unique.is_unique());
+    assert_eq!(
+        unique
+            .columns()
+            .map(|column| (column.as_column().name(), column.length(), column.sort_order()))
+            .collect::<Vec<_>>(),
+        vec![("value", Some(8), Some(Desc)), ("q\"q", Some(4), Some(Asc))]
+    );
+    let ext = schema.downcast_connector_data::<KingbaseMysqlSchemaExt>();
+    assert!(!ext.unique_constraint_names.contains_key(&unique.id));
+    assert_eq!(
+        table
+            .indexes()
+            .find(|index| index.name() == "following")
+            .unwrap()
+            .columns()
+            .count(),
+        1
+    );
 }
 
 #[test_connector(tags(KingbaseMysql))]

@@ -36,9 +36,11 @@ impl Connection {
         .await
         .map_err(|error| match error.into_kind() {
             DescriberErrorKind::QuaintError(error) => self.map_error(error),
-            error @ DescriberErrorKind::CrossSchemaReference { .. } => {
+            DescriberErrorKind::CrossSchemaReference { from, to, constraint, .. } => {
                 ConnectorError::user_facing(DatabaseSchemaInconsistent {
-                    explanation: error.to_string(),
+                    explanation: format!(
+                        "The kingbase-mysql connector introspects one schema at a time. Foreign key `{constraint}` on `{from}` references `{to}` outside the selected schema. Cross-schema relations cannot be represented by this connector.",
+                    ),
                 })
             }
         })?;

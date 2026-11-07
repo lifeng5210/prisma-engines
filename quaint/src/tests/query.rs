@@ -2268,6 +2268,79 @@ async fn json_extract_path_fun(api: &mut dyn TestApi) -> crate::Result<()> {
     Ok(())
 }
 
+#[cfg(feature = "mysql")]
+#[test_each_connector(tags("mysql"))]
+async fn json_extract_text_parameters(api: &mut dyn TestApi) -> crate::Result<()> {
+    for (document, path, expected) in [
+        ("{\"a\":2}", "$.a", Some(serde_json::json!(2))),
+        ("{\"a\":null}", "$.a", Some(serde_json::Value::Null)),
+        ("{}", "$.a", None),
+        ("{\"汉字\":\"你好\"}", "$.\"汉字\"", Some(serde_json::json!("你好"))),
+        ("{\"a\\\":{\":\"b\"}", "$.\"a\\\":{\"", Some(serde_json::json!("b"))),
+        ("[1,2]", "$[1]", Some(serde_json::json!(2))),
+    ] {
+        let query = Select::default()
+            .value(json_extract(Value::text(document), JsonPath::string(path), false).alias("extracted"));
+        let result = api.conn().select(query).await?.into_single()?;
+        assert_eq!(value_into_json(&result["extracted"]), expected);
+        assert_eq!(result["extracted"].is_null(), expected.is_none());
+    }
+
+    Ok(())
+}
+
+#[cfg(feature = "mysql")]
+#[test_each_connector(tags("mysql"))]
+async fn json_array_predicates_text_parameters(api: &mut dyn TestApi) -> crate::Result<()> {
+    // This visitor emits WHERE only for SELECTs with a FROM clause.
+    let source = Table::from(Select::default().value(1)).alias("source");
+    let document: Expression = Value::text("[1,2,3]").into();
+    for (predicate, matches) in [
+        (document.clone().json_array_contains(serde_json::json!([2])), true),
+        (document.clone().json_array_contains(serde_json::json!(["2"])), false),
+        (document.clone().json_array_not_contains(serde_json::json!([4])), true),
+        (document.clone().json_array_begins_with(serde_json::json!(1)), true),
+        (document.clone().json_array_begins_with(serde_json::json!(2)), false),
+        (document.clone().json_array_ends_into(serde_json::json!(3)), true),
+        (document.clone().json_array_ends_into(serde_json::json!(1)), false),
+        (document.json_array_not_ends_into(serde_json::json!(1)), true),
+    ] {
+        let query = Select::from_table(source.clone()).value(1).so_that(predicate);
+        let result = api.conn().select(query).await?;
+        assert_eq!(result.len(), usize::from(matches));
+    }
+
+    Ok(())
+}
+
+#[cfg(feature = "mysql")]
+#[test_each_connector(tags("mysql"))]
+async fn json_numeric_comparisons_text_parameters(api: &mut dyn TestApi) -> crate::Result<()> {
+    // Keep MySQL's comparison contract visible. Kingbase executes the same
+    // SQL and scalar bindings; database result differences are not compensated.
+    let source = Table::from(Select::default().value(1)).alias("source");
+    for document in ["{\"a\":2}", "{\"a\":1.25}"] {
+        let extracted: Expression = json_extract(Value::text(document), JsonPath::string("$.a"), false).into();
+        let scalar: Expression = Value::json(serde_json::json!(1)).into();
+        for (predicate, matches) in [
+            (extracted.clone().greater_than(scalar.clone()), true),
+            (extracted.clone().greater_than_or_equals(scalar.clone()), true),
+            (extracted.clone().less_than(scalar.clone()), false),
+            (extracted.clone().less_than_or_equals(scalar.clone()), false),
+            (scalar.clone().greater_than(extracted.clone()), false),
+            (scalar.clone().greater_than_or_equals(extracted.clone()), false),
+            (scalar.clone().less_than(extracted.clone()), true),
+            (scalar.less_than_or_equals(extracted), true),
+        ] {
+            let query = Select::from_table(source.clone()).value(1).so_that(predicate);
+            let result = api.conn().select(query).await?;
+            assert_eq!(result.len(), usize::from(matches), "document: {document}");
+        }
+    }
+
+    Ok(())
+}
+
 #[cfg(any(feature = "postgresql", feature = "kingbase-oracle-native"))]
 async fn json_extract_array_path_postgres(api: &mut dyn TestApi, json_type: &str) -> crate::Result<()> {
     let table = api
@@ -3361,13 +3434,61 @@ async fn generate_swapped_binary_uuid(api: &mut dyn TestApi) -> crate::Result<()
 
 #[cfg(feature = "mysql")]
 #[test_each_connector(tags("mysql"))]
+async fn sum_numeric_parameters(api: &mut dyn TestApi) -> crate::Result<()> {
+    for (parameter, expected) in [
+        (Value::int32(123), Some(123.0)),
+        (Value::int32(i32::MIN), Some(f64::from(i32::MIN))),
+        (Value::int64(2147483648_i64), Some(2147483648.0)),
+        (Value::int64(i64::MAX), Some(i64::MAX as f64)),
+        (Value::float(1.25), Some(1.25)),
+        (Value::float(-1.25), Some(-1.25)),
+        (Value::double(0.1), Some(0.1)),
+        (Value::double(1e-31), Some(1e-31)),
+        (Value::numeric("1.25".parse().unwrap()), Some(1.25)),
+        (Value::null_int32(), None),
+        (Value::null_int64(), None),
+        (Value::null_float(), None),
+        (Value::null_double(), None),
+        (Value::null_numeric(), None),
+    ] {
+        let query = Select::default().value(sum(parameter.clone()).alias("total"));
+        let result = api.conn().select(query).await?;
+        assert_eq!(result.types[0], crate::connector::ColumnType::Double, "{parameter:?}");
+        let row = result.into_single()?;
+        assert_eq!(row["total"].as_f64(), expected, "{parameter:?}");
+        assert_eq!(row["total"].is_null(), expected.is_none());
+    }
+
+    Ok(())
+}
+
+#[cfg(feature = "mysql")]
+#[test_each_connector(tags("mysql"))]
+async fn sum_float_parameter_precision(api: &mut dyn TestApi) -> crate::Result<()> {
+    // Keep the native MySQL precision contract separate from basic binding:
+    // R3 currently rounds this SUM result even with the full input wire text.
+    let query = Select::default().value(sum(Value::float(0.1)).alias("total"));
+    let result = api.conn().select(query).await?;
+    assert_eq!(result.types[0], crate::connector::ColumnType::Double);
+    let row = result.into_single()?;
+    assert_eq!(row["total"].as_f64(), Some(f64::from(0.1_f32)));
+
+    Ok(())
+}
+
+#[cfg(feature = "mysql")]
+#[test_each_connector(tags("mysql"))]
 async fn generate_native_uuid(api: &mut dyn TestApi) -> crate::Result<()> {
     let select = Select::default().value(native_uuid());
     let res = api.conn().select(select).await?.into_single()?;
     let val = res.into_single()?;
 
-    // If it is a text type and has a value, it's a generated string UUID.
-    assert!(matches!(val.typed, ValueType::Text(x) if x.is_some()));
+    let value = val.as_str().expect("UUID() must return text");
+    assert_eq!(value.len(), 36);
+    assert!(uuid::Uuid::parse_str(value).is_ok());
+    for position in [8, 13, 18, 23] {
+        assert_eq!(value.as_bytes()[position], b'-');
+    }
 
     Ok(())
 }
@@ -3777,6 +3898,32 @@ async fn json_unquote_fun(api: &mut dyn TestApi) -> crate::Result<()> {
         assert_eq!(res.get(3).unwrap()["unquote"], Value::text("[\"a\",1]"));
     } else {
         assert_eq!(res.get(3).unwrap()["unquote"], Value::text("[\"a\", 1]"));
+    }
+
+    Ok(())
+}
+
+#[cfg(feature = "mysql")]
+#[test_each_connector(tags("mysql"))]
+async fn json_unquote_text_parameters(api: &mut dyn TestApi) -> crate::Result<()> {
+    // JSON_UNQUOTE accepts ordinary text as well as encoded JSON strings. A
+    // JSONB cast would reject plain text and normalize objects and numbers.
+    for (input, expected) in [
+        (Some("hello"), Some("hello")),
+        (Some(""), Some("")),
+        (Some("\"a\\nb\""), Some("a\nb")),
+        (Some("null"), Some("null")),
+        (Some("1.25e3"), Some("1.25e3")),
+        (Some("{\"b\":2,\"a\":1}"), Some("{\"b\":2,\"a\":1}")),
+        (Some("{\"a\":1,\"a\":2}"), Some("{\"a\":1,\"a\":2}")),
+        (None, None),
+    ] {
+        let input = input.map(Value::text).unwrap_or_else(Value::null_text);
+        let expected = expected.map(Value::text).unwrap_or_else(Value::null_text);
+        let query = Select::default().value(json_unquote(input).alias("unquote"));
+        let result = api.conn().select(query).await?;
+        assert_eq!(result.types[0], crate::connector::ColumnType::Text);
+        assert_eq!(result.get(0).unwrap()["unquote"], expected);
     }
 
     Ok(())

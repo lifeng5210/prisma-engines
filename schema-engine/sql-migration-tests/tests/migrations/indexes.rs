@@ -541,7 +541,7 @@ fn column_type_migrations_should_not_implicitly_drop_compound_indexes(api: TestA
     });
 }
 
-#[test_connector(tags(Mysql8))]
+#[test_connector(tags(Mysql8, KingbaseMysql))]
 fn length_prefixed_index(api: TestApi) {
     let dm = formatdoc! {r#"
         {}
@@ -565,9 +565,10 @@ fn length_prefixed_index(api: TestApi) {
                 .assert_column("b", |attrs| attrs.assert_length_prefix(20))
         })
     });
+    api.schema_push(&dm).send().assert_green().assert_no_steps();
 }
 
-#[test_connector(tags(Mysql8))]
+#[test_connector(tags(Mysql8, KingbaseMysql))]
 fn length_prefixed_unique(api: TestApi) {
     let dm = formatdoc! {r#"
         {}
@@ -591,9 +592,10 @@ fn length_prefixed_unique(api: TestApi) {
                 .assert_column("b", |attrs| attrs.assert_length_prefix(20))
         })
     });
+    api.schema_push(&dm).send().assert_green().assert_no_steps();
 }
 
-#[test_connector(tags(Mysql8))]
+#[test_connector(tags(Mysql8, KingbaseMysql))]
 fn removal_length_prefix_unique(api: TestApi) {
     let dm = formatdoc! {r#"
         {}
@@ -644,7 +646,7 @@ fn removal_length_prefix_unique(api: TestApi) {
     });
 }
 
-#[test_connector(tags(Mysql8))]
+#[test_connector(tags(Mysql8, KingbaseMysql))]
 fn removal_length_prefix_index(api: TestApi) {
     let dm = formatdoc! {r#"
         {}
@@ -719,7 +721,7 @@ fn descending_compound_index(api: TestApi) {
     });
 }
 
-#[test_connector(exclude(Mysql56, Mysql57, Mariadb, KingbaseMysql))]
+#[test_connector(exclude(Mysql56, Mysql57, Mariadb))]
 fn descending_compound_unique(api: TestApi) {
     let dm = formatdoc! {r#"
         {}
@@ -745,7 +747,7 @@ fn descending_compound_unique(api: TestApi) {
     });
 }
 
-#[test_connector(exclude(Mysql56, Mysql57, Mariadb, KingbaseMysql))]
+#[test_connector(exclude(Mysql56, Mysql57, Mariadb))]
 fn descending_unique(api: TestApi) {
     let dm = formatdoc! {r#"
         {}
@@ -767,7 +769,7 @@ fn descending_unique(api: TestApi) {
     });
 }
 
-#[test_connector(exclude(Mysql56, Mysql57, Mariadb, KingbaseMysql))]
+#[test_connector(exclude(Mysql56, Mysql57, Mariadb))]
 fn removal_descending_unique(api: TestApi) {
     let dm = formatdoc! {r#"
         {}

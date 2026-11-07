@@ -1,15 +1,13 @@
 use crate::{
-    ast::{NativeColumnType, OpaqueType, Query, Value, ValueType},
+    ast::{OpaqueType, Query, Value, ValueType},
     error::{Error, ErrorKind},
     visitor::Mysql,
 };
 use query_template::{Fragment, PlaceholderFormat, QueryTemplate};
-use std::borrow::Cow;
 
 /// A MySQL-compatible SQL visitor for KingbaseES.
 ///
-/// It preserves the MySQL visitor's SQL semantics, adding only the metadata
-/// and casts required by Kingbase's `jsonpath` function arguments.
+/// It reuses MySQL SQL generation and adapts full-text search to Kingbase.
 pub struct KingbaseMysql;
 
 impl KingbaseMysql {
@@ -20,29 +18,12 @@ impl KingbaseMysql {
         let template = Mysql::build_template_for_kingbase(query)?;
         let QueryTemplate {
             fragments,
-            mut parameters,
+            parameters,
             placeholder_format,
         } = template;
         let (sql, parameter_fragments) = template_sql(fragments);
 
         let sql = rewrite_full_text_search(sql, &parameters)?;
-        let sql = cast_sum_parameters(sql, &parameters);
-        promote_json_numeric_comparison_params(&sql, &mut parameters);
-        let sql = cast_json_comparison_expressions(sql);
-
-        for index in json_extract_path_parameter_indexes(&sql) {
-            if let Some(param) = parameters.get_mut(index) {
-                param.native_column_type = Some(NativeColumnType {
-                    name: Cow::Borrowed("JSONPATH"),
-                    length: None,
-                });
-            }
-        }
-
-        let sql = cast_dynamic_jsonpaths(sql);
-        let sql = qualify_json_contains(sql);
-        let sql = unquote_json_values(sql);
-        let sql = native_uuid_as_text(sql);
 
         rebuild_template(sql, parameter_fragments, parameters, placeholder_format)
     }
@@ -273,149 +254,6 @@ fn rebuild_template<'a>(
     })
 }
 
-fn cast_sum_parameters(sql: String, params: &[Value<'_>]) -> String {
-    let parameter_positions = parameter_positions(&sql);
-    let mut output = String::with_capacity(sql.len());
-    let mut cursor = 0;
-    let mut search_start = 0;
-
-    while let Some((_, open_paren)) = find_function(&sql, search_start, "SUM") {
-        let Some(function_end) = matching_parenthesis(&sql, open_paren) else {
-            break;
-        };
-        let argument_start = skip_whitespace(&sql, open_paren + 1);
-        let argument_end = previous_non_whitespace(sql.as_bytes(), function_end);
-
-        let Some(argument_end) = argument_end else {
-            search_start = function_end + 1;
-            continue;
-        };
-
-        if argument_start != argument_end || sql.as_bytes().get(argument_start) != Some(&b'?') {
-            search_start = function_end + 1;
-            continue;
-        }
-
-        let Ok(parameter_index) = parameter_positions.binary_search(&argument_start) else {
-            search_start = function_end + 1;
-            continue;
-        };
-        let Some(param) = params.get(parameter_index) else {
-            search_start = function_end + 1;
-            continue;
-        };
-        let Some(type_name) = sum_parameter_type(param) else {
-            search_start = function_end + 1;
-            continue;
-        };
-
-        output.push_str(&sql[cursor..argument_start]);
-        output.push_str("CAST(? AS ");
-        output.push_str(type_name);
-        output.push(')');
-        cursor = argument_end + 1;
-        search_start = function_end + 1;
-    }
-
-    output.push_str(&sql[cursor..]);
-    output
-}
-
-fn sum_parameter_type(param: &Value<'_>) -> Option<&'static str> {
-    match param.typed {
-        // The ordinary query path leaves wire parameter types unspecified.
-        // Disambiguate SUM using the actual value type; the server chooses the
-        // aggregate's return type. Do not promote integers to MySQL DECIMAL.
-        ValueType::Int32(_) => Some("INTEGER"),
-        ValueType::Int64(_) => Some("BIGINT"),
-        ValueType::Float(_) => Some("FLOAT4"),
-        ValueType::Double(_) => Some("FLOAT8"),
-        // C010's unqualified NUMERIC defaults to (10,0). Kingbase's
-        // documented FIXED type without modifiers preserves decimal scale.
-        ValueType::Numeric(_) => Some("FIXED"),
-        _ => None,
-    }
-}
-
-fn promote_json_numeric_comparison_params(sql: &str, params: &mut [Value<'_>]) {
-    for index in json_numeric_comparison_parameter_indexes(sql) {
-        let Some(param) = params.get_mut(index) else {
-            continue;
-        };
-
-        let json = match &param.typed {
-            ValueType::Int32(Some(value)) => Some(serde_json::Value::from(*value)),
-            ValueType::Int64(Some(value)) => Some(serde_json::Value::from(*value)),
-            ValueType::Float(Some(value)) => serde_json::Number::from_f64(f64::from(*value)).map(Into::into),
-            ValueType::Double(Some(value)) => serde_json::Number::from_f64(*value).map(Into::into),
-            ValueType::Text(Some(value)) => Some(serde_json::Value::String(value.to_string())),
-            _ => None,
-        };
-
-        if let Some(json) = json {
-            param.typed = ValueType::Json(Some(json));
-        }
-    }
-}
-
-fn cast_json_comparison_expressions(sql: String) -> String {
-    let mut output = String::with_capacity(sql.len());
-    let mut cursor = 0;
-    let mut search_start = 0;
-
-    while let Some((function_start, open_paren)) = find_function(&sql, search_start, "JSON_EXTRACT") {
-        let Some(function_end) = matching_parenthesis(&sql, open_paren) else {
-            break;
-        };
-
-        let is_comparison_operand = numeric_comparison_parameter_after(&sql, function_end + 1).is_some()
-            || numeric_comparison_parameter_before(&sql, function_start).is_some();
-
-        if is_comparison_operand {
-            output.push_str(&sql[cursor..function_start]);
-            output.push_str("CAST(");
-            output.push_str(&sql[function_start..=function_end]);
-            output.push_str(" AS jsonb)");
-            cursor = function_end + 1;
-        }
-
-        search_start = function_end + 1;
-    }
-
-    output.push_str(&sql[cursor..]);
-    output
-}
-
-fn json_numeric_comparison_parameter_indexes(sql: &str) -> Vec<usize> {
-    let parameter_positions = parameter_positions(sql);
-    let mut indexes = Vec::new();
-    let mut search_start = 0;
-
-    while let Some((function_start, open_paren)) = find_function(sql, search_start, "JSON_EXTRACT") {
-        let Some(function_end) = matching_parenthesis(sql, open_paren) else {
-            break;
-        };
-
-        if let Some(parameter_position) = numeric_comparison_parameter_after(sql, function_end + 1)
-            && let Ok(index) = parameter_positions.binary_search(&parameter_position)
-        {
-            indexes.push(index);
-        }
-
-        if let Some(parameter_position) = numeric_comparison_parameter_before(sql, function_start)
-            && let Ok(index) = parameter_positions.binary_search(&parameter_position)
-        {
-            indexes.push(index);
-        }
-
-        search_start = function_end + 1;
-    }
-
-    indexes.sort_unstable();
-    indexes.dedup();
-    indexes
-}
-
 fn parameter_positions(sql: &str) -> Vec<usize> {
     let bytes = sql.as_bytes();
     let mut positions = Vec::new();
@@ -439,226 +277,8 @@ fn parameter_positions(sql: &str) -> Vec<usize> {
     positions
 }
 
-fn numeric_comparison_parameter_after(sql: &str, start: usize) -> Option<usize> {
-    let bytes = sql.as_bytes();
-    let mut index = skip_whitespace(sql, start);
-
-    match bytes.get(index)? {
-        b'>' | b'<' => {
-            index += 1;
-            if bytes.get(index) == Some(&b'=') {
-                index += 1;
-            }
-
-            let parameter = skip_whitespace(sql, index);
-            (bytes.get(parameter) == Some(&b'?')).then_some(parameter)
-        }
-        _ => None,
-    }
-}
-
-fn numeric_comparison_parameter_before(sql: &str, start: usize) -> Option<usize> {
-    let bytes = sql.as_bytes();
-    let operator_end = previous_non_whitespace(bytes, start)?;
-    let parameter_boundary = match bytes[operator_end] {
-        b'>' | b'<' => operator_end,
-        b'=' if previous_non_whitespace(bytes, operator_end)
-            .is_some_and(|index| matches!(bytes[index], b'>' | b'<')) =>
-        {
-            previous_non_whitespace(bytes, operator_end)?
-        }
-        _ => return None,
-    };
-
-    let parameter = previous_non_whitespace(bytes, parameter_boundary)?;
-    (bytes[parameter] == b'?').then_some(parameter)
-}
-
 fn previous_non_whitespace(bytes: &[u8], start: usize) -> Option<usize> {
     (0..start).rev().find(|index| !bytes[*index].is_ascii_whitespace())
-}
-
-fn json_extract_path_parameter_indexes(sql: &str) -> Vec<usize> {
-    #[derive(Clone, Copy)]
-    struct Context {
-        is_json_extract: bool,
-        argument: usize,
-    }
-
-    let bytes = sql.as_bytes();
-    let mut contexts = Vec::new();
-    let mut indexes = Vec::new();
-    let mut parameter_index = 0;
-    let mut pending_json_extract = false;
-    let mut index = 0;
-
-    while index < bytes.len() {
-        let byte = bytes[index];
-
-        if let Some(end) = non_code_end(sql, index) {
-            index = end;
-            continue;
-        }
-
-        match byte {
-            b'(' => {
-                contexts.push(Context {
-                    is_json_extract: pending_json_extract,
-                    argument: 0,
-                });
-                pending_json_extract = false;
-            }
-            b')' => {
-                contexts.pop();
-                pending_json_extract = false;
-            }
-            b',' => {
-                if let Some(context) = contexts.last_mut()
-                    && context.is_json_extract
-                {
-                    context.argument += 1;
-                }
-                pending_json_extract = false;
-            }
-            b'?' => {
-                if contexts
-                    .last()
-                    .is_some_and(|context| context.is_json_extract && context.argument == 1)
-                {
-                    indexes.push(parameter_index);
-                }
-                parameter_index += 1;
-                pending_json_extract = false;
-            }
-            byte if byte.is_ascii_alphabetic() || byte == b'_' => {
-                let identifier_start = index;
-                index += 1;
-
-                while index < bytes.len() && (bytes[index].is_ascii_alphanumeric() || bytes[index] == b'_') {
-                    index += 1;
-                }
-
-                pending_json_extract = sql[identifier_start..index].eq_ignore_ascii_case("JSON_EXTRACT");
-                continue;
-            }
-            byte if byte.is_ascii_whitespace() => {}
-            _ => pending_json_extract = false,
-        }
-
-        index += 1;
-    }
-
-    indexes
-}
-
-fn cast_dynamic_jsonpaths(sql: String) -> String {
-    let mut output = String::with_capacity(sql.len());
-    let mut cursor = 0;
-    let mut search_start = 0;
-
-    while let Some((_, open_paren)) = find_function(&sql, search_start, "JSON_EXTRACT") {
-        let Some(function_end) = matching_parenthesis(&sql, open_paren) else {
-            break;
-        };
-        let Some(comma) = first_function_argument_comma(&sql, open_paren, function_end) else {
-            search_start = function_end + 1;
-            continue;
-        };
-
-        let path_start = skip_whitespace(&sql, comma + 1);
-        if !sql[path_start..].starts_with("CONCAT(") {
-            search_start = function_end + 1;
-            continue;
-        }
-
-        let path_open_paren = path_start + "CONCAT".len();
-        let Some(path_end) = matching_parenthesis(&sql, path_open_paren).map(|end| end + 1) else {
-            search_start = function_end + 1;
-            continue;
-        };
-
-        if path_end > function_end || !sql[path_end..function_end].trim().is_empty() {
-            search_start = function_end + 1;
-            continue;
-        }
-
-        output.push_str(&sql[cursor..path_start]);
-        output.push_str("CAST(");
-        output.push_str(&sql[path_start..path_end]);
-        output.push_str(" AS JSONPATH)");
-        cursor = path_end;
-        search_start = function_end + 1;
-    }
-
-    output.push_str(&sql[cursor..]);
-    output
-}
-
-fn qualify_json_contains(sql: String) -> String {
-    let mut output = String::with_capacity(sql.len());
-    let mut cursor = 0;
-    let mut search_start = 0;
-
-    while let Some((function_start, open_paren)) = find_function(&sql, search_start, "JSON_CONTAINS") {
-        let Some(function_end) = matching_parenthesis(&sql, open_paren) else {
-            break;
-        };
-
-        if function_argument_count(&sql, open_paren, function_end) == 2 {
-            output.push_str(&sql[cursor..function_start]);
-            output.push_str("sys.JSON_CONTAINS");
-            output.push_str(&sql[open_paren..function_end]);
-            output.push_str(", CAST('$' AS JSONPATH)");
-            cursor = function_end;
-        }
-
-        search_start = function_end + 1;
-    }
-
-    output.push_str(&sql[cursor..]);
-    output
-}
-
-fn unquote_json_values(sql: String) -> String {
-    let mut output = String::with_capacity(sql.len());
-    let mut cursor = 0;
-    let mut search_start = 0;
-
-    while let Some((function_start, open_paren)) = find_function(&sql, search_start, "JSON_UNQUOTE") {
-        let Some(function_end) = matching_parenthesis(&sql, open_paren) else {
-            break;
-        };
-
-        output.push_str(&sql[cursor..function_start]);
-        output.push_str("(CAST(");
-        output.push_str(&sql[open_paren + 1..function_end]);
-        output.push_str(" AS jsonb) ->> CAST('$' AS JSONPATH))");
-        cursor = function_end + 1;
-        search_start = function_end + 1;
-    }
-
-    output.push_str(&sql[cursor..]);
-    output
-}
-
-fn native_uuid_as_text(sql: String) -> String {
-    let mut output = String::with_capacity(sql.len());
-    let mut cursor = 0;
-    let mut search_start = 0;
-
-    while let Some((start, open)) = find_function(&sql, search_start, "uuid") {
-        let Some(end) = matching_parenthesis(&sql, open) else {
-            break;
-        };
-        if sql[open + 1..end].trim().is_empty() {
-            output.push_str(&sql[cursor..start]);
-            output.push_str("CAST(sys_guid() AS text)");
-            cursor = end + 1;
-        }
-        search_start = end + 1;
-    }
-    output.push_str(&sql[cursor..]);
-    output
 }
 
 /// Find an unqualified function token in SQL code, never inside a quoted
@@ -770,63 +390,6 @@ fn skip_whitespace(sql: &str, mut index: usize) -> usize {
     index
 }
 
-fn first_function_argument_comma(sql: &str, open_paren: usize, function_end: usize) -> Option<usize> {
-    let bytes = sql.as_bytes();
-    let mut depth = 1;
-    let mut index = open_paren + 1;
-
-    while index < function_end {
-        let byte = bytes[index];
-
-        if let Some(end) = non_code_end(sql, index) {
-            index = end;
-            continue;
-        }
-
-        match byte {
-            b'(' => depth += 1,
-            b')' => depth -= 1,
-            b',' if depth == 1 => return Some(index),
-            _ => {}
-        }
-
-        index += 1;
-    }
-
-    None
-}
-
-fn function_argument_count(sql: &str, open_paren: usize, function_end: usize) -> usize {
-    let bytes = sql.as_bytes();
-    let mut count = 1;
-    let mut depth = 1;
-    let mut index = open_paren + 1;
-
-    if sql[index..function_end].trim().is_empty() {
-        return 0;
-    }
-
-    while index < function_end {
-        let byte = bytes[index];
-
-        if let Some(end) = non_code_end(sql, index) {
-            index = end;
-            continue;
-        }
-
-        match byte {
-            b'(' => depth += 1,
-            b')' => depth -= 1,
-            b',' if depth == 1 => count += 1,
-            _ => {}
-        }
-
-        index += 1;
-    }
-
-    count
-}
-
 fn matching_parenthesis(sql: &str, open_paren: usize) -> Option<usize> {
     let bytes = sql.as_bytes();
     let mut depth = 0;
@@ -892,19 +455,47 @@ mod tests {
     }
 
     #[test]
-    fn sum_parameters_keep_their_original_types() {
-        for (parameter, sql) in [
-            (Value::int32(1), "SELECT SUM(CAST(? AS INTEGER))"),
-            (Value::int64(1), "SELECT SUM(CAST(? AS BIGINT))"),
-            (Value::float(1.5), "SELECT SUM(CAST(? AS FLOAT4))"),
-            (Value::double(1.5), "SELECT SUM(CAST(? AS FLOAT8))"),
-            (Value::numeric("1.5".parse().unwrap()), "SELECT SUM(CAST(? AS FIXED))"),
-            (Value::from(None::<i32>), "SELECT SUM(CAST(? AS INTEGER))"),
+    fn sum_parameters_use_mysql_sql_and_keep_their_types() {
+        for parameter in [
+            Value::int32(1),
+            Value::int64(2147483648_i64),
+            Value::float(0.1),
+            Value::double(0.1),
+            Value::numeric("1.5".parse().unwrap()),
+            Value::null_int32(),
+            Value::null_int64(),
+            Value::null_float(),
+            Value::null_double(),
+            Value::null_numeric(),
         ] {
-            let (actual, params) =
-                KingbaseMysql::build(Select::default().value(crate::ast::sum(parameter.clone()))).unwrap();
-            assert_eq!(actual, sql);
+            let query = Select::default().value(crate::ast::sum(parameter.clone()));
+            let (actual, params) = KingbaseMysql::build(query.clone()).unwrap();
+            let (mysql, mysql_params) = Mysql::build(query).unwrap();
+            assert_eq!(actual, "SELECT SUM(?)");
+            assert_eq!(actual, mysql);
+            assert_eq!(params, mysql_params);
             assert_eq!(params, vec![parameter]);
+        }
+    }
+
+    #[test]
+    fn decimal_sum_matches_mysql_without_coercing_parameters_or_columns() {
+        for parameter in [
+            Value::numeric("1.25".parse().unwrap()),
+            Value::numeric("-1.25".parse().unwrap()),
+            Value::numeric("1E-31".parse().unwrap()),
+            Value::numeric("123456789012345678901234567890.123456789".parse().unwrap()),
+            Value::null_numeric(),
+        ] {
+            let query = Select::from_table("Product")
+                .value(crate::ast::sum(parameter.clone()))
+                .value(crate::ast::sum(Column::from("price")));
+            let (actual, parameters) = KingbaseMysql::build(query.clone()).unwrap();
+            let (mysql, mysql_parameters) = Mysql::build(query).unwrap();
+
+            assert_eq!(actual, mysql);
+            assert_eq!(parameters, mysql_parameters);
+            assert_eq!(parameters, vec![parameter]);
         }
     }
 
@@ -926,20 +517,6 @@ mod tests {
     }
 
     #[test]
-    fn uuid_rewrite_skips_quoted_regions_comments_and_other_identifiers() {
-        let protected = r#"`uuid()` 'uuid()' "uuid()" `a``uuid()` 'a''uuid()'
-            $$uuid()$$ $tag$uuid()$tag$ myuuid() sys.uuid() 中文uuid()
-            /* uuid() /* uuid() */ uuid() */ -- uuid()
-            # uuid()
-        "#;
-        let sql = format!("SELECT {protected}, UUID (), uuid()");
-        assert_eq!(
-            super::native_uuid_as_text(sql),
-            format!("SELECT {protected}, CAST(sys_guid() AS text), CAST(sys_guid() AS text)")
-        );
-    }
-
-    #[test]
     fn json_rewrite_keeps_function_shaped_names_and_bind_positions() {
         let query = Select::from_table("uuid()")
             .column(Column::from("JSON_CONTAINS(a,b)"))
@@ -948,8 +525,8 @@ mod tests {
         let (sql, params) = KingbaseMysql::build(query).unwrap();
         assert_eq!(
             sql,
-            "SELECT `JSON_CONTAINS(a,b)`, (CAST(`JSON_UNQUOTE(v)` AS jsonb) ->> CAST('$' AS JSONPATH)), \
-             CAST(sys_guid() AS text) FROM `uuid()`"
+            "SELECT `JSON_CONTAINS(a,b)`, JSON_UNQUOTE(`JSON_UNQUOTE(v)`), \
+             uuid() FROM `uuid()`"
         );
         assert!(params.is_empty());
 
@@ -961,37 +538,138 @@ mod tests {
     }
 
     #[test]
-    fn json_unquote_uses_the_unambiguous_jsonpath_operator() {
-        let query = Select::default().value(json_unquote(col!("json")));
+    fn json_unquote_uses_mysql_for_columns_parameters_and_nested_calls() {
+        for query in [
+            Select::default().value(json_unquote(col!("json"))),
+            Select::default().value(json_unquote(Value::text("hello"))),
+            Select::default().value(json_unquote(Value::json(serde_json::json!({"a": 1})))),
+            Select::default().value(json_unquote(Value::null_text())),
+            Select::default().value(json_unquote(json_unquote(Value::text("\"hello\"")))),
+        ] {
+            let (sql, params) = KingbaseMysql::build(query.clone()).unwrap();
+            let (mysql, mysql_params) = Mysql::build(query).unwrap();
+            assert_eq!(sql, mysql);
+            assert_eq!(params, mysql_params);
+            assert!(sql.contains("JSON_UNQUOTE("), "{sql}");
+            assert!(!sql.contains(" AS jsonb") && !sql.contains("JSONPATH"), "{sql}");
+        }
+    }
+
+    #[test]
+    fn json_unquote_keeps_mysql_path_parameters_and_bind_order() {
+        let path = "$.name";
+        let query = Select::from_table("data")
+            .value(Value::text("before"))
+            .value(json_unquote(json_extract(col!("json"), JsonPath::string(path), false)))
+            .value(Value::int32(42));
+        let mysql = Mysql::build_template(query.clone()).unwrap();
+        let template = KingbaseMysql::build_template(query).unwrap();
+        assert_eq!(
+            template.to_sql().unwrap(),
+            "SELECT ?, JSON_UNQUOTE(JSON_EXTRACT(`json`, ?)), ? FROM `data`"
+        );
+        assert_eq!(template.parameters, mysql.parameters);
+        assert_eq!(
+            template.parameters,
+            vec![Value::text("before"), Value::text(path), Value::int32(42),]
+        );
+    }
+
+    #[test]
+    fn native_uuid_uses_mysql_function() {
+        let query = Select::default().value(native_uuid());
+        let (mysql, mysql_params) = Mysql::build(query.clone()).unwrap();
         let (sql, params) = KingbaseMysql::build(query).unwrap();
 
-        assert_eq!("SELECT (CAST(`json` AS jsonb) ->> CAST('$' AS JSONPATH))", sql);
+        assert_eq!("SELECT uuid()", sql);
+        assert_eq!(sql, mysql);
+        assert_eq!(params, mysql_params);
         assert!(params.is_empty());
     }
 
     #[test]
-    fn native_uuid_is_a_text_value() {
-        let (sql, params) = KingbaseMysql::build(Select::default().value(native_uuid())).unwrap();
+    fn json_extract_keeps_mysql_path_parameters() {
+        for path in ["$.a", "$.\"汉字\"", "$[1]", "$.\"a\\\":{\""] {
+            for extract_as_string in [false, true] {
+                let query = Select::default().value(json_extract(
+                    Column::from("json"),
+                    JsonPath::string(path),
+                    extract_as_string,
+                ));
+                let mysql = Mysql::build_template(query.clone()).unwrap();
+                let template = KingbaseMysql::build_template(query).unwrap();
 
-        assert_eq!("SELECT CAST(sys_guid() AS text)", sql);
-        assert!(params.is_empty());
+                assert_eq!(template.to_sql().unwrap(), mysql.to_sql().unwrap());
+                assert_eq!(template.parameters, mysql.parameters);
+                assert_eq!(template.parameters, vec![Value::text(path)]);
+            }
+        }
     }
 
     #[test]
-    fn build_template_preserves_jsonpath_parameter_metadata() {
-        let query = Select::default().value(json_extract(Column::from("json"), JsonPath::string("$.a"), false));
-        let template = KingbaseMysql::build_template(query).unwrap();
+    fn json_contains_and_dynamic_paths_use_mysql_sql_and_parameters() {
+        let document: Expression = col!("json").into();
+        for condition in [
+            document.clone().json_array_contains(serde_json::json!([1, null])),
+            document.clone().json_array_not_contains(serde_json::json!(["a"])),
+            document.clone().json_array_begins_with(serde_json::json!(1)),
+            document.clone().json_array_not_begins_with(serde_json::json!(1)),
+            document.clone().json_array_ends_into(serde_json::json!(2)),
+            document.json_array_not_ends_into(serde_json::json!(2)),
+        ] {
+            let query = Select::from_table("data")
+                .value(Value::text("before"))
+                .so_that(condition);
+            let (mysql, mysql_parameters) = Mysql::build(query.clone()).unwrap();
+            let (sql, parameters) = KingbaseMysql::build(query).unwrap();
+            assert_eq!(sql, mysql);
+            assert_eq!(parameters, mysql_parameters);
+            assert!(!sql.contains("JSONPATH") && !sql.contains("sys.JSON_CONTAINS"), "{sql}");
+        }
+    }
 
-        assert_eq!("SELECT JSON_EXTRACT(`json`, ?)", template.to_sql().unwrap());
-        assert_eq!(template.parameters.len(), 1);
-        assert!(matches!(
-            template.parameters[0]
-                .native_column_type
-                .as_ref()
-                .map(|t| t.name.as_ref()),
-            Some("JSONPATH")
-        ));
-        assert!(matches!(template.parameters[0].typed, ValueType::Text(Some(_))));
+    #[test]
+    fn json_comparisons_use_mysql_sql_and_scalar_parameters() {
+        for (value, parameter) in [
+            (serde_json::json!(1), Value::int64(1)),
+            (serde_json::json!(1.25), Value::double(1.25)),
+            (serde_json::json!("alice"), Value::text("alice")),
+        ] {
+            let path: Expression = json_extract(col!("json"), JsonPath::string("$.a"), false).into();
+            let scalar: Expression = Value::json(value.clone()).into();
+            for (condition, sign, reversed) in [
+                (path.clone().greater_than(scalar.clone()), ">", false),
+                (path.clone().greater_than_or_equals(scalar.clone()), ">=", false),
+                (path.clone().less_than(scalar.clone()), "<", false),
+                (path.clone().less_than_or_equals(scalar.clone()), "<=", false),
+                (scalar.clone().greater_than(path.clone()), ">", true),
+                (scalar.clone().greater_than_or_equals(path.clone()), ">=", true),
+                (scalar.clone().less_than(path.clone()), "<", true),
+                (scalar.less_than_or_equals(path), "<=", true),
+            ] {
+                let query = Select::from_table("data")
+                    .value(Value::text("before"))
+                    .so_that(condition);
+                let (mysql, mysql_parameters) = Mysql::build(query.clone()).unwrap();
+                let (sql, parameters) = KingbaseMysql::build(query).unwrap();
+                assert_eq!(sql, mysql);
+                assert_eq!(parameters, mysql_parameters);
+                let extract = "JSON_EXTRACT(`json`, ?)";
+                let (comparison, expected_parameters) = if reversed {
+                    (
+                        format!("? {sign} {extract}"),
+                        vec![Value::text("before"), parameter.clone(), Value::text("$.a")],
+                    )
+                } else {
+                    (
+                        format!("{extract} {sign} ?"),
+                        vec![Value::text("before"), Value::text("$.a"), parameter.clone()],
+                    )
+                };
+                assert_eq!(sql, format!("SELECT ? FROM `data` WHERE {comparison}"));
+                assert_eq!(parameters, expected_parameters);
+            }
+        }
     }
 
     #[test]

@@ -15,7 +15,7 @@ test_type!(tinyint(
     Value::int32(i8::MAX)
 ));
 
-// Kingbase reports TINYINT(1) as Boolean, covered by the dedicated test below.
+// R3 also reports TINYINT(1) as an integer; its dedicated regression is below.
 #[cfg(feature = "mysql-native")]
 test_type_impl!(tinyint1(
     mysql,
@@ -27,17 +27,21 @@ test_type_impl!(tinyint1(
 ));
 
 #[cfg(feature = "kingbase-mysql-native")]
-test_type!(tinyint1_kingbase_bool(
+test_type!(tinyint1_kingbase_int(
     kingbase_mysql,
     "tinyint(1)",
-    ColumnType::Boolean,
-    Value::boolean(false),
-    Value::boolean(true)
+    ColumnType::Int32,
+    Value::null_int32(),
+    Value::int32(i8::MIN),
+    Value::int32(-1),
+    Value::int32(0),
+    Value::int32(1),
+    Value::int32(2),
+    Value::int32(i8::MAX)
 ));
 
-// Kingbase's MySQL unsigned TINYINT binding is not supported yet.
-#[cfg(feature = "mysql-native")]
-test_type_impl!(tinyint_unsigned(
+// Kingbase small unsigned cases require R3 native support.
+test_type!(tinyint_unsigned(
     mysql,
     "tinyint(4) unsigned",
     ColumnType::Int32,
@@ -64,9 +68,7 @@ test_type!(smallint(
     Value::int32(i16::MAX)
 ));
 
-// Kingbase's MySQL unsigned SMALLINT binding is not supported yet.
-#[cfg(feature = "mysql-native")]
-test_type_impl!(smallint_unsigned(
+test_type!(smallint_unsigned(
     mysql,
     "smallint unsigned",
     ColumnType::Int32,
@@ -84,7 +86,6 @@ test_type!(mediumint(
     Value::int32(8388607)
 ));
 
-// Kingbase's MySQL unsigned MEDIUMINT binding is not supported yet.
 #[cfg(feature = "mysql-native")]
 test_type_impl!(mediumint_unsigned(
     mysql,
@@ -93,6 +94,17 @@ test_type_impl!(mediumint_unsigned(
     Value::null_int64(),
     Value::int64(0),
     Value::int64(16777215)
+));
+
+// R3 exposes unsigned MEDIUMINT as INT4, unlike the native MySQL test above.
+#[cfg(feature = "kingbase-mysql-native")]
+test_type_impl!(mediumint_unsigned_kingbase_mysql(
+    kingbase_mysql,
+    "mediumint unsigned",
+    ColumnType::Int32,
+    Value::null_int32(),
+    Value::int32(0),
+    Value::int32(16777215)
 ));
 
 test_type!(int(

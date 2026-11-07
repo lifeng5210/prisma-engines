@@ -9,6 +9,18 @@ use kingbase_tokio_postgres::{
 };
 use std::borrow::Cow;
 
+/// R3's JSON base type is absent from the current driver's generated constants.
+pub(crate) fn mysql_json_type() -> KingbaseType {
+    KingbaseType::new("mysql_json".into(), 4802, KingbaseKind::Simple, "sys".into())
+}
+
+pub(crate) fn is_mysql_json(typ: &KingbaseType) -> bool {
+    typ.oid() == 4802
+        && typ.schema() == "sys"
+        && typ.name() == "mysql_json"
+        && matches!(typ.kind(), KingbaseKind::Simple)
+}
+
 /// SQL arrays are not part of the MySQL connector's supported value types.
 /// Check metadata as well as values so NULL arrays and empty result sets fail.
 pub(crate) fn ensure_supported_type(typ: &KingbaseType) -> crate::Result<()> {
@@ -89,6 +101,9 @@ macro_rules! create_pg_mapping {
           /// Takes a Postgres type and returns the corresponding ColumnType
           #[deny(unreachable_patterns)]
           pub(crate) fn from_pg_type(ty: &KingbaseType) -> KingbaseColumnType {
+              if is_mysql_json(ty) {
+                  return KingbaseColumnType::MysqlJson(KingbaseColumnValidatorJson);
+              }
               match ty {
                   $(
                       $(
@@ -159,6 +174,7 @@ create_pg_mapping! {
   // [KingbaseColumnType => ColumnType]
   [Enum => Text],
   [Set => Text],
+  [MysqlJson => Json],
   [Unknown => Text]
 }
 
@@ -195,6 +211,15 @@ mod tests {
         ] {
             assert!(ensure_supported_type(&typ).is_ok(), "{typ}");
         }
+    }
+
+    #[test]
+    fn r3_mysql_json_metadata_is_json_including_empty_results() {
+        let json = Type::new("mysql_json".into(), 4802, Kind::Simple, "sys".into());
+        assert_eq!(ColumnType::from(&json), ColumnType::Json);
+        assert!(ensure_supported_type(&json).is_ok());
+        let array = Type::new("_mysql_json".into(), 4807, Kind::Array(json), "sys".into());
+        assert!(ensure_supported_type(&array).is_err());
     }
 
     #[test]

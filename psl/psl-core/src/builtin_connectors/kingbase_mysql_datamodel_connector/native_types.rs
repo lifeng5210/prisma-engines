@@ -6,7 +6,7 @@ crate::native_type_definition! {
     SmallInt -> Int,
     UnsignedSmallInt -> Int,
     TinyInt -> Boolean | Int,
-    UnsignedTinyInt -> Boolean | Int,
+    UnsignedTinyInt -> Int,
     MediumInt -> Int,
     UnsignedMediumInt -> Int,
     BigInt -> BigInt,

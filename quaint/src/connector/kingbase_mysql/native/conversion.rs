@@ -69,7 +69,7 @@ pub(crate) fn params_to_types(params: &[Value<'_>]) -> Vec<KingbaseType> {
                 ValueType::Boolean(_) => KingbaseType::MYSQL_TINYINT,
                 ValueType::Char(_) => KingbaseType::CHAR,
                 ValueType::Numeric(_) => KingbaseType::NUMERIC,
-                ValueType::Json(_) => KingbaseType::MYSQL_SYS_JSON,
+                ValueType::Json(_) => mysql_json_type(),
                 ValueType::Xml(_) => KingbaseType::XML,
                 ValueType::Uuid(_) => KingbaseType::UUID,
                 ValueType::DateTime(_) => KingbaseType::MYSQL_DATETIME,
@@ -102,6 +102,20 @@ pub(crate) fn params_to_types(params: &[Value<'_>]) -> Vec<KingbaseType> {
             }
         })
         .collect()
+}
+
+struct MysqlJson(serde_json::Value);
+
+impl<'a> FromSql<'a> for MysqlJson {
+    fn from_sql(_ty: &KingbaseType, raw: &'a [u8]) -> Result<Self, Box<dyn StdError + Sync + Send>> {
+        // R3 mysql_json uses the same versioned JSON payload as JSONB.
+        // Reuse the existing codec while accepting only its actual catalog type.
+        serde_json::Value::from_sql(&KingbaseType::JSONB, raw).map(Self)
+    }
+
+    fn accepts(ty: &KingbaseType) -> bool {
+        is_mysql_json(ty)
+    }
 }
 
 struct EnumString {
@@ -261,7 +275,7 @@ impl GetRow for KingbaseRow {
                     }
                     KingbaseColumnTypeBytes::MYSQL_SYS_BIT => {
                         let val: Option<MySqlBit> = row.try_get(i)?;
-                        ValueType::Bytes(v.read(val.map(|value| Cow::Owned(value.payload().to_vec()))))
+                        ValueType::Bytes(v.read(val.map(|value| Cow::Owned(mysql_bit_to_bytes(&value)))))
                     }
                     KingbaseColumnTypeBytes::MYSQL_BLOB
                     | KingbaseColumnTypeBytes::MYSQL_LONGBLOB
@@ -346,6 +360,10 @@ impl GetRow for KingbaseRow {
                         ValueType::Time(v.read(val.map(|val| val.0)))
                     }
                 },
+                KingbaseColumnType::MysqlJson(v) => {
+                    let value: Option<MysqlJson> = row.try_get(i)?;
+                    ValueType::Json(v.read(value.map(|json| json.0)))
+                }
                 KingbaseColumnType::Json(ty, v) => match ty {
                     KingbaseColumnTypeJson::JSON
                     | KingbaseColumnTypeJson::JSONB
@@ -548,18 +566,29 @@ impl ToSql for Value<'_> {
             }
             (ValueType::Int32(integer), _) => integer.map(|integer| integer.to_sql(ty, out)),
             (ValueType::Int64(integer), _) => integer.map(|integer| integer.to_sql(ty, out)),
+            // MySQL-mode inference can describe numeric placeholders as TEXT.
+            // Widen f32 before formatting so a Double result keeps its value.
+            (ValueType::Float(float), &KingbaseType::TEXT) => {
+                float.map(|float| f64::from(float).to_string().to_sql(ty, out))
+            }
             (ValueType::Float(float), &KingbaseType::FLOAT8) => float.map(|float| (float as f64).to_sql(ty, out)),
             (ValueType::Float(float), &KingbaseType::NUMERIC) => float
                 .map(|float| BigDecimal::from_f32(float).unwrap())
                 .map(DecimalWrapper)
                 .map(|dw| dw.to_sql(ty, out)),
             (ValueType::Float(float), _) => float.map(|float| float.to_sql(ty, out)),
+            (ValueType::Double(double), &KingbaseType::TEXT) => double.map(|double| double.to_string().to_sql(ty, out)),
             (ValueType::Double(double), &KingbaseType::FLOAT4) => double.map(|double| (double as f32).to_sql(ty, out)),
             (ValueType::Double(double), &KingbaseType::NUMERIC) => double
                 .map(|double| BigDecimal::from_f64(double).unwrap())
                 .map(DecimalWrapper)
                 .map(|dw| dw.to_sql(ty, out)),
             (ValueType::Double(double), _) => double.map(|double| double.to_sql(ty, out)),
+            // MySQL-mode prepared statements can describe SUM(?) as a TEXT
+            // parameter. Encode the decimal text instead of a NUMERIC payload.
+            (ValueType::Numeric(decimal), &KingbaseType::TEXT) => {
+                decimal.as_ref().map(|decimal| decimal.to_string().to_sql(ty, out))
+            }
             (ValueType::Numeric(decimal), &KingbaseType::FLOAT4) => decimal.as_ref().map(|decimal| {
                 let f = decimal.to_string().parse::<f32>().expect("decimal to f32 conversion");
                 f.to_sql(ty, out)
@@ -600,6 +629,9 @@ impl ToSql for Value<'_> {
             (ValueType::Text(string), &KingbaseType::MYSQL_SYS_JSON) => string
                 .as_ref()
                 .map(|string| serde_json::from_str::<serde_json::Value>(string)?.to_sql(ty, out)),
+            (ValueType::Text(string), ty) if is_mysql_json(ty) => string
+                .as_ref()
+                .map(|string| serde_json::from_str::<serde_json::Value>(string)?.to_sql(&KingbaseType::JSONB, out)),
             (ValueType::Text(string), &KingbaseType::JSONPATH) => string.as_ref().map(|string| {
                 // Kingbase's JSONPATH binary input starts with the protocol
                 // version byte followed by the MySQL path text.
@@ -611,6 +643,9 @@ impl ToSql for Value<'_> {
             (ValueType::Json(value), &KingbaseType::MYSQL_SYS_JSON) => value
                 .as_ref()
                 .map(|value| <serde_json::Value as ToSql>::to_sql(value, &KingbaseType::JSONB, out)),
+            (ValueType::Json(value), ty) if is_mysql_json(ty) => {
+                value.as_ref().map(|value| value.to_sql(&KingbaseType::JSONB, out))
+            }
             (ValueType::Text(string), &KingbaseType::MYSQL_LONGTEXT)
             | (ValueType::Text(string), &KingbaseType::MYSQL_MEDIUMTEXT)
             | (ValueType::Text(string), &KingbaseType::MYSQL_TINYTEXT) => string.as_ref().map(|string| {
@@ -635,7 +670,7 @@ impl ToSql for Value<'_> {
                 Ok(IsNull::No)
             }),
             (ValueType::Bytes(bytes), &KingbaseType::MYSQL_SYS_BIT) => bytes.as_ref().map(|bytes| {
-                let bit = MySqlBit::new((bytes.len() * 8) as u64, bytes.to_vec())?;
+                let bit = mysql_bit_from_bytes(bytes)?;
                 bit.to_sql(ty, out)
             }),
             (ValueType::Bytes(bytes), _) => bytes.as_ref().map(|bytes| bytes.as_ref().to_sql(ty, out)),
@@ -695,6 +730,39 @@ impl ToSql for Value<'_> {
     kingbase_tokio_postgres::types::to_sql_checked!();
 }
 
+// Prisma/MySQL Bytes are a big-endian numeric value; the BIT wire payload
+// instead aligns its significant bits to the most significant bit of a byte.
+fn mysql_bit_from_bytes(bytes: &[u8]) -> Result<MySqlBit, Box<dyn StdError + Send + Sync>> {
+    let Some(first) = bytes.iter().position(|byte| *byte != 0) else {
+        return Ok(MySqlBit::from_bool(false));
+    };
+    let bytes = &bytes[first..];
+    let leading = bytes[0].leading_zeros();
+    let payload = bytes
+        .iter()
+        .enumerate()
+        .map(|(index, byte)| {
+            ((u16::from(*byte) << leading) | (u16::from(bytes.get(index + 1).copied().unwrap_or(0)) >> (8 - leading)))
+                as u8
+        })
+        .collect::<Vec<_>>();
+    Ok(MySqlBit::new((bytes.len() * 8) as u64 - u64::from(leading), payload)?)
+}
+
+fn mysql_bit_to_bytes(value: &MySqlBit) -> Vec<u8> {
+    let padding = (8 - value.bit_len() % 8) % 8;
+    value
+        .payload()
+        .iter()
+        .enumerate()
+        .map(|(index, byte)| {
+            ((u16::from(*byte) >> padding)
+                | (u16::from(index.checked_sub(1).map_or(0, |previous| value.payload()[previous])) << (8 - padding)))
+                as u8
+        })
+        .collect()
+}
+
 fn string_to_bits(s: &str) -> crate::Result<BitVec> {
     use bit_vec::*;
 
@@ -733,6 +801,169 @@ fn bits_to_string(bits: &BitVec) -> crate::Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mysql_bit_bytes_encode_significant_bits_without_byte_padding() {
+        for (input, length, payload) in [
+            (vec![], 1, vec![0]),
+            (vec![0, 0], 1, vec![0]),
+            (vec![1], 1, vec![0x80]),
+            (vec![0, 1], 1, vec![0x80]),
+            (vec![0x7f], 7, vec![0xfe]),
+            (vec![0xaa], 8, vec![0xaa]),
+            (vec![1, 1], 9, vec![0x80, 0x80]),
+            (vec![1, 0xff], 9, vec![0xff, 0x80]),
+            (vec![1, 1, 1], 17, vec![0x80, 0x80, 0x80]),
+            (vec![0xff; 8], 64, vec![0xff; 8]),
+        ] {
+            let mut buffer = BytesMut::new();
+            Value::bytes(input)
+                .to_sql(&KingbaseType::MYSQL_SYS_BIT, &mut buffer)
+                .unwrap();
+            assert_eq!(&buffer[..8], &u64::to_be_bytes(length));
+            assert_eq!(&buffer[8..], payload);
+        }
+        assert!(mysql_bit_from_bytes(&[1; 9]).is_err());
+        let mut buffer = BytesMut::new();
+        assert!(matches!(
+            Value::null_bytes()
+                .to_sql(&KingbaseType::MYSQL_SYS_BIT, &mut buffer)
+                .unwrap(),
+            IsNull::Yes
+        ));
+        assert!(buffer.is_empty());
+    }
+
+    #[test]
+    fn mysql_bit_payloads_decode_to_mysql_numeric_bytes() {
+        for (length, payload, expected) in [
+            (7, vec![0xfe], vec![0x7f]),
+            (8, vec![0xaa], vec![0xaa]),
+            (9, vec![0x80, 0x80], vec![1, 1]),
+            (9, vec![0, 0x80], vec![0, 1]),
+            (17, vec![0x80, 0x80, 0x80], vec![1, 1, 1]),
+            (64, vec![0xff; 8], vec![0xff; 8]),
+        ] {
+            assert_eq!(mysql_bit_to_bytes(&MySqlBit::new(length, payload).unwrap()), expected);
+        }
+        for value in [false, true] {
+            let bit = MySqlBit::from_bool(value);
+            assert_eq!(bit.as_bool(), Some(value));
+        }
+    }
+
+    #[test]
+    fn r3_mysql_json_parameters_and_results_use_the_existing_jsonb_codec() {
+        let ty = mysql_json_type();
+        assert!(<MysqlJson as FromSql>::accepts(&ty));
+        for json in [
+            serde_json::json!({"value": "123"}),
+            serde_json::json!([1, "123", null]),
+            serde_json::json!("null"),
+            serde_json::json!("123"),
+            serde_json::json!(123),
+            serde_json::json!(u64::MAX),
+            serde_json::json!(true),
+            serde_json::json!(false),
+            serde_json::Value::Null,
+        ] {
+            let parameter = Value::json(json.clone());
+            assert_eq!(params_to_types(&[parameter.clone()]), [ty.clone()]);
+            for value in [parameter, Value::text(json.to_string())] {
+                let mut buffer = BytesMut::new();
+                assert!(matches!(value.to_sql(&ty, &mut buffer).unwrap(), IsNull::No));
+                assert_eq!(buffer[0], 1);
+                assert_eq!(MysqlJson::from_sql(&ty, &buffer).unwrap().0, json);
+            }
+        }
+        let mut buffer = BytesMut::new();
+        assert!(matches!(
+            Value::null_json().to_sql(&ty, &mut buffer).unwrap(),
+            IsNull::Yes
+        ));
+        assert!(buffer.is_empty());
+        assert_eq!(params_to_types(&[Value::null_json()]), [KingbaseType::UNKNOWN]);
+        assert!(Value::text("not JSON").to_sql(&ty, &mut buffer).is_err());
+    }
+
+    #[test]
+    fn r3_mysql_json_rejects_invalid_payloads_and_unrelated_types() {
+        let ty = mysql_json_type();
+        for raw in [&[][..], &[0, b'0'], &[2, b'0'], &[1], &[1, b'x'], &[1, 255]] {
+            assert!(MysqlJson::from_sql(&ty, raw).is_err(), "{raw:?}");
+        }
+        for unrelated in [
+            KingbaseType::JSONB,
+            KingbaseType::TEXT,
+            KingbaseType::new("mysql_json".into(), 4802, types::Kind::Simple, "public".into()),
+            KingbaseType::new("other".into(), 4802, types::Kind::Simple, "sys".into()),
+            KingbaseType::new("mysql_json".into(), 100_001, types::Kind::Simple, "sys".into()),
+        ] {
+            assert!(!<MysqlJson as FromSql>::accepts(&unrelated), "{unrelated}");
+        }
+    }
+
+    #[test]
+    fn floating_parameters_follow_text_or_binary_wire_types() {
+        for float in [0.1_f32, -1.25, f32::MIN_POSITIVE, f32::MAX] {
+            let value = Value::float(float);
+            let mut text = BytesMut::new();
+            value.to_sql(&KingbaseType::TEXT, &mut text).unwrap();
+            let decoded = String::from_sql(&KingbaseType::TEXT, &text).unwrap();
+            assert_eq!(decoded.parse::<f64>().unwrap(), f64::from(float));
+            let mut binary = BytesMut::new();
+            value.to_sql(&KingbaseType::FLOAT4, &mut binary).unwrap();
+            assert_eq!(f32::from_sql(&KingbaseType::FLOAT4, &binary).unwrap(), float);
+        }
+        for double in [0.1_f64, -1.25, 1e-31, f64::MAX] {
+            let value = Value::double(double);
+            let mut text = BytesMut::new();
+            value.to_sql(&KingbaseType::TEXT, &mut text).unwrap();
+            let decoded = String::from_sql(&KingbaseType::TEXT, &text).unwrap();
+            assert_eq!(decoded.parse::<f64>().unwrap(), double);
+            let mut binary = BytesMut::new();
+            value.to_sql(&KingbaseType::FLOAT8, &mut binary).unwrap();
+            assert_eq!(f64::from_sql(&KingbaseType::FLOAT8, &binary).unwrap(), double);
+        }
+        for (value, native) in [
+            (Value::null_float(), KingbaseType::FLOAT4),
+            (Value::null_double(), KingbaseType::FLOAT8),
+        ] {
+            for ty in [KingbaseType::TEXT, native] {
+                let mut buffer = BytesMut::new();
+                assert!(matches!(value.to_sql(&ty, &mut buffer).unwrap(), IsNull::Yes));
+                assert!(buffer.is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn decimal_parameters_use_the_described_wire_type() {
+        for value in [
+            Value::numeric("1.25".parse().unwrap()),
+            Value::numeric("-1.25".parse().unwrap()),
+            Value::numeric("1E-31".parse().unwrap()),
+            Value::numeric("123456789012345678901234567890.123456789".parse().unwrap()),
+            Value::null_numeric(),
+        ] {
+            for ty in [KingbaseType::TEXT, KingbaseType::NUMERIC] {
+                let mut buffer = BytesMut::new();
+                let null = value.to_sql(&ty, &mut buffer).unwrap();
+
+                if let Some(decimal) = value.as_numeric() {
+                    assert!(matches!(null, IsNull::No));
+                    if ty == KingbaseType::TEXT {
+                        assert_eq!(String::from_sql(&ty, &buffer).unwrap(), decimal.to_string());
+                    } else {
+                        assert_eq!(DecimalWrapper::from_sql(&ty, &buffer).unwrap().0, *decimal);
+                    }
+                } else {
+                    assert!(matches!(null, IsNull::Yes));
+                    assert!(buffer.is_empty());
+                }
+            }
+        }
+    }
 
     #[test]
     fn sql_array_parameters_are_rejected_including_empty_null_and_enum_arrays() {

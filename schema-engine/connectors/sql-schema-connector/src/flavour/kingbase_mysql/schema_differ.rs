@@ -1,6 +1,9 @@
 use crate::migration_pair::MigrationPair;
 use psl::builtin_connectors::KingbaseMySqlType;
-use sql_schema_describer::walkers::{IndexWalker, TableColumnWalker};
+use sql_schema_describer::{
+    ColumnTypeFamily,
+    walkers::{IndexWalker, TableColumnWalker},
+};
 
 use crate::sql_schema_differ::{SqlSchemaDifferFlavour, all_match, column::ColumnTypeChange};
 
@@ -63,6 +66,38 @@ impl SqlSchemaDifferFlavour for KingbaseMysqlSchemaDifferFlavour {
         false
     }
 
+    fn dbgenerated_defaults_match(
+        &self,
+        columns: MigrationPair<TableColumnWalker<'_>>,
+        previous: &str,
+        next: &str,
+    ) -> bool {
+        previous.eq_ignore_ascii_case(next)
+            || matches!(
+                columns.previous.column_type_family(),
+                ColumnTypeFamily::Decimal | ColumnTypeFamily::Float
+            ) && matches!(
+                columns.next.column_type_family(),
+                ColumnTypeFamily::Decimal | ColumnTypeFamily::Float
+            ) && sql_schema_describer::kingbase_mysql::numeric_default_expressions_match(previous, next)
+    }
+
+    fn primary_key_column_type_change_requires_recreation(
+        &self,
+        columns: MigrationPair<TableColumnWalker<'_>>,
+    ) -> bool {
+        // R3 rejects dropping the key on an identity column. MODIFY can widen
+        // INT to BIGINT while keeping the existing key and its dependencies.
+        !(columns.previous.is_autoincrement()
+            && matches!(
+                (
+                    columns.previous.column_native_type::<KingbaseMySqlType>(),
+                    columns.next.column_native_type::<KingbaseMySqlType>()
+                ),
+                (Some(KingbaseMySqlType::Int), Some(KingbaseMySqlType::BigInt))
+            ))
+    }
+
     fn column_type_change(&self, differ: MigrationPair<TableColumnWalker<'_>>) -> Option<ColumnTypeChange> {
         match (
             differ.previous.column_type_family_as_enum(),
@@ -115,8 +150,7 @@ impl SqlSchemaDifferFlavour for KingbaseMysqlSchemaDifferFlavour {
             (Some(previous), Some(next)) if !explicit_cast_supported(Some(previous), Some(next)) => {
                 return Some(ColumnTypeChange::NotCastable);
             }
-            (None, Some(KingbaseMySqlType::TinyInt | KingbaseMySqlType::UnsignedTinyInt))
-            | (Some(KingbaseMySqlType::TinyInt | KingbaseMySqlType::UnsignedTinyInt), None)
+            (None, Some(KingbaseMySqlType::TinyInt)) | (Some(KingbaseMySqlType::TinyInt), None)
                 if differ.previous.column_type_family().is_boolean()
                     && differ.next.column_type_family().is_boolean() =>
             {
@@ -137,7 +171,7 @@ impl SqlSchemaDifferFlavour for KingbaseMysqlSchemaDifferFlavour {
     }
 
     fn should_create_indexes_from_created_tables(&self) -> bool {
-        // GIN and descending unique indexes need separate CREATE INDEX steps.
+        // GIN and unique prefix indexes need separate CREATE INDEX steps.
         true
     }
 
@@ -250,6 +284,164 @@ fn is_json(native_type: &KingbaseMySqlType) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn numeric_default_catalog_decoration_only_avoids_migrations_on_kingbase_mysql() {
+        use psl::parser_database::NoExtensionTypes;
+        use schema_connector::SchemaDialect;
+
+        for (provider, dialect) in [
+            ("kingbase-mysql", crate::SqlSchemaDialect::kingbase_mysql()),
+            ("mysql", crate::SqlSchemaDialect::mysql()),
+            #[cfg(feature = "postgresql")]
+            ("postgresql", crate::SqlSchemaDialect::postgres()),
+            #[cfg(feature = "kingbase-oracle")]
+            ("kingbase-oracle", crate::SqlSchemaDialect::kingbase_oracle()),
+        ] {
+            let calculate = |expression: &str, scalar: &str| {
+                dialect.schema_from_datamodel(
+                    vec![("schema.prisma".into(),format!(
+                        "datasource db {{\n provider = \"{provider}\"\n }}\nmodel Product {{\n id Int @id\n price {scalar} @default(dbgenerated({}))\n }}",
+                        serde_json::to_string(expression).unwrap()
+                    ).into())],None,&NoExtensionTypes,
+                ).unwrap()
+            };
+            let original = "1.25::numeric(10,1)";
+            let decorated = "(1.25::numeric(3,2))::numeric(10,1)";
+            for scalar in ["Decimal", "Float", "String"] {
+                for (before, after) in [
+                    (original, decorated),
+                    (decorated, original),
+                    ("(CAST('1.25' AS DECIMAL(10,1)))", decorated),
+                    (decorated, "(CAST('1.25' AS DECIMAL(10,1)))"),
+                ] {
+                    let migration =
+                        dialect.diff(calculate(before, scalar), calculate(after, scalar), &Default::default());
+                    let sql = dialect.render_script(&migration, &Default::default()).unwrap();
+                    if provider == "kingbase-mysql" && scalar != "String" {
+                        assert_eq!(sql, "-- This is an empty migration.");
+                    } else {
+                        assert_ne!(sql, "-- This is an empty migration.", "{provider}/{scalar}");
+                    }
+                }
+            }
+            for changed in [
+                "1.25::numeric(10,2)",
+                "1.35::numeric(10,1)",
+                "(CAST('1.25' AS DECIMAL(10,2)))",
+            ] {
+                let migration = dialect.diff(
+                    calculate(decorated, "Decimal"),
+                    calculate(changed, "Decimal"),
+                    &Default::default(),
+                );
+                let sql = dialect.render_script(&migration, &Default::default()).unwrap();
+                assert_ne!(sql, "-- This is an empty migration.", "{provider}/{changed}");
+                assert!(sql.contains(changed), "{provider}: {sql}");
+            }
+        }
+    }
+
+    #[test]
+    fn widening_an_autoincrement_primary_key_preserves_the_constraint() {
+        use psl::parser_database::NoExtensionTypes;
+        use schema_connector::SchemaDialect;
+
+        for provider in ["mysql", "kingbase-mysql"] {
+            for next_default in ["@default(autoincrement())", ""] {
+                for compound in [false, true] {
+                    let dialect = if provider == "mysql" {
+                        crate::SqlSchemaDialect::mysql()
+                    } else {
+                        crate::SqlSchemaDialect::kingbase_mysql()
+                    };
+                    let primary = if compound { "" } else { "@id" };
+                    let model_key = if compound { "@@id([id, code])" } else { "" };
+                    let calculate = |scalar: &str, default: &str| {
+                        dialect
+                            .schema_from_datamodel(
+                                vec![(
+                                    "schema.prisma".into(),
+                                    format!(
+                                        "datasource db {{\n provider = \"{provider}\"\n }}\n\
+                                         model Item {{\n id {scalar} {primary} {default}\n code Int\n {model_key}\n }}"
+                                    )
+                                    .into(),
+                                )],
+                                None,
+                                &NoExtensionTypes,
+                            )
+                            .unwrap()
+                    };
+                    let migration = dialect.diff(
+                        calculate("Int", "@default(autoincrement())"),
+                        calculate("BigInt", next_default),
+                        &Default::default(),
+                    );
+                    let script = dialect.render_script(&migration, &Default::default()).unwrap();
+                    let sequence = if next_default.is_empty() { "" } else { " AUTO_INCREMENT" };
+                    assert!(
+                        script.contains(&format!("MODIFY `id` BIGINT NOT NULL{sequence}")),
+                        "{provider}/{compound}: {script}"
+                    );
+                    if provider == "kingbase-mysql" {
+                        assert_eq!(
+                            script,
+                            format!("-- AlterTable\nALTER TABLE `Item` MODIFY `id` BIGINT NOT NULL{sequence};\n"),
+                            "{compound}"
+                        );
+                    } else {
+                        assert!(script.contains("DROP PRIMARY KEY"), "{script}");
+                        assert!(script.contains("ADD PRIMARY KEY"), "{script}");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn other_primary_key_changes_still_recreate_the_constraint() {
+        use psl::parser_database::NoExtensionTypes;
+        use schema_connector::SchemaDialect;
+
+        let dialect = crate::SqlSchemaDialect::kingbase_mysql();
+        let calculate = |fields: &str| {
+            dialect
+                .schema_from_datamodel(
+                    vec![(
+                        "schema.prisma".into(),
+                        format!(
+                            "datasource db {{\n provider = \"kingbase-mysql\"\n }}\n\
+                             model Item {{\n {fields}\n }}"
+                        )
+                        .into(),
+                    )],
+                    None,
+                    &NoExtensionTypes,
+                )
+                .unwrap()
+        };
+        for (before, after) in [
+            (
+                "id Int @id @default(autoincrement())\n code Int",
+                "id BigInt @unique @default(autoincrement())\n code Int @id",
+            ),
+            (
+                "id Int @default(autoincrement())\n code Int\n @@id([id, code])",
+                "id BigInt @default(autoincrement())\n code BigInt\n @@id([id, code])",
+            ),
+            (
+                "id BigInt @id @default(autoincrement())",
+                "id Int @id @default(autoincrement())",
+            ),
+            ("id Int @id", "id BigInt @id @default(autoincrement())"),
+        ] {
+            let migration = dialect.diff(calculate(before), calculate(after), &Default::default());
+            let script = dialect.render_script(&migration, &Default::default()).unwrap();
+            assert!(script.contains("DROP CONSTRAINT"), "{before} -> {after}: {script}");
+            assert!(script.contains("ADD PRIMARY KEY"), "{before} -> {after}: {script}");
+        }
+    }
 
     fn temporal_decimal_migration(
         source: &str,

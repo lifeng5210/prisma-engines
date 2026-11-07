@@ -153,6 +153,10 @@ impl SqlRenderer for KingbaseMysqlRenderer {
                                 columns.previous.column_native_type::<KingbaseMySqlType>(),
                                 columns.next.column_native_type::<KingbaseMySqlType>(),
                             )
+                            && !native_modify_supported(
+                                columns.previous.column_native_type::<KingbaseMySqlType>(),
+                                columns.next.column_native_type::<KingbaseMySqlType>(),
+                            )
                         {
                             lines.extend(render_alter_column_with_using(changes, new_default.as_ref(), columns));
                         } else {
@@ -225,8 +229,8 @@ impl SqlRenderer for KingbaseMysqlRenderer {
         let mut rendered = ddl::CreateTable {
             table_name: &table_name,
             columns: table.columns().map(render_column).collect(),
-            // GIN expressions and descending unique indexes are created by
-            // separate CREATE INDEX steps; other indexes stay inline.
+            // GIN expressions and unique prefix indexes use separate CREATE
+            // INDEX steps; other indexes, including descending uniques, stay inline.
             indexes: table
                 .indexes()
                 .filter(|index| !index.is_primary_key() && !super::index_is_created_separately(*index))
@@ -470,9 +474,7 @@ fn render_column_type(column: TableColumnWalker<'_>) -> Cow<'static, str> {
     match native_type {
         KingbaseMySqlType::Int => "INTEGER".into(),
         KingbaseMySqlType::SmallInt => "SMALLINT".into(),
-        KingbaseMySqlType::TinyInt | KingbaseMySqlType::UnsignedTinyInt if column.column_type_family().is_boolean() => {
-            "BOOLEAN".into()
-        }
+        KingbaseMySqlType::TinyInt if column.column_type_family().is_boolean() => "BOOLEAN".into(),
         KingbaseMySqlType::TinyInt => "TINYINT".into(),
         KingbaseMySqlType::MediumInt => "MEDIUMINT".into(),
         KingbaseMySqlType::BigInt => "BIGINT".into(),
@@ -500,11 +502,9 @@ fn render_column_type(column: TableColumnWalker<'_>) -> Cow<'static, str> {
         KingbaseMySqlType::Json => "JSON".into(),
         // Use MySQL DDL syntax; the describer handles the uint4/uint8 catalog names.
         KingbaseMySqlType::UnsignedInt => "INTEGER UNSIGNED".into(),
-        KingbaseMySqlType::UnsignedSmallInt
-        | KingbaseMySqlType::UnsignedTinyInt
-        | KingbaseMySqlType::UnsignedMediumInt => {
-            unreachable!("small unsigned native types are rejected by validation")
-        }
+        KingbaseMySqlType::UnsignedTinyInt => "TINYINT UNSIGNED".into(),
+        KingbaseMySqlType::UnsignedSmallInt => "SMALLINT UNSIGNED".into(),
+        KingbaseMySqlType::UnsignedMediumInt => "MEDIUMINT UNSIGNED".into(),
         KingbaseMySqlType::UnsignedBigInt => "BIGINT UNSIGNED".into(),
     }
 }
@@ -546,6 +546,24 @@ fn render_modify_column(
     )
 }
 
+/// These conversions accept MySQL's MODIFY on R3. Keep this independent from
+/// cast safety: executable conversions can still truncate or reject values.
+fn native_modify_supported(previous: Option<&KingbaseMySqlType>, next: Option<&KingbaseMySqlType>) -> bool {
+    use KingbaseMySqlType::*;
+
+    match (previous, next) {
+        (Some(Int), Some(BigInt | VarChar(_) | Bit(_)))
+        | (Some(VarChar(_)), Some(Int))
+        | (Some(Date), Some(VarChar(_))) => true,
+        (Some(VarChar(previous)), Some(VarChar(next))) => next >= previous,
+        (
+            Some(Decimal(Some((previous_precision, previous_scale)))),
+            Some(Decimal(Some((next_precision, next_scale)))),
+        ) => next_scale >= previous_scale && next_precision - next_scale >= previous_precision - previous_scale,
+        _ => false,
+    }
+}
+
 fn render_alter_column_with_using(
     changes: &ColumnChanges,
     new_default: Option<&DefaultValue>,
@@ -554,9 +572,20 @@ fn render_alter_column_with_using(
     let column_name = Quoted::KingbaseMysqlIdentifier(columns.previous.name());
     let target_type = render_column_type(columns.next);
     let using = render_using_expression(columns).expect("explicit cast support must have a USING expression");
-    let mut clauses = vec![format!("ALTER COLUMN {column_name} TYPE {target_type} USING ({using})",)];
+    let numeric_to_json = columns.next.column_type_family().is_json()
+        && columns
+            .previous
+            .column_native_type::<KingbaseMySqlType>()
+            .is_some_and(is_numeric);
+    let mut clauses = Vec::new();
+    if numeric_to_json && columns.previous.default().is_some() {
+        // JSON defaults are ignored by schema diffing and column rendering.
+        // ALTER TYPE would otherwise try to cast the old numeric default.
+        clauses.push(format!("ALTER COLUMN {column_name} DROP DEFAULT"));
+    }
+    clauses.push(format!("ALTER COLUMN {column_name} TYPE {target_type} USING ({using})"));
 
-    if changes.default_changed() {
+    if changes.default_changed() && !numeric_to_json {
         match new_default {
             Some(default) if !default.is_empty_dbgenerated() => clauses.push(format!(
                 "ALTER COLUMN {column_name} SET DEFAULT {default}",
@@ -605,7 +634,9 @@ fn render_using_expression_for_types(
     } else if (is_json(previous) && !is_string(next)) || (is_binary(next) && !is_binary(previous)) {
         format!("({column})::text::{target_type}")
     } else if is_json(next) && is_numeric(previous) {
-        format!("to_json({column})")
+        // R3's MySQL JSON type does not implicitly accept to_json()'s result.
+        // Reparse its JSON text as the actual destination type.
+        format!("to_json({column})::text::{target_type}")
     } else if is_json(next) {
         format!("({column})::text::{target_type}")
     } else {
@@ -695,6 +726,214 @@ fn render_default<'a>(column: TableColumnWalker<'a>, default: &'a DefaultValue) 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn prefix_indexes_keep_creation_and_constraint_ownership_aligned() {
+        use psl::parser_database::NoExtensionTypes;
+        use schema_connector::SchemaDialect;
+
+        let dialect = crate::SqlSchemaDialect::kingbase_mysql();
+        let source = "datasource db {\n provider = \"kingbase-mysql\"\n }\n";
+        let model = |attributes: &str| {
+            format!(
+                "{source}\nmodel Item {{\n id Int @id\n value String @db.VarChar(32)\n data Bytes @db.VarBinary(32)\n {attributes}\n }}"
+            )
+        };
+        let calculate = |schema: String| {
+            dialect
+                .schema_from_datamodel(
+                    vec![("schema.prisma".into(), schema.into())],
+                    Some("public"),
+                    &NoExtensionTypes,
+                )
+                .unwrap()
+        };
+        let render = |before: String, after: String| {
+            let migration = dialect.diff(calculate(before), calculate(after), &Default::default());
+            crate::apply_migration::render_script(&migration, &Default::default(), &KingbaseMysqlRenderer).unwrap()
+        };
+        let attributes = "@@index([value(length: 8), id], map: \"normal_prefix\")\n \
+                          @@unique([value(length: 8)], map: \"unique_prefix\")\n \
+                          @@unique([data(length: 4, sort: Desc), id], map: \"compound_prefix\")\n \
+                          @@unique([value], map: \"whole_value\")";
+        let target = model(attributes);
+        let script = render(source.to_owned(), target.clone());
+        let table_end = script.find(");").unwrap();
+        assert!(script[..table_end].contains("`value`(8), `id`"), "{script}");
+        assert_eq!(script[..table_end].matches("UNIQUE INDEX").count(), 1, "{script}");
+        assert!(!script[..table_end].contains("`data`(4)"), "{script}");
+        let table = calculate(target.clone());
+        let table: &crate::SqlDatabaseSchema = table.downcast_ref();
+        let ext = table
+            .describer_schema
+            .downcast_connector_data::<sql::kingbase_mysql::KingbaseMysqlSchemaExt>();
+        for index in table
+            .describer_schema
+            .table_walkers()
+            .next()
+            .unwrap()
+            .indexes()
+            .filter(|index| index.is_unique())
+        {
+            assert_eq!(
+                ext.unique_constraint_names.contains_key(&index.id),
+                index.name() == "whole_value"
+            );
+        }
+        for fragment in ["ON `Item`(`value`(8))", "ON `Item`(`data`(4) DESC, `id`)"] {
+            assert!(script[table_end..].contains(fragment), "{script}");
+        }
+        assert_eq!(script.matches("CREATE UNIQUE INDEX").count(), 2, "{script}");
+        for name in ["normal_prefix", "unique_prefix", "compound_prefix", "whole_value"] {
+            assert!(script.contains(&format!("prisma:logical-index:{name}")), "{script}");
+        }
+        let add = render(model(""), target.clone());
+        assert_eq!(add.matches("CREATE UNIQUE INDEX").count(), 3, "{add}");
+        assert_eq!(add.matches("CREATE INDEX").count(), 1, "{add}");
+        let changed = render(target.clone(), model(&attributes.replace("length: 8", "length: 12")));
+        assert!(changed.contains("`value`(12)"), "{changed}");
+        assert!(changed.contains("DROP INDEX"), "{changed}");
+        assert!(!changed.contains("DROP CONSTRAINT"), "{changed}");
+        let removed = render(target.clone(), model("@@unique([value], map: \"whole_value\")"));
+        assert_eq!(removed.matches("DROP INDEX").count(), 3, "{removed}");
+        assert!(!removed.contains("DROP CONSTRAINT"), "{removed}");
+        let noop = render(target.clone(), target);
+        assert_eq!(noop, "-- This is an empty migration.");
+    }
+
+    #[test]
+    fn descending_unique_indexes_stay_inline_and_keep_actual_ownership() {
+        use psl::parser_database::NoExtensionTypes;
+        use schema_connector::SchemaDialect;
+
+        for (field_attribute, model_attribute, keys) in [
+            ("", "@@unique([value(sort: Desc)], map: \"ordered\")", "`value` DESC"),
+            (
+                "",
+                "@@unique([value(sort: Desc), id], map: \"ordered\")",
+                "`value` DESC, `id`",
+            ),
+            ("@unique(sort: Desc, map: \"ordered\")", "", "`value` DESC"),
+        ] {
+            for provider in ["mysql", "kingbase-mysql"] {
+                let dialect = if provider == "mysql" {
+                    crate::SqlSchemaDialect::mysql()
+                } else {
+                    crate::SqlSchemaDialect::kingbase_mysql()
+                };
+                let calculate = |field: &str, model: &str| {
+                    dialect
+                        .schema_from_datamodel(
+                            vec![(
+                                "schema.prisma".into(),
+                                format!(
+                                    "datasource db {{\n provider = \"{provider}\"\n }}\n\
+                                     model Item {{\n id Int @id\n value String {field}\n {model}\n }}"
+                                )
+                                .into(),
+                            )],
+                            Some("public"),
+                            &NoExtensionTypes,
+                        )
+                        .unwrap()
+                };
+                let target = calculate(field_attribute, model_attribute);
+                let bare = calculate("", "");
+                let render = |before, after| {
+                    let migration = dialect.diff(before, after, &Default::default());
+                    dialect.render_script(&migration, &Default::default()).unwrap()
+                };
+                let create = render(dialect.empty_database_schema(), target.clone());
+                let table_end = create.find("\n)").unwrap();
+                assert!(create[..table_end].contains("UNIQUE INDEX"), "{provider}: {create}");
+                assert!(create[..table_end].contains(keys), "{provider}: {create}");
+                assert!(!create.contains("CREATE UNIQUE INDEX"), "{provider}: {create}");
+                assert_eq!(render(target.clone(), target.clone()), "-- This is an empty migration.");
+                let add = render(bare.clone(), target.clone());
+                assert!(add.contains("CREATE UNIQUE INDEX"), "{provider}: {add}");
+                assert!(add.contains(keys), "{provider}: {add}");
+
+                if provider == "kingbase-mysql" {
+                    let schema: &crate::SqlDatabaseSchema = target.downcast_ref();
+                    let ext = schema
+                        .describer_schema
+                        .downcast_connector_data::<sql::kingbase_mysql::KingbaseMysqlSchemaExt>();
+                    let index = schema
+                        .describer_schema
+                        .table_walkers()
+                        .flat_map(|table| table.indexes())
+                        .find(|index| index.is_unique())
+                        .unwrap();
+                    assert_eq!(
+                        ext.unique_constraint_names.get(&index.id),
+                        ext.physical_index_names.get(&index.id)
+                    );
+                    assert!(ext.unique_constraint_names.contains_key(&index.id));
+                    let drop_inline = render(target.clone(), bare.clone());
+                    assert!(drop_inline.contains("DROP CONSTRAINT"), "{drop_inline}");
+                    assert!(!drop_inline.contains("DROP INDEX"), "{drop_inline}");
+
+                    // An index created by an older migration or added to an
+                    // existing table is standalone. Its catalog ownership wins.
+                    let mut standalone = *target.clone().downcast::<crate::SqlDatabaseSchema>();
+                    standalone
+                        .describer_schema
+                        .downcast_connector_data_mut::<sql::kingbase_mysql::KingbaseMysqlSchemaExt>()
+                        .unique_constraint_names
+                        .clear();
+                    let standalone: schema_connector::DatabaseSchema = standalone.into();
+                    assert_eq!(
+                        render(standalone.clone(), target.clone()),
+                        "-- This is an empty migration."
+                    );
+                    let drop_standalone = render(standalone, bare);
+                    assert!(drop_standalone.contains("DROP INDEX"), "{drop_standalone}");
+                    assert!(!drop_standalone.contains("DROP CONSTRAINT"), "{drop_standalone}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn small_unsigned_types_use_native_mysql_ddl() {
+        use psl::parser_database::NoExtensionTypes;
+        use schema_connector::SchemaDialect;
+
+        let dialect = crate::SqlSchemaDialect::kingbase_mysql();
+        let source = "datasource db {\n provider = \"kingbase-mysql\"\n }\n";
+        let target = format!(
+            "{source}\nmodel Counter {{\n id Int @id\n tiny Int? @db.UnsignedTinyInt\n \
+             small Int @default(65535) @db.UnsignedSmallInt\n medium Int @default(16777215) @db.UnsignedMediumInt\n \
+             enabled Boolean @default(true)\n }}\n\
+             model SmallCounter {{\n id Int @id @default(autoincrement()) @db.UnsignedSmallInt\n }}\n\
+             model MediumCounter {{\n id Int @id @default(autoincrement()) @db.UnsignedMediumInt\n }}"
+        );
+        let calculate = |schema: String| {
+            dialect
+                .schema_from_datamodel(
+                    vec![("schema.prisma".into(), schema.into())],
+                    Some("public"),
+                    &NoExtensionTypes,
+                )
+                .unwrap()
+        };
+        let migration = dialect.diff(calculate(source.to_owned()), calculate(target), &Default::default());
+        let script =
+            crate::apply_migration::render_script(&migration, &Default::default(), &KingbaseMysqlRenderer).unwrap();
+        for expected in [
+            "`tiny` TINYINT UNSIGNED NULL",
+            "`small` SMALLINT UNSIGNED NOT NULL DEFAULT 65535",
+            "`medium` MEDIUMINT UNSIGNED NOT NULL DEFAULT 16777215",
+            "`id` SMALLINT UNSIGNED NOT NULL AUTO_INCREMENT",
+            "`id` MEDIUMINT UNSIGNED NOT NULL AUTO_INCREMENT",
+            "`enabled` BOOLEAN NOT NULL DEFAULT true",
+        ] {
+            assert!(script.contains(expected), "{expected}: {script}");
+        }
+        assert!(!script.contains("CREATE DOMAIN"));
+        assert!(!script.contains("CHECK"));
+        assert!(!script.contains("CREATE TRIGGER"));
+    }
 
     #[test]
     fn set_default_foreign_key_actions_are_rendered() {
@@ -1064,6 +1303,202 @@ mod tests {
             .to_string(),
             "DROP TABLE `ta`ble`"
         );
+    }
+
+    #[test]
+    fn ordinary_type_changes_use_mysql_modify_with_complete_column_attributes() {
+        use psl::parser_database::NoExtensionTypes;
+        use schema_connector::SchemaDialect;
+
+        for (before, after, expected) in [
+            ("Int?", "BigInt?", "BIGINT NULL"),
+            ("String? @db.VarChar(10)", "String? @db.VarChar(20)", "VARCHAR(20) NULL"),
+            (
+                "Decimal? @db.Decimal(10,2)",
+                "Decimal? @db.Decimal(12,4)",
+                "DECIMAL(12, 4) NULL",
+            ),
+            ("String? @db.VarChar(20)", "Int?", "INTEGER NULL"),
+            ("Int?", "String? @db.VarChar(20)", "VARCHAR(20) NULL"),
+            ("Int?", "Bytes? @db.Bit(8)", "BIT(8) NULL"),
+            ("DateTime? @db.Date", "String? @db.VarChar(30)", "VARCHAR(30) NULL"),
+            ("Int @default(5)", "BigInt?", "BIGINT NULL"),
+            ("Int?", "BigInt @default(7)", "BIGINT NOT NULL DEFAULT 7"),
+            ("Int @default(5)", "BigInt @default(5)", "BIGINT NOT NULL DEFAULT 5"),
+            (
+                "Int @unique",
+                "BigInt @unique @default(autoincrement())",
+                "BIGINT NOT NULL AUTO_INCREMENT",
+            ),
+        ] {
+            for provider in ["mysql", "kingbase-mysql"] {
+                let (dialect, column, quoted_column) = if provider == "mysql" {
+                    (crate::SqlSchemaDialect::mysql(), "value", "`value`")
+                } else {
+                    (crate::SqlSchemaDialect::kingbase_mysql(), "va`lue", "`va``lue`")
+                };
+                let schema = |field: &str| {
+                    let datamodel = format!(
+                        "datasource db {{\n provider = \"{provider}\"\n }}\n\
+                         model Item {{\n id Int @id\n value {field} @map(\"{column}\")\n }}"
+                    );
+                    dialect
+                        .schema_from_datamodel(
+                            vec![("schema.prisma".into(), datamodel.into())],
+                            Some("public"),
+                            &NoExtensionTypes,
+                        )
+                        .unwrap()
+                };
+                let migration = dialect.diff(schema(before), schema(after), &Default::default());
+                let script = dialect.render_script(&migration, &Default::default()).unwrap();
+                assert_eq!(
+                    script,
+                    format!("-- AlterTable\nALTER TABLE `Item` MODIFY {quoted_column} {expected};\n"),
+                    "{provider}: {before} -> {after}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn unverified_type_changes_keep_the_explicit_conversion_path() {
+        use psl::parser_database::NoExtensionTypes;
+        use schema_connector::SchemaDialect;
+
+        for (before, after) in [
+            ("String? @db.VarChar(20)", "String? @db.VarChar(10)"),
+            ("Decimal? @db.Decimal(12,4)", "Decimal? @db.Decimal(10,2)"),
+            ("Decimal? @db.Decimal(12,2)", "Decimal? @db.Decimal(12,4)"),
+            ("BigInt?", "Int?"),
+            ("String?", "Json?"),
+        ] {
+            let dialect = crate::SqlSchemaDialect::kingbase_mysql();
+            let schema = |field: &str| {
+                dialect
+                    .schema_from_datamodel(
+                        vec![(
+                            "schema.prisma".into(),
+                            format!(
+                                "datasource db {{\n provider = \"kingbase-mysql\"\n }}\n\
+                                 model Item {{\n id Int @id\n value {field}\n }}"
+                            )
+                            .into(),
+                        )],
+                        Some("public"),
+                        &NoExtensionTypes,
+                    )
+                    .unwrap()
+            };
+            let migration = dialect.diff(schema(before), schema(after), &Default::default());
+            let script = dialect.render_script(&migration, &Default::default()).unwrap();
+            assert!(
+                script.contains("ALTER COLUMN `value` TYPE"),
+                "{before} -> {after}: {script}"
+            );
+            assert!(script.contains(" USING ("), "{before} -> {after}: {script}");
+            assert!(!script.contains("DROP COLUMN"), "{before} -> {after}: {script}");
+        }
+    }
+
+    #[test]
+    fn numeric_to_json_preserves_columns_and_converts_to_the_destination_type() {
+        use psl::parser_database::NoExtensionTypes;
+        use schema_connector::SchemaDialect;
+
+        for (scalar, native, mysql_recreates_column) in [
+            ("Decimal", "Decimal(65,30)", false),
+            ("Float", "Double", false),
+            ("Float", "Float", false),
+            ("Int", "Int", true),
+            ("BigInt", "BigInt", true),
+            ("Int", "Year", false),
+        ] {
+            for provider in ["mysql", "kingbase-mysql"] {
+                let column_name = if provider == "mysql" { "price" } else { "pri`ce" };
+                let dialect = if provider == "mysql" {
+                    crate::SqlSchemaDialect::mysql()
+                } else {
+                    crate::SqlSchemaDialect::kingbase_mysql()
+                };
+                let schema = |field: &str| {
+                    let datamodel = format!(
+                        "datasource db {{\n provider = \"{provider}\"\n }}\n\
+                         model Product {{\n id Int @id\n price {field} @map(\"{column_name}\")\n }}"
+                    );
+                    dialect
+                        .schema_from_datamodel(
+                            vec![("schema.prisma".into(), datamodel.into())],
+                            Some("public"),
+                            &NoExtensionTypes,
+                        )
+                        .unwrap()
+                };
+                let migration = dialect.diff(
+                    schema(&format!("{scalar}? @db.{native}")),
+                    schema("Json?"),
+                    &Default::default(),
+                );
+                let renderer: &dyn SqlRenderer = if provider == "mysql" {
+                    &crate::flavour::mysql::MysqlRenderer
+                } else {
+                    &KingbaseMysqlRenderer
+                };
+                let script = crate::apply_migration::render_script(&migration, &Default::default(), renderer).unwrap();
+                if provider == "mysql" && mysql_recreates_column {
+                    assert!(script.contains("DROP COLUMN `price`"), "{native}: {script}");
+                    assert!(script.contains("ADD COLUMN `price` JSON NULL"), "{native}: {script}");
+                } else {
+                    assert!(!script.contains("DROP COLUMN"), "{provider}/{native}: {script}");
+                    if provider == "mysql" {
+                        assert!(script.contains("MODIFY `price` JSON NULL"), "{native}: {script}");
+                        assert!(!script.contains("USING"), "{native}: {script}");
+                    } else {
+                        assert!(
+                            script.contains("ALTER COLUMN `pri``ce` TYPE JSON USING (to_json(`pri``ce`)::text::JSON)"),
+                            "{native}: {script}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn numeric_to_json_drops_the_previous_default_before_converting() {
+        use psl::parser_database::NoExtensionTypes;
+        use schema_connector::SchemaDialect;
+
+        for (scalar, native) in [("Decimal", "Decimal(12,4)"), ("Float", "Double")] {
+            let dialect = crate::SqlSchemaDialect::kingbase_mysql();
+            let schema = |field: &str| {
+                let datamodel = format!(
+                    "datasource db {{\n provider = \"kingbase-mysql\"\n }}\n\
+                     model Product {{\n id Int @id\n price {field}\n }}"
+                );
+                dialect
+                    .schema_from_datamodel(
+                        vec![("schema.prisma".into(), datamodel.into())],
+                        Some("public"),
+                        &NoExtensionTypes,
+                    )
+                    .unwrap()
+            };
+            let migration = dialect.diff(
+                schema(&format!("{scalar}? @db.{native} @default(1.25)")),
+                schema("Json?"),
+                &Default::default(),
+            );
+            let script =
+                crate::apply_migration::render_script(&migration, &Default::default(), &KingbaseMysqlRenderer).unwrap();
+            let drop_default = script.find("ALTER COLUMN `price` DROP DEFAULT").unwrap_or_else(|| {
+                panic!("{native}: the numeric default must be removed before the type change: {script}")
+            });
+            let convert = script.find("ALTER COLUMN `price` TYPE JSON").unwrap();
+            assert!(drop_default < convert, "{native}: {script}");
+            assert!(!script.contains("SET DEFAULT"), "{native}: {script}");
+            assert!(!script.contains("DROP COLUMN"), "{native}: {script}");
+        }
     }
 
     #[test]

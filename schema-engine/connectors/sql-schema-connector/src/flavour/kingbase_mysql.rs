@@ -16,14 +16,11 @@ use schema_differ::KingbaseMysqlSchemaDifferFlavour;
 
 pub(crate) use renderer::KingbaseMysqlRenderer;
 
-/// C010 cannot inline a GIN expression or a descending unique index in CREATE
-/// TABLE. Keep rendering, planning and calculated constraint ownership aligned.
+/// R3 requires standalone creation for unique prefix indexes and GIN fulltext
+/// indexes. Other unique indexes, including descending keys, stay inline.
 fn index_is_created_separately(index: sql_schema_describer::walkers::IndexWalker<'_>) -> bool {
     index.index_type() == sql_schema_describer::IndexType::Fulltext
-        || (index.is_unique()
-            && index
-                .columns()
-                .any(|column| column.sort_order() == Some(sql_schema_describer::SQLSortOrder::Desc)))
+        || (index.is_unique() && index.columns().any(|column| column.length().is_some()))
 }
 
 #[cfg(feature = "kingbase-mysql-native")]

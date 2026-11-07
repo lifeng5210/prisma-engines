@@ -26,7 +26,24 @@ SELECT
         ELSE extra
     END AS extra,
     table_name table_name,
-    IF(column_comment = '', NULL, column_comment) AS column_comment
+    IF(column_comment = '', NULL, column_comment) AS column_comment,
+    -- R3 can deparse an implicit TIME assignment and an explicit TIME(0)
+    -- cast identically. The stored expression still distinguishes their origin.
+    (
+        SELECT
+            default_definition.adbin::text ~ ':(funcformat|coerceformat|coercionformat|relabelformat) 1([[:space:]]|})'
+        FROM
+            sys_catalog.sys_attrdef AS default_definition
+            INNER JOIN sys_catalog.sys_attribute AS default_column
+                ON default_column.attrelid = default_definition.adrelid
+                AND default_column.attnum = default_definition.adnum
+            INNER JOIN sys_catalog.sys_class AS default_table ON default_table.oid = default_column.attrelid
+            INNER JOIN sys_catalog.sys_namespace AS default_schema ON default_schema.oid = default_table.relnamespace
+        WHERE
+            default_schema.nspname = column_info.table_schema
+            AND default_table.relname = column_info.table_name
+            AND default_column.attname = column_info.column_name
+    ) AS default_has_explicit_cast
 FROM
     information_schema.columns AS column_info
 WHERE
