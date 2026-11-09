@@ -69,7 +69,7 @@ const SCALAR_TYPE_DEFAULTS: &[(ScalarType, KingbaseOracleType)] = &[
     (ScalarType::Int, Number(PrecisionAndScale(10, 0))),
     (ScalarType::BigInt, Number(PrecisionAndScale(19, 0))),
     (ScalarType::Float, BinaryDouble),
-    (ScalarType::Decimal, Number(PrecisionAndScale(65, 30))),
+    (ScalarType::Decimal, Number(Unspecified)),
     (ScalarType::Boolean, Boolean),
     (ScalarType::String, VarChar2(Some(4000))),
     (ScalarType::DateTime, Timestamp(Some(3))),
@@ -155,10 +155,12 @@ impl Connector for KingbaseOracleDatamodelConnector {
         let error = self.native_instance_error(native_type_instance);
 
         match native_type {
-            Number(Precision(0) | PrecisionAndScale(0, _)) => errors
-                .push_error(error.new_argument_m_out_of_range_error("Precision must be between 1 and 1000.", span)),
-            Number(Precision(precision) | PrecisionAndScale(precision, _)) if *precision > 1000 => errors
-                .push_error(error.new_argument_m_out_of_range_error("Precision must be between 1 and 1000.", span)),
+            Number(Precision(0) | PrecisionAndScale(0, _)) => {
+                errors.push_error(error.new_argument_m_out_of_range_error("Precision must be between 1 and 38.", span))
+            }
+            Number(Precision(precision) | PrecisionAndScale(precision, _)) if *precision > 38 => {
+                errors.push_error(error.new_argument_m_out_of_range_error("Precision must be between 1 and 38.", span))
+            }
             Number(PrecisionAndScale(_, scale)) if *scale > 1000 => {
                 errors.push_error(error.new_argument_m_out_of_range_error("Scale must be between 0 and 1000.", span))
             }
@@ -181,7 +183,11 @@ impl Connector for KingbaseOracleDatamodelConnector {
         }
     }
 
-    fn validate_model(&self, model: walkers::ModelWalker<'_>, _: RelationMode, errors: &mut Diagnostics) {
+    fn validate_model(&self, model: walkers::ModelWalker<'_>, relation_mode: RelationMode, errors: &mut Diagnostics) {
+        if relation_mode.uses_foreign_keys() {
+            validations::foreign_keys_must_reference_constraints(model, errors);
+        }
+
         for index in model.indexes() {
             validations::field_types_can_be_used_in_an_index(self, index, errors);
         }
@@ -214,15 +220,13 @@ impl Connector for KingbaseOracleDatamodelConnector {
             return None;
         }
         match KingbaseOracleType::from_parts(name, args) {
-            // C010 raises precision to scale. Match the type returned by
-            // introspection so an unchanged schema does not repeatedly ALTER it.
+            // R2 raises catalog precision to scale. Use a legal representative
+            // for that physical type without exceeding Oracle declaration precision.
+            // Introspection uses the same representation to avoid repeated ALTERs.
             // Keep invalid arguments intact for the normal bounds diagnostics.
-            Ok(Number(PrecisionAndScale(precision, scale))) if (1..=1000).contains(&precision) && scale <= 1000 => {
-                Some(NativeTypeInstance::new(Number(PrecisionAndScale(
-                    precision.max(scale),
-                    scale,
-                ))))
-            }
+            Ok(Number(PrecisionAndScale(precision, scale))) if (1..=38).contains(&precision) && scale <= 1000 => Some(
+                NativeTypeInstance::new(Number(PrecisionAndScale(precision.max(scale).min(38), scale))),
+            ),
             Ok(native_type) => Some(NativeTypeInstance::new(native_type)),
             Err(error) => {
                 diagnostics.push_error(error.into_datamodel_error(span));

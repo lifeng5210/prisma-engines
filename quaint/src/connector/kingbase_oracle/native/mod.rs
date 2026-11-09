@@ -234,14 +234,6 @@ impl KingbaseOracle {
             is_healthy: AtomicBool::new(true),
         };
 
-        // `TIMESTAMP WITH LOCAL TIME ZONE` is returned over the wire as a
-        // plain `TIMESTAMP`, localized to the session time zone. Prisma
-        // represents DateTime values as UTC instants, so keep the session in
-        // UTC before any value can be written or decoded.
-        connection
-            .perform_io(connection.client.batch_execute("SET TIME ZONE 'UTC'"))
-            .await?;
-
         Ok(connection)
     }
 

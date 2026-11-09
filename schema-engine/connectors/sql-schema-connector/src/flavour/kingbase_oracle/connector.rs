@@ -179,8 +179,8 @@ impl SqlConnector for KingbaseOracleConnector {
                 migration_name          VARCHAR2(255) NOT NULL,
                 logs                    CLOB,
                 rolled_back_at          TIMESTAMP(3) WITH TIME ZONE,
-                started_at              TIMESTAMP(3) WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                applied_steps_count     INTEGER NOT NULL DEFAULT 0
+                started_at              TIMESTAMP(3) WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP NOT NULL,
+                applied_steps_count     INTEGER DEFAULT 0 NOT NULL
             );
         "#};
 

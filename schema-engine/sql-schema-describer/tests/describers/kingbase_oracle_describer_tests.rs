@@ -817,6 +817,6 @@ fn oracle_include_keys_cast_defaults_and_generation_ownership(api: TestApi) {
     );
     assert!(matches!(
         ext.column_generations.get(&column("NativeIdentity")),
-        Some(ColumnGeneration::Identity { .. })
+        Some(ColumnGeneration::Identity)
     ));
 }

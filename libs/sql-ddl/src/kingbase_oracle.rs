@@ -27,11 +27,11 @@ pub struct Column<'a> {
 impl Display for Column<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{} {}", OracleIdentifier(&self.name), self.r#type)?;
-        if self.not_null {
-            f.write_str(" NOT NULL")?;
-        }
         if let Some(default) = &self.default {
             write!(f, " DEFAULT {default}")?;
+        }
+        if self.not_null {
+            f.write_str(" NOT NULL")?;
         }
         Ok(())
     }
@@ -132,7 +132,16 @@ impl Display for ForeignKey<'_> {
             .iter()
             .map(|name| OracleIdentifier(name))
             .join(", ", f)?;
-        write!(f, ") ON DELETE {} ON UPDATE {}", self.on_delete, self.on_update)
+        f.write_str(")")?;
+        // Omitting NO ACTION keeps the same catalog action while using the
+        // Oracle default. Other KES actions still need their explicit clause.
+        if !matches!(self.on_delete, ForeignKeyAction::NoAction) {
+            write!(f, " ON DELETE {}", self.on_delete)?;
+        }
+        if !matches!(self.on_update, ForeignKeyAction::NoAction) {
+            write!(f, " ON UPDATE {}", self.on_update)?;
+        }
+        Ok(())
     }
 }
 
@@ -231,7 +240,7 @@ mod tests {
                 Column {
                     name: "name".into(),
                     r#type: "VARCHAR2(64)".into(),
-                    not_null: false,
+                    not_null: true,
                     default: Some(OracleString("O'Reilly\\path").to_string().into()),
                 },
             ],
@@ -245,7 +254,7 @@ mod tests {
             indoc! {r#"
             CREATE TABLE "a""b" (
                 "i""d" NUMBER(10,0) NOT NULL,
-                "name" VARCHAR2(64) DEFAULT 'O''Reilly\path',
+                "name" VARCHAR2(64) DEFAULT 'O''Reilly\path' NOT NULL,
                 CONSTRAINT "p""k" PRIMARY KEY ("i""d", "name")
             )"#}
         );
@@ -288,6 +297,38 @@ mod tests {
             alter.to_string(),
             "ALTER TABLE \"Child\" ADD CONSTRAINT \"f\"\"k\" FOREIGN KEY (\"parentId\") REFERENCES \"Parent\" (\"id\") ON DELETE SET DEFAULT ON UPDATE CASCADE"
         );
+
+        for (on_delete, on_update, suffix) in [
+            (ForeignKeyAction::NoAction, ForeignKeyAction::NoAction, ""),
+            (
+                ForeignKeyAction::Cascade,
+                ForeignKeyAction::NoAction,
+                " ON DELETE CASCADE",
+            ),
+            (
+                ForeignKeyAction::NoAction,
+                ForeignKeyAction::SetNull,
+                " ON UPDATE SET NULL",
+            ),
+            (
+                ForeignKeyAction::Restrict,
+                ForeignKeyAction::NoAction,
+                " ON DELETE RESTRICT",
+            ),
+        ] {
+            let foreign_key = ForeignKey {
+                constraint_name: None,
+                constrained_columns: vec!["parentId".into()],
+                referenced_table: &parent,
+                referenced_columns: vec!["id".into()],
+                on_delete,
+                on_update,
+            };
+            assert_eq!(
+                foreign_key.to_string(),
+                format!("FOREIGN KEY (\"parentId\") REFERENCES \"Parent\" (\"id\"){suffix}")
+            );
+        }
     }
 
     #[test]

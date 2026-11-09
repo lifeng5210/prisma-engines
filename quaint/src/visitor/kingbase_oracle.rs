@@ -106,9 +106,7 @@ impl<'a> KingbaseOracle<'a> {
         self.write(")")
     }
 
-    /// Kingbase Oracle SQL/JSON functions currently operate on JSONB values.
-    /// Casting here keeps the public native `JSON` type usable in expressions
-    /// while retaining Oracle-mode SQL function syntax.
+    /// KES JSON operators and array-path functions require JSONB.
     fn visit_json_as_jsonb(&mut self, expression: Expression<'a>) -> visitor::Result {
         self.write("CAST(")?;
         self.visit_expression(expression)?;
@@ -116,9 +114,9 @@ impl<'a> KingbaseOracle<'a> {
     }
 
     fn visit_json_type(&mut self, expression: Expression<'a>) -> visitor::Result {
-        self.write("JSONB_TYPEOF(")?;
-        self.visit_json_as_jsonb(expression)?;
-        self.write(")")
+        self.write("JSON_VALUE(")?;
+        self.visit_expression(expression)?;
+        self.write(", '$.type()')")
     }
 
     fn visit_json_aware_comparison(
@@ -515,10 +513,9 @@ impl<'a> Visitor<'a> for KingbaseOracle<'a> {
     }
 
     fn visit_aggregate_to_string(&mut self, value: Expression<'a>) -> visitor::Result {
-        // Kingbase Oracle mode provides STRING_AGG. LISTAGG would require an
-        // ordering expression which Quaint's aggregate AST does not carry.
-        self.write("STRING_AGG")?;
-        self.surround_with("(", ", ',' )", |visitor| visitor.visit_expression(value))
+        // The AST does not specify ordering, so omit WITHIN GROUP and ORDER BY.
+        self.write("LISTAGG")?;
+        self.surround_with("(", ", ',')", |visitor| visitor.visit_expression(value))
     }
 
     fn visit_raw_value(&mut self, value: Value<'a>) -> visitor::Result {
@@ -605,30 +602,30 @@ impl<'a> Visitor<'a> for KingbaseOracle<'a> {
                 self.write(if json_extract.extract_as_string {
                     "JSON_VALUE("
                 } else {
-                    "CAST(JSON_QUERY("
+                    "JSON_QUERY("
                 })?;
-                self.visit_json_as_jsonb(*json_extract.column)?;
+                self.visit_expression(*json_extract.column)?;
                 self.write(", ")?;
                 self.visit_parameterized(Value::text(path))?;
                 self.write(if json_extract.extract_as_string {
                     ")"
                 } else {
-                    ") AS JSONB)"
+                    " RETURNING JSON)"
                 })
             }
         }
     }
 
     fn visit_json_extract_last_array_item(&mut self, extract: JsonExtractLastArrayElem<'a>) -> visitor::Result {
-        self.write("CAST(JSON_QUERY(")?;
-        self.visit_json_as_jsonb(*extract.expr)?;
-        self.write(", '$[last]') AS JSONB)")
+        self.write("JSON_QUERY(")?;
+        self.visit_expression(*extract.expr)?;
+        self.write(", '$[last]' RETURNING JSON)")
     }
 
     fn visit_json_extract_first_array_item(&mut self, extract: JsonExtractFirstArrayElem<'a>) -> visitor::Result {
-        self.write("CAST(JSON_QUERY(")?;
-        self.visit_json_as_jsonb(*extract.expr)?;
-        self.write(", '$[0]') AS JSONB)")
+        self.write("JSON_QUERY(")?;
+        self.visit_expression(*extract.expr)?;
+        self.write(", '$[0]' RETURNING JSON)")
     }
 
     fn visit_json_array_contains(&mut self, left: Expression<'a>, right: Expression<'a>, not: bool) -> visitor::Result {
@@ -674,12 +671,12 @@ impl<'a> Visitor<'a> for KingbaseOracle<'a> {
     fn visit_json_array_agg(&mut self, array_agg: JsonArrayAgg<'a>) -> visitor::Result {
         self.write("JSON_ARRAYAGG(")?;
         self.visit_expression(*array_agg.expr)?;
-        self.write(" RETURNING JSONB)")
+        self.write(" RETURNING JSON)")
     }
 
     fn visit_json_build_object(&mut self, build_obj: JsonBuildObject<'a>) -> visitor::Result {
         self.write("JSON_OBJECT")?;
-        self.surround_with("(", " RETURNING JSONB)", |visitor| {
+        self.surround_with("(", " RETURNING JSON)", |visitor| {
             let len = build_obj.exprs.len();
 
             for (index, (name, expression)) in build_obj.exprs.into_iter().enumerate() {
@@ -692,9 +689,9 @@ impl<'a> Visitor<'a> for KingbaseOracle<'a> {
                     .as_column()
                     .is_some_and(|column| matches!(column.type_family, Some(TypeFamily::Int | TypeFamily::Decimal(_))));
                 if exact_numeric {
-                    visitor.write("CAST(")?;
+                    visitor.write("TO_CLOB(")?;
                     visitor.visit_expression(expression)?;
-                    visitor.write(" AS TEXT)")?;
+                    visitor.write(")")?;
                 } else {
                     visitor.visit_expression(expression)?;
                 }
@@ -1008,7 +1005,7 @@ mod tests {
         let (sql, params) = KingbaseOracle::build(query).unwrap();
 
         assert_eq!(
-            "SELECT JSON_ARRAYAGG(\"payload\" RETURNING JSONB), JSON_OBJECT('payload' VALUE \"payload\" RETURNING JSONB) FROM \"documents\" WHERE JSONB_TYPEOF(CAST(\"payload\" AS JSONB)) = 'array'",
+            "SELECT JSON_ARRAYAGG(\"payload\" RETURNING JSON), JSON_OBJECT('payload' VALUE \"payload\" RETURNING JSON) FROM \"documents\" WHERE JSON_VALUE(\"payload\", '$.type()') = 'array'",
             sql
         );
         assert!(params.is_empty());
@@ -1033,7 +1030,7 @@ mod tests {
         ]));
         let (sql, params) = KingbaseOracle::build(query).unwrap();
         assert_eq!(
-            "SELECT JSON_OBJECT('integer' VALUE CAST(\"id\" AS TEXT), 'decimal' VALUE CAST(\"amount\" AS TEXT), 'float' VALUE \"measure\", 'text' VALUE \"name\" RETURNING JSONB)",
+            "SELECT JSON_OBJECT('integer' VALUE TO_CLOB(\"id\"), 'decimal' VALUE TO_CLOB(\"amount\"), 'float' VALUE \"measure\", 'text' VALUE \"name\" RETURNING JSON)",
             sql
         );
         assert!(params.is_empty());
@@ -1059,7 +1056,7 @@ mod tests {
             ));
         let (sql, params) = KingbaseOracle::build(query).unwrap();
         assert_eq!(
-            "SELECT jsonb_extract_path_text(CAST(\"payload\" AS JSONB), VARIADIC CAST($1 AS text[])), jsonb_extract_path(CAST(\"payload\" AS JSONB), VARIADIC CAST($2 AS text[])), CAST(JSON_QUERY(CAST(\"payload\" AS JSONB), $3) AS JSONB)",
+            "SELECT jsonb_extract_path_text(CAST(\"payload\" AS JSONB), VARIADIC CAST($1 AS text[])), jsonb_extract_path(CAST(\"payload\" AS JSONB), VARIADIC CAST($2 AS text[])), JSON_QUERY(\"payload\", $3 RETURNING JSON)",
             sql
         );
         assert_eq!(

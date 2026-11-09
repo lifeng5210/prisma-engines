@@ -20,7 +20,7 @@ fn provider_and_core_native_types_are_valid() {
           tiny      Int      @db.TinyInt
           big       BigInt   @db.Number(19)
           ratio     Float    @db.BinaryDouble
-          amount    Decimal  @db.Number(65, 30)
+          amount    Decimal  @db.Number(38, 18)
           digit     Int      @db.Number(1, 0)
           active    Boolean  @db.Boolean
           name      String   @db.VarChar2(191)
@@ -49,7 +49,7 @@ fn default_scalar_types_use_oracle_compatible_native_types() {
         (ScalarType::Int, Number(PrecisionAndScale(10, 0))),
         (ScalarType::BigInt, Number(PrecisionAndScale(19, 0))),
         (ScalarType::Float, BinaryDouble),
-        (ScalarType::Decimal, Number(PrecisionAndScale(65, 30))),
+        (ScalarType::Decimal, Number(Unspecified)),
         (ScalarType::Boolean, Boolean),
         (ScalarType::String, VarChar2(Some(4000))),
         (ScalarType::DateTime, Timestamp(Some(3))),
@@ -121,16 +121,16 @@ fn invalid_number_precision_is_rejected() {
 
         model User {
           id    Int     @id
-          value Decimal @db.Number(1001, 1)
+          value Decimal @db.Number(39, 1)
         }
     "#};
 
     let expectation = expect![[r#"
-        [1;91merror[0m: [1mArgument M is out of range for native type `Number(1001,1)` of Kingbase Oracle: Precision must be between 1 and 1000.[0m
+        [1;91merror[0m: [1mArgument M is out of range for native type `Number(39,1)` of Kingbase Oracle: Precision must be between 1 and 38.[0m
           [1;94m-->[0m  [4mschema.prisma:7[0m
         [1;94m   | [0m
         [1;94m 6 | [0m  id    Int     @id
-        [1;94m 7 | [0m  value Decimal [1;91m@db.Number(1001, 1)[0m
+        [1;94m 7 | [0m  value Decimal [1;91m@db.Number(39, 1)[0m
         [1;94m   | [0m
     "#]];
 
@@ -176,7 +176,7 @@ fn normalizing_number_does_not_hide_zero_precision() {
           value Decimal @db.Number(0,4)
         }"#;
     let expectation = expect![[r#"
-        [1;91merror[0m: [1mArgument M is out of range for native type `Number(0,4)` of Kingbase Oracle: Precision must be between 1 and 1000.[0m
+        [1;91merror[0m: [1mArgument M is out of range for native type `Number(0,4)` of Kingbase Oracle: Precision must be between 1 and 38.[0m
           [1;94m-->[0m  [4mschema.prisma:6[0m
         [1;94m   | [0m
         [1;94m 5 | [0m          id Int @id
@@ -410,4 +410,40 @@ fn varchar2_server_supported_lengths_are_valid() {
             "datasource db {{\n provider = \"kingbase-oracle\"\n}}\nmodel Wide {{\n id Int @id\n v String @db.VarChar2({length})\n}}"
         ));
     }
+}
+
+#[test]
+fn number_precision_bounds_do_not_restrict_supported_scale() {
+    for native in [
+        "Number",
+        "Number(1)",
+        "Number(38)",
+        "Number(38,0)",
+        "Number(38,30)",
+        "Number(2,50)",
+        "Number(38,1000)",
+    ] {
+        assert_valid(&format!(
+            "datasource db {{\n provider = \"kingbase-oracle\"\n}}\nmodel Item {{\n id Int @id\n value Decimal @db.{native}\n}}"
+        ));
+    }
+    for native in [
+        "Number(0)",
+        "Number(39)",
+        "Number(65,30)",
+        "Number(39,1000)",
+        "Number(1000,1000)",
+    ] {
+        let error = parse_unwrap_err(&format!(
+            "datasource db {{\n provider = \"kingbase-oracle\"\n}}\nmodel Item {{\n id Int @id\n value Decimal @db.{native}\n}}"
+        ));
+        assert!(
+            error.contains("Precision must be between 1 and 38."),
+            "{native}: {error}"
+        );
+    }
+    let error = parse_unwrap_err(
+        "datasource db {\n provider = \"kingbase-oracle\"\n}\nmodel Item {\n id Int @id\n value Decimal @db.Number(38,1001)\n}",
+    );
+    assert!(error.contains("Scale must be between 0 and 1000."), "{error}");
 }

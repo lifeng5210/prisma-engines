@@ -140,3 +140,34 @@ async fn oracle_wide_varchar_introspection_remains_valid(api: &mut TestApi) -> T
     .unwrap();
     Ok(())
 }
+
+#[test_connector(tags(KingbaseOracle))]
+async fn oracle_number_precision_policy_introspects_valid_models(api: &mut TestApi) -> TestResult {
+    api.raw_cmd(
+        r#"CREATE TABLE precision_policy (
+        id INTEGER PRIMARY KEY,
+        default_value NUMBER NOT NULL,
+        explicit_value NUMBER(38,18) NOT NULL,
+        high_scale NUMBER(2,50),
+        legacy_wide NUMBER(65,30)
+    )"#,
+    )
+    .await;
+    let result = api.introspect_dml().await?;
+    expect![[r#"
+        model precision_policy {
+          id             Int                            @id
+          default_value  Decimal
+          explicit_value Decimal                        @db.Number(38, 18)
+          high_scale     Decimal?                       @db.Number(38, 50)
+          legacy_wide    Unsupported("numeric(65,30)")?
+        }
+    "#]]
+    .assert_eq(&result);
+    psl::parse_schema_multi_without_extensions(&[(
+        "schema.prisma".into(),
+        format!("datasource db {{\n provider = \"kingbase-oracle\"\n}}\n{result}").into(),
+    )])
+    .unwrap();
+    Ok(())
+}

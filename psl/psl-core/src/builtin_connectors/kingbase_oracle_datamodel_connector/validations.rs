@@ -1,7 +1,12 @@
 use crate::{
     datamodel_connector::{Connector, NativeTypeInstance, walker_ext_traits::ScalarFieldWalkerExt},
-    diagnostics::Diagnostics,
-    parser_database::walkers::{IndexWalker, PrimaryKeyWalker, ScalarFieldAttributeWalker},
+    diagnostics::{DatamodelError, Diagnostics},
+    parser_database::{
+        SortOrder,
+        walkers::{
+            IndexFieldWalker, IndexWalker, ModelWalker, PrimaryKeyWalker, ScalarFieldAttributeWalker, ScalarFieldWalker,
+        },
+    },
 };
 
 use super::KingbaseOracleType;
@@ -73,5 +78,64 @@ pub(crate) fn field_types_can_be_used_in_a_primary_key(
                 .new_incompatible_native_type_with_id("", primary_key.ast_attribute().span),
         );
         break;
+    }
+}
+
+/// R2 renders descending unique keys as standalone indexes. They enforce
+/// uniqueness but cannot serve as the referenced constraint of a foreign key.
+pub(crate) fn foreign_keys_must_reference_constraints(model: ModelWalker<'_>, errors: &mut Diagnostics) {
+    fn same_fields<'a>(
+        mut fields: impl ExactSizeIterator<Item = IndexFieldWalker<'a>>,
+        references: &[ScalarFieldWalker<'a>],
+    ) -> bool {
+        fields.len() == references.len()
+            && fields.all(|field| field.as_scalar_field().is_some_and(|field| references.contains(&field)))
+    }
+
+    if model.is_ignored() {
+        return;
+    }
+    for relation in model
+        .relation_fields()
+        .filter(|relation| !relation.is_ignored() && !relation.related_model().is_ignored())
+    {
+        let Some(references) = relation.referenced_fields() else {
+            continue;
+        };
+        let references: Vec<_> = references.collect();
+        let target = relation.related_model();
+        if target.primary_key().is_some_and(|key| {
+            same_fields(
+                key.scalar_field_attributes().map(|field| field.as_index_field()),
+                &references,
+            )
+        }) {
+            continue;
+        }
+        let mut descending_unique = false;
+        let mut unique_constraint = false;
+        for index in target.indexes().filter(|index| index.is_unique()) {
+            if !same_fields(
+                index.scalar_field_attributes().map(|field| field.as_index_field()),
+                &references,
+            ) {
+                continue;
+            }
+            if index
+                .scalar_field_attributes()
+                .any(|field| field.sort_order() == Some(SortOrder::Desc))
+            {
+                descending_unique = true;
+            } else {
+                unique_constraint = true;
+            }
+        }
+        if descending_unique && !unique_constraint {
+            errors.push_error(DatamodelError::new_attribute_validation_error(
+                "Kingbase Oracle foreign keys must reference a primary key or a unique constraint. A descending unique index alone cannot be referenced; add a non-descending unique constraint on the referenced fields or use relationMode = \"prisma\".",
+                "@relation",
+                relation.relation_attribute().unwrap().span,
+            ));
+        }
     }
 }

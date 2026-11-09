@@ -5,9 +5,121 @@ use psl::builtin_connectors::KingbaseOracleType;
 use regex::Regex;
 use std::{str::FromStr, sync::LazyLock};
 
+/// Compare numeric literal cast chains without changing or evaluating their SQL.
+/// Only exact catalog decorations can be dropped; rounding/overflow casts stay.
+/// Callers must restrict this comparison to numeric columns.
+pub fn numeric_default_expressions_match(previous: &str, next: &str) -> bool {
+    use sqlparser::{
+        ast::{CastKind, DataType, ExactNumberInfo, Expr, UnaryOperator, Value},
+        dialect::PostgreSqlDialect,
+        parser::Parser,
+        tokenizer::Token,
+    };
+
+    #[derive(PartialEq)]
+    struct NumericExpression {
+        literal: bigdecimal::BigDecimal,
+        casts: Vec<(u64, i64)>,
+        quoted: bool,
+    }
+
+    fn normalize(expression: &Expr) -> Option<NumericExpression> {
+        match expression {
+            Expr::Nested(inner) => normalize(inner),
+            Expr::Value(value) => {
+                let (literal, quoted) = match &value.value {
+                    Value::Number(number, false) => (number, false),
+                    Value::SingleQuotedString(number) => (number, true),
+                    _ => return None,
+                };
+                Some(NumericExpression {
+                    literal: literal.parse().ok()?,
+                    casts: Vec::new(),
+                    quoted,
+                })
+            }
+            Expr::UnaryOp {
+                op: op @ (UnaryOperator::Minus | UnaryOperator::Plus),
+                expr,
+            } => {
+                let mut inner = normalize(expr)?;
+                if inner.quoted || !inner.casts.is_empty() {
+                    return None;
+                }
+                if *op == UnaryOperator::Minus {
+                    inner.literal = -inner.literal;
+                }
+                Some(inner)
+            }
+            Expr::Cast {
+                kind: kind @ (CastKind::DoubleColon | CastKind::Cast),
+                expr,
+                data_type,
+                array: false,
+                format: None,
+            } => {
+                let info = match data_type {
+                    DataType::Numeric(info) | DataType::Decimal(info) => *info,
+                    DataType::Custom(name, args) if name.to_string().eq_ignore_ascii_case("NUMBER") => {
+                        match args.as_slice() {
+                            [p] => ExactNumberInfo::Precision(p.parse().ok()?),
+                            [p, s] => ExactNumberInfo::PrecisionAndScale(p.parse().ok()?, s.parse().ok()?),
+                            _ => return None,
+                        }
+                    }
+                    _ => return None,
+                };
+                let mut inner = normalize(expr)?;
+                inner.quoted = false;
+                let (precision, scale) = match info {
+                    // Do not assume Oracle's parameterless CAST is unbounded.
+                    ExactNumberInfo::None if matches!(kind, CastKind::Cast) => return None,
+                    ExactNumberInfo::None => return Some(inner),
+                    ExactNumberInfo::Precision(p) => (p, 0),
+                    ExactNumberInfo::PrecisionAndScale(p, s) => (p, s),
+                };
+                if !(1..=1000).contains(&precision) || !(0..=1000).contains(&scale) {
+                    return None;
+                }
+                // R2 raises numeric precision to scale in both CAST and the
+                // catalog. Compare the physical cast without evaluating it.
+                let precision = precision.max(scale as u64);
+                let (coefficient, fractional_digits) = inner.literal.normalized().as_bigint_and_exponent();
+                let coefficient = coefficient.to_string();
+                let integer_digits =
+                    (coefficient.trim_start_matches('-').len() as i64).checked_sub(fractional_digits)?;
+                let fits =
+                    coefficient == "0" || fractional_digits <= scale && integer_digits <= precision as i64 - scale;
+                // Once a cast can alter the literal, later casts cannot be
+                // judged against the original literal. Preserve that chain.
+                if !inner.casts.is_empty() || !fits {
+                    inner.casts.push((precision, scale));
+                }
+                Some(inner)
+            }
+            _ => None,
+        }
+    }
+
+    let parse = |input: &str| {
+        // R2's catalog uses ::numeric even for Oracle CAST(... AS NUMBER).
+        let mut parser = Parser::new(&PostgreSqlDialect {}).try_with_sql(input).ok()?;
+        let expression = parser.parse_expr().ok()?;
+        if parser.peek_token().token != Token::EOF {
+            return None;
+        }
+        let normalized = normalize(&expression)?;
+        (!normalized.quoted).then_some(normalized)
+    };
+    match (parse(previous), parse(next)) {
+        (Some(previous), Some(next)) => previous == next,
+        _ => false,
+    }
+}
+
 #[cfg(test)]
 pub(super) fn parse(input: &str, family: &ColumnTypeFamily) -> Option<DefaultValue> {
-    parse_inner(input, family, None, None, false)
+    parse_inner(input, family, None, None, false, None)
 }
 
 pub(super) fn parse_native(
@@ -15,6 +127,28 @@ pub(super) fn parse_native(
     family: &ColumnTypeFamily,
     native: Option<&KingbaseOracleType>,
 ) -> Option<DefaultValue> {
+    // DEFAULT NULL keeps a typed NULL in R2's catalog. Only recognize known
+    // physical casts here; non-NULL values still use the stricter rules below.
+    let null_family = if matches!(native, Some(KingbaseOracleType::Number(_))) {
+        &ColumnTypeFamily::Decimal
+    } else {
+        family
+    };
+    let null_casts: &[&str] = match native {
+        Some(KingbaseOracleType::Date | KingbaseOracleType::Timestamp(_) | KingbaseOracleType::TimestampLocalTz(_)) => {
+            &["timestamp", "timestamp without time zone"]
+        }
+        Some(KingbaseOracleType::TimestampTz(_)) => &["timestamptz", "timestamp with time zone"],
+        Some(KingbaseOracleType::Blob) => &["bytea"],
+        _ => &[],
+    };
+    if strip_casts(input.trim(), |tail| {
+        harmless_casts(tail, null_family, None, None, false, None, null_casts)
+    })
+    .eq_ignore_ascii_case("null")
+    {
+        return None;
+    }
     let floating_cast = match native {
         Some(KingbaseOracleType::BinaryFloat | KingbaseOracleType::Float(Some(1..=24))) => Some("real"),
         Some(KingbaseOracleType::BinaryDouble | KingbaseOracleType::Float(None | Some(25..=53))) => {
@@ -23,11 +157,16 @@ pub(super) fn parse_native(
         _ => None,
     };
     let fixed_character = matches!(native, Some(KingbaseOracleType::Char(_) | KingbaseOracleType::NChar(_)));
-    parse_inner(input, family, None, floating_cast, fixed_character)
+    let native_string_cast = match native {
+        Some(KingbaseOracleType::Uuid) => Some("uuid"),
+        Some(KingbaseOracleType::Xml) => Some("xml"),
+        _ => None,
+    };
+    parse_inner(input, family, None, floating_cast, fixed_character, native_string_cast)
 }
 
 pub(super) fn parse_enum(input: &str, family: &ColumnTypeFamily, namespace: &str, name: &str) -> Option<DefaultValue> {
-    parse_inner(input, family, Some((namespace, name)), None, false)
+    parse_inner(input, family, Some((namespace, name)), None, false, None)
 }
 
 fn parse_inner(
@@ -36,8 +175,19 @@ fn parse_inner(
     enm: Option<(&str, &str)>,
     floating_cast: Option<&str>,
     fixed_character: bool,
+    native_string_cast: Option<&str>,
 ) -> Option<DefaultValue> {
-    let allowed = |tail: &str| harmless_casts(tail, family, enm, floating_cast, fixed_character);
+    let allowed = |tail: &str| {
+        harmless_casts(
+            tail,
+            family,
+            enm,
+            floating_cast,
+            fixed_character,
+            native_string_cast,
+            &[],
+        )
+    };
     let expression = strip_casts(input.trim(), allowed);
     if expression.eq_ignore_ascii_case("null") {
         return None;
@@ -104,11 +254,16 @@ fn harmless_casts(
     enm: Option<(&str, &str)>,
     floating_cast: Option<&str>,
     fixed_character: bool,
+    native_string_cast: Option<&str>,
+    extra_builtin_casts: &[&str],
 ) -> bool {
     let quote = |name: &str| format!("\"{}\"", name.replace('"', "\"\""));
-    let mut names: Vec<String> = match family {
+    let mut names = match family {
         ColumnTypeFamily::String => {
             let mut casts = vec!["text", "varchar", "character varying"];
+            // These catalog casts only belong to their matching native column.
+            // Other string columns must preserve UUID/XML conversion expressions.
+            casts.extend(native_string_cast);
             if fixed_character {
                 casts.extend(["bpchar", "character"]);
             }
@@ -129,16 +284,18 @@ fn harmless_casts(
         }
         ColumnTypeFamily::Enum(_) => vec!["text"],
         _ => vec![],
-    }
-    .into_iter()
-    .flat_map(|name| {
-        [
-            name.to_owned(),
-            format!("sys_catalog.{name}"),
-            format!("pg_catalog.{name}"),
-        ]
-    })
-    .collect();
+    };
+    names.extend(extra_builtin_casts.iter().copied());
+    let mut names: Vec<String> = names
+        .into_iter()
+        .flat_map(|name| {
+            [
+                name.to_owned(),
+                format!("sys_catalog.{name}"),
+                format!("pg_catalog.{name}"),
+            ]
+        })
+        .collect();
     if let Some((namespace, name)) = enm {
         names.push(quote(name));
         names.push(format!("{}.{}", quote(namespace), quote(name)));
@@ -378,6 +535,218 @@ fn binary(input: &str) -> Option<Vec<u8>> {
 mod tests {
     use super::*;
     use crate::DefaultKind;
+
+    #[test]
+    fn native_time_and_blob_null_defaults_preserve_non_null_expressions() {
+        for (native, family, cast) in [
+            (
+                KingbaseOracleType::Date,
+                ColumnTypeFamily::DateTime,
+                "timestamp without time zone",
+            ),
+            (
+                KingbaseOracleType::Timestamp(Some(3)),
+                ColumnTypeFamily::DateTime,
+                "timestamp without time zone",
+            ),
+            (
+                KingbaseOracleType::TimestampTz(Some(3)),
+                ColumnTypeFamily::DateTime,
+                "timestamp with time zone",
+            ),
+            (
+                KingbaseOracleType::TimestampLocalTz(Some(3)),
+                ColumnTypeFamily::DateTime,
+                "timestamp without time zone",
+            ),
+            (KingbaseOracleType::Blob, ColumnTypeFamily::Binary, "bytea"),
+        ] {
+            for expression in [
+                format!("NULL::{cast}"),
+                format!("((NULL)::sys_catalog.{cast})"),
+                format!("(NULL::pg_catalog.{cast})::{cast}"),
+            ] {
+                assert!(
+                    parse_native(&expression, &family, Some(&native)).is_none(),
+                    "{native:?}: {expression}"
+                );
+                assert!(matches!(
+                    parse_native(&expression, &family, None).unwrap().kind(),
+                    DefaultKind::DbGenerated(_)
+                ));
+            }
+            for expression in [
+                format!("'NULL'::{cast}"),
+                format!("NULLIF(1,2)::{cast}"),
+                format!("NULL::custom_domain::{cast}"),
+                format!("NULL::{cast}::custom_domain"),
+                format!("NULL::{cast} + 1"),
+            ] {
+                assert_eq!(
+                    parse_native(&expression, &family, Some(&native)).unwrap().kind(),
+                    &DefaultKind::DbGenerated(Some(expression.clone())),
+                    "{native:?}: {expression}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn unsupported_number_null_defaults_keep_expressions_distinct() {
+        let native = KingbaseOracleType::Number(
+            psl::builtin_connectors::KingbaseOracleNumberArguments::PrecisionAndScale(65, 30),
+        );
+        let family = ColumnTypeFamily::Unsupported("numeric(65,30)".into());
+        for expression in [
+            "NULL",
+            "NULL::numeric",
+            "(null::numeric)",
+            "((NULL)::pg_catalog.numeric)::decimal",
+            "NULL::sys_catalog.numeric",
+        ] {
+            assert!(
+                parse_native(expression, &family, Some(&native)).is_none(),
+                "{expression}"
+            );
+        }
+        for expression in [
+            "'NULL'",
+            "'NULL'::numeric",
+            "NULLIF(1,2)::numeric",
+            "NULLABLE()",
+            "NULL::numeric + 1",
+            "NULL::custom_domain",
+            "'1.25'::numeric",
+            "1.25::numeric(10,1)",
+        ] {
+            assert_eq!(
+                parse_native(expression, &family, Some(&native)).unwrap().kind(),
+                &DefaultKind::DbGenerated(Some(expression.to_owned())),
+                "{expression}",
+            );
+        }
+        assert_eq!(
+            parse_native(
+                "'NULL'::text",
+                &ColumnTypeFamily::String,
+                Some(&KingbaseOracleType::VarChar2(Some(20)))
+            )
+            .unwrap()
+            .kind(),
+            &DefaultKind::Value(PrismaValue::String("NULL".to_owned())),
+        );
+        assert_eq!(
+            parse_native("NULL::numeric", &family, None).unwrap().kind(),
+            &DefaultKind::DbGenerated(Some("NULL::numeric".to_owned())),
+        );
+    }
+
+    #[test]
+    fn native_uuid_and_xml_literal_defaults_require_the_matching_column_type() {
+        for (native, cast, value) in [
+            (KingbaseOracleType::Uuid, "uuid", "123e4567-e89b-12d3-a456-426614174000"),
+            (KingbaseOracleType::Xml, "xml", "<item name='test'>value</item>"),
+        ] {
+            let quoted = value.replace('\'', "''");
+            for expression in [
+                format!("'{quoted}'::{cast}"),
+                format!("('{quoted}'::sys_catalog.{cast})"),
+            ] {
+                assert_eq!(
+                    parse_native(&expression, &ColumnTypeFamily::String, Some(&native))
+                        .unwrap()
+                        .kind(),
+                    &DefaultKind::Value(PrismaValue::String(value.to_owned())),
+                );
+                assert!(matches!(
+                    parse_native(
+                        &expression,
+                        &ColumnTypeFamily::String,
+                        Some(&KingbaseOracleType::VarChar2(Some(100)))
+                    )
+                    .unwrap()
+                    .kind(),
+                    DefaultKind::DbGenerated(_),
+                ));
+            }
+            for expression in [
+                format!("make_value()::{cast}"),
+                format!("'{quoted}'::varchar(5)::{cast}"),
+            ] {
+                assert_eq!(
+                    parse_native(&expression, &ColumnTypeFamily::String, Some(&native))
+                        .unwrap()
+                        .kind(),
+                    &DefaultKind::DbGenerated(Some(expression.clone())),
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn numeric_default_comparison_recognizes_oracle_casts_and_lossless_catalog_decorations() {
+        for (model, catalog) in [
+            ("CAST(1.25 AS NUMBER(10,1))", "1.25::numeric(10,1)"),
+            ("(CAST(1.25 AS NUMBER(10,1)))", "(1.25::numeric(3,2))::numeric(10,1)"),
+            ("CAST('1.25' AS NUMBER(10,1))", "1.25::numeric(10,1)"),
+            ("CAST(-1.250 AS NUMBER(10,1))", "(-1.25::numeric(3,2))::numeric(10,1)"),
+            ("CAST(1.25 AS NUMBER(10,2))", "1.25::numeric(3,2)::numeric(10,2)"),
+            (
+                "CAST(1e-30 AS NUMBER(31,30))",
+                "0.000000000000000000000000000001::numeric",
+            ),
+            ("CAST(0.0012 AS NUMBER(2,4))", "0.0012::numeric"),
+            ("CAST(0.12 AS NUMBER(2,4))", "0.12::numeric(4,4)"),
+            ("CAST('0.12' AS NUMBER(2,4))", "0.12::numeric(4,4)"),
+            ("CAST(0.12 AS NUMBER(38,50))", "0.12::numeric(50,50)"),
+            ("CAST(0.12345 AS NUMBER(2,4))", "0.12345::numeric(4,4)"),
+            (
+                "CAST(CAST(1.25 AS NUMBER(10,1)) AS NUMBER(10,2))",
+                "((1.25::numeric(3,2))::numeric(10,1))::numeric(10,2)",
+            ),
+        ] {
+            assert!(numeric_default_expressions_match(model, catalog), "{model} / {catalog}");
+            assert!(numeric_default_expressions_match(catalog, model), "{catalog} / {model}");
+        }
+    }
+
+    #[test]
+    fn numeric_default_comparison_preserves_semantic_casts_and_unknown_expressions() {
+        for (previous, next) in [
+            ("CAST(1.25 AS NUMBER(10,1))", "1.25::numeric(10,2)"),
+            ("CAST(1.25 AS NUMBER(10,1))", "1.35::numeric(10,1)"),
+            ("CAST(1.25 AS NUMBER(10,1))", "1.3::numeric(10,1)"),
+            (
+                "CAST(CAST(1.25 AS NUMBER(10,1)) AS NUMBER(10,2))",
+                "1.25::numeric(10,2)",
+            ),
+            ("CAST(1000 AS NUMBER(3,0))", "1000::numeric(4,0)"),
+            ("CAST(0.12345 AS NUMBER(2,4))", "0.12345::numeric(5,5)"),
+            ("CAST(0.12345 AS NUMBER(2,4))", "0.1235::numeric(4,4)"),
+            ("CAST(1.25 AS NUMBER)", "1.25::numeric"),
+            ("1.25::NUMBER", "1.25::numeric"),
+            ("CAST(1.25 AS NUMBER(10,-1))", "1.25::numeric(10,0)"),
+            ("CAST(1.25 AS NUMBER(0,1))", "1.25::numeric(10,1)"),
+            ("CAST(1.25 AS NUMBER(1001,1))", "1.25::numeric(10,1)"),
+            ("CAST(1.25 AS public.NUMBER(10,1))", "1.25::numeric(10,1)"),
+            ("CAST(1.25 AS \"NUMBER\"(10,1))", "1.25::numeric(10,1)"),
+            ("CAST(1.25 AS BINARY_FLOAT)", "1.25::numeric"),
+            ("CAST(1.25 AS NUMBER(10,1)) + 1", "1.25::numeric(10,1)"),
+            ("CAST(1.25 AS NUMBER(10,1)); SELECT 1", "1.25::numeric(10,1)"),
+            ("'1.25'", "1.25"),
+            ("CAST('not a number' AS NUMBER(10,1))", "1.25::numeric(10,1)"),
+        ] {
+            assert!(
+                !numeric_default_expressions_match(previous, next),
+                "{previous} / {next}"
+            );
+            assert!(
+                !numeric_default_expressions_match(next, previous),
+                "{next} / {previous}"
+            );
+        }
+    }
+
     #[test]
     fn character_and_negative_integer_defaults_normalize_only_equivalent_casts() {
         for native in [KingbaseOracleType::Char(Some(5)), KingbaseOracleType::NChar(Some(5))] {

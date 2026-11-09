@@ -101,7 +101,7 @@ fn compiles_verified_oracle_filter_variants() {
         ),
         (
             r#"{"modelName":"TestModel","action":"findMany","query":{"arguments":{"where":{"json":{"path":["score"],"gt":"5"}}},"selection":{"$scalars":true}}}"#,
-            &["jsonb_extract_path(", "VARIADIC CAST("],
+            &["jsonb_extract_path(", "VARIADIC CAST(", "JSON_VALUE(", "'$.type()'"],
             Some(r#"{"score"}"#),
         ),
         (
@@ -126,7 +126,7 @@ fn compiles_verified_oracle_filter_variants() {
         ),
         (
             r#"{"modelName":"TestModel","action":"findMany","query":{"arguments":{"where":{"stringRef":{"contains":"lov","mode":"insensitive"}}},"selection":{"$scalars":true}}}"#,
-            &["ILIKE"],
+            &[r#"LOWER("public"."TestModel"."stringRef") LIKE"#, "LOWER($1)"],
             None,
         ),
         (
@@ -238,4 +238,64 @@ fn relation_join_maps_nested_blob_fields_as_hex() {
         serialized_plan.pointer("/args/structure/fields/children/fields/payload/fieldType/encoding"),
         Some(&serde_json::Value::String("hex".to_owned()))
     );
+}
+
+#[test]
+fn nested_relation_json_selects_linking_fields_once() {
+    let schema = psl::validate_without_extensions(
+        r#"
+            generator client {
+                provider = "prisma-client"
+                previewFeatures = ["relationJoins"]
+            }
+            datasource db {
+                provider = "kingbase-oracle"
+            }
+            model Entry {
+                id Int @id
+                children Child[]
+            }
+            model Child {
+                id Int @id
+                entryId Int @map("entry_id")
+                amount Decimal @db.Number(30, 10)
+                entry Entry @relation(fields: [entryId], references: [id])
+            }
+        "#
+        .into(),
+    );
+    assert!(!schema.diagnostics.has_errors(), "{:?}", schema.diagnostics);
+    let query_schema = Arc::new(schema::build(Arc::new(schema), true));
+    let connection_info = ConnectionInfo::External(ExternalConnectionInfo::new(
+        SqlFamily::KingbaseOracle,
+        Some("public".to_owned()),
+        None,
+        false,
+    ));
+    for arguments in [
+        serde_json::json!({}),
+        serde_json::json!({"distinct":["entryId"],"take":1}),
+    ] {
+        let request = serde_json::json!({
+            "modelName": "Entry", "action":"findMany",
+            "query": {
+                "arguments":{"relationLoadStrategy":"join"},
+                "selection":{"$scalars":true,"children":{
+                    "arguments":arguments,
+                    "selection":{"$scalars":true,"entry":{
+                        "arguments":{},"selection":{"$scalars":true}
+                    }}
+                }}
+            }
+        });
+        let request = RequestBody::try_from_str(&request.to_string(), EngineProtocol::Json).unwrap();
+        let QueryDocument::Single(operation) = request.into_doc(&query_schema).unwrap() else {
+            panic!("expected single query")
+        };
+        let plan = query_compiler::compile(&query_schema, operation, &connection_info).unwrap();
+        let rendered = plan.pretty_print(false, 10000).unwrap();
+        assert_eq!(rendered.matches("'entryId' VALUE").count(), 1, "{rendered}");
+        assert!(rendered.contains("entry_id"), "{rendered}");
+        assert!(rendered.contains("TO_CLOB("), "{rendered}");
+    }
 }

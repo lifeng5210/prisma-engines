@@ -378,7 +378,7 @@ fn render_oracle_alter_enum(alter: &AlterEnum, schemas: MigrationPair<&SqlSchema
     for (previous, _) in &alter.previous_usages_as_default {
         let column = schemas.previous.walk(*previous);
         sql.push(format!(
-            "ALTER TABLE {} ALTER COLUMN {} DROP DEFAULT",
+            "ALTER TABLE {} MODIFY {} DEFAULT NULL",
             quoted_table(column.table()),
             Quoted::OracleIdentifier(column.name())
         ));
@@ -428,7 +428,7 @@ fn render_oracle_alter_enum(alter: &AlterEnum, schemas: MigrationPair<&SqlSchema
         if let Some(next) = next.and_then(|id| schemas.next.walk(id).default()) {
             let column = schemas.previous.walk(*previous);
             sql.push(format!(
-                "ALTER TABLE {} ALTER COLUMN {} SET DEFAULT {}",
+                "ALTER TABLE {} MODIFY {} DEFAULT {}",
                 quoted_table(column.table()),
                 Quoted::OracleIdentifier(column.name()),
                 render_default(next.inner())
@@ -458,15 +458,7 @@ fn render_oracle_alter_enum(alter: &AlterEnum, schemas: MigrationPair<&SqlSchema
                 })
         });
         if columns_survive {
-            let ext: &sql::kingbase_oracle::KingbaseOracleSchemaExt = schemas.previous.downcast_connector_data();
-            sql.push(match ext.foreign_key_definitions.get(&fk.id) {
-                Some(definition) => format!(
-                    "ALTER TABLE {} ADD CONSTRAINT {} {definition}",
-                    quoted_table(fk.table()),
-                    Quoted::OracleIdentifier(fk.constraint_name().expect("foreign key name"))
-                ),
-                None => renderer.render_add_foreign_key(fk),
-            });
+            sql.push(renderer.render_add_foreign_key(fk));
         }
     }
     sql.push("COMMIT".to_owned());
@@ -484,35 +476,29 @@ fn render_alter_column(
     let generation = ext.column_generations.get(&columns.previous.id);
     let removing_identity = changes.autoincrement_changed()
         && !columns.next.is_autoincrement()
-        && matches!(
-            generation,
-            Some(sql::kingbase_oracle::ColumnGeneration::Identity { .. })
-        );
+        && matches!(generation, Some(sql::kingbase_oracle::ColumnGeneration::Identity));
     if removing_identity {
-        if let Some(sql::kingbase_oracle::ColumnGeneration::Identity {
-            sequence: Some(sequence),
-        }) = generation
-        {
-            statements.push(render_remove_identity(table, &column_name, sequence));
-        } else {
-            statements.push(format!("ALTER TABLE {table} ALTER COLUMN {column_name} DROP IDENTITY"));
-        }
+        statements.push(format!("ALTER TABLE {table} ALTER COLUMN {column_name} DROP IDENTITY"));
     }
 
     if changes.type_changed() {
-        statements.push(format!(
-            "ALTER TABLE {table} MODIFY ({column_name} {})",
+        // R2 keeps native IDENTITY only on integer-family columns. The
+        // ordinary Oracle BigInt mapping (NUMBER) is not accepted here.
+        let column_type = if super::schema_differ::uses_native_bigint_for_type_change(columns) {
+            Cow::Borrowed("BIGINT")
+        } else {
             render_column_type(columns.next)
-        ));
+        };
+        statements.push(format!("ALTER TABLE {table} MODIFY ({column_name} {column_type})"));
     }
 
     if changes.default_changed() {
         match columns.next.default() {
             Some(default) if !matches!(default.kind(), DefaultKind::DbGenerated(None)) => statements.push(format!(
-                "ALTER TABLE {table} ALTER COLUMN {column_name} SET DEFAULT {}",
+                "ALTER TABLE {table} MODIFY {column_name} DEFAULT {}",
                 render_default(default.inner())
             )),
-            _ => statements.push(format!("ALTER TABLE {table} ALTER COLUMN {column_name} DROP DEFAULT")),
+            _ => statements.push(format!("ALTER TABLE {table} MODIFY {column_name} DEFAULT NULL")),
         }
     }
 
@@ -539,7 +525,7 @@ fn render_alter_column(
                     Quoted::OracleString(&sequence_name)
                 ),
                 format!(
-                    "ALTER TABLE {table} ALTER COLUMN {column_name} SET DEFAULT nextval({})",
+                    "ALTER TABLE {table} MODIFY {column_name} DEFAULT nextval({})",
                     Quoted::OracleString(&sequence_name)
                 ),
                 format!("ALTER SEQUENCE {sequence_name} OWNED BY {table}.{column_name}"),
@@ -548,15 +534,15 @@ fn render_alter_column(
                 "BEGIN\n{}\nEND;",
                 commands
                     .iter()
-                    .map(|sql| format!("EXECUTE {};", Quoted::OracleString(sql)))
+                    .map(|sql| format!("EXECUTE IMMEDIATE {};", Quoted::OracleString(sql)))
                     .join("\n")
             );
-            statements.push(format!("DO {}", Quoted::OracleString(&body)));
+            statements.push(body);
         } else {
-            // A simultaneous SET DEFAULT (e.g. autoincrement() -> 3) above
+            // A simultaneous default change (e.g. autoincrement() -> 3) above
             // must survive removing the old sequence.
             if !changes.default_changed() && !removing_identity {
-                statements.push(format!("ALTER TABLE {table} ALTER COLUMN {column_name} DROP DEFAULT"));
+                statements.push(format!("ALTER TABLE {table} MODIFY {column_name} DEFAULT NULL"));
             }
             if let Some(sql::kingbase_oracle::ColumnGeneration::OwnedSequence {
                 namespace,
@@ -575,66 +561,6 @@ fn render_alter_column(
     }
 
     statements
-}
-
-/// One atomic KES DO statement: preserve a shared sequence under its original
-/// name, then rebind current defaults before DROP IDENTITY deletes the old OID.
-/// Read dependencies at execution time: earlier migration steps may already
-/// have changed or removed a referencing column/default.
-fn render_remove_identity(
-    table: &QuotedWithPrefix<&str>,
-    column: &Quoted<&str>,
-    sequence: &sql::kingbase_oracle::IdentitySequence,
-) -> String {
-    let original = quoted_name(Some(&sequence.namespace), &sequence.name).to_string();
-    let retired_local = format!("_prisma_identity_{}", uuid::Uuid::new_v4().simple());
-    let retired = quoted_name(Some(&sequence.namespace), &retired_local).to_string();
-    let defaults_query = format!(
-        r#"
-SELECT COALESCE(jsonb_agg(jsonb_build_object('namespace',n.nspname,'table',c.relname,
-    'column',a.attname,'expression',sys_catalog.sys_get_expr(d.adbin,d.adrelid)) ORDER BY n.nspname,c.relname,a.attnum),'[]'::jsonb)
-INTO defaults FROM sys_catalog.sys_depend dep JOIN sys_catalog.sys_attrdef d ON d.oid=dep.objid
-JOIN sys_catalog.sys_class c ON c.oid=d.adrelid JOIN sys_catalog.sys_namespace n ON n.oid=c.relnamespace
-JOIN sys_catalog.sys_attribute a ON a.attrelid=c.oid AND a.attnum=d.adnum
-WHERE dep.refobjid={}::regclass AND dep.deptype='n'
-AND dep.classid=(SELECT classid FROM sys_catalog.sys_get_object_address('default value',ARRAY[n.nspname,c.relname,a.attname],ARRAY[]::text[]))
-AND dep.refclassid=(SELECT classid FROM sys_catalog.sys_get_object_address('view',ARRAY['sys_catalog','sys_class'],ARRAY[]::text[]));
-"#,
-        Quoted::OracleString(&original)
-    );
-    let rename = format!(
-        "ALTER SEQUENCE {original} RENAME TO {}",
-        Quoted::OracleIdentifier(&retired_local)
-    );
-    let create = format!("CREATE SEQUENCE {original} {}", sequence.options);
-    let copy = format!(
-        "SELECT sys_catalog.setval({},last_value,is_called) FROM {retired}",
-        Quoted::OracleString(&original)
-    );
-    let drop = format!("ALTER TABLE {table} ALTER COLUMN {column} DROP IDENTITY");
-    let lock = format!("LOCK TABLE {table} IN ACCESS EXCLUSIVE MODE");
-    let body = format!(
-        r#"DECLARE defaults jsonb; reference record; BEGIN
-EXECUTE {lock};
-{defaults_query}
-FOR reference IN SELECT value AS item FROM jsonb_array_elements(defaults) LOOP
-    EXECUTE format('LOCK TABLE %I.%I IN ACCESS EXCLUSIVE MODE',reference.item->>'namespace',reference.item->>'table');
-END LOOP;
-{defaults_query}
-IF jsonb_array_length(defaults)>0 THEN
-    EXECUTE {rename}; EXECUTE {create}; EXECUTE {copy};
-    FOR reference IN SELECT value AS item FROM jsonb_array_elements(defaults) LOOP
-        EXECUTE format('ALTER TABLE %I.%I ALTER COLUMN %I SET DEFAULT %s',reference.item->>'namespace',reference.item->>'table',reference.item->>'column',reference.item->>'expression');
-    END LOOP;
-END IF;
-EXECUTE {drop}; END;"#,
-        lock = Quoted::OracleString(&lock),
-        rename = Quoted::OracleString(&rename),
-        create = Quoted::OracleString(&create),
-        copy = Quoted::OracleString(&copy),
-        drop = Quoted::OracleString(&drop)
-    );
-    format!("DO {}", Quoted::OracleString(&body))
 }
 
 fn render_create_table_with_sequences(
@@ -871,6 +797,63 @@ mod tests {
     use super::*;
 
     #[test]
+    fn native_integer_widening_preserves_identity_and_number_mappings() {
+        use psl::parser_database::NoExtensionTypes;
+        use schema_connector::SchemaDialect;
+
+        let dialect = crate::SqlSchemaDialect::kingbase_oracle();
+        let calculate = |scalar: &str, auto: bool| {
+            let default = if auto { "@default(autoincrement())" } else { "" };
+            dialect.schema_from_datamodel(
+                vec![("schema.prisma".into(), format!(
+                    "datasource db {{\n provider = \"kingbase-oracle\"\n}}\nmodel Item {{\n id {scalar} @id {default}\n}}"
+                ).into())], None, &NoExtensionTypes,
+            ).unwrap()
+        };
+        for (identity, keep_auto, target, expected_type) in [
+            (true, true, "BigInt", "BIGINT"),
+            (false, true, "BigInt", "NUMBER(19,0)"),
+            (true, false, "BigInt", "NUMBER(19,0)"),
+            (true, true, "BigInt @db.Number(18,0)", "NUMBER(18,0)"),
+        ] {
+            let mut previous = *crate::database_schema::SqlDatabaseSchema::from_erased(calculate("Int", true));
+            if identity {
+                let column = previous.describer_schema.walk_table_columns().next().unwrap().id;
+                previous
+                    .describer_schema
+                    .downcast_connector_data_mut::<sql::kingbase_oracle::KingbaseOracleSchemaExt>()
+                    .column_generations
+                    .insert(column, sql::kingbase_oracle::ColumnGeneration::Identity);
+            }
+            let migration = dialect.diff(previous.into(), calculate(target, keep_auto), &Default::default());
+            let script = dialect.render_script(&migration, &Default::default()).unwrap();
+            assert!(script.contains(&format!("MODIFY (\"id\" {expected_type})")), "{script}");
+            assert_eq!(script.contains("DROP IDENTITY"), identity && !keep_auto, "{script}");
+            if identity && !keep_auto {
+                assert!(
+                    !script.contains("CREATE SEQUENCE") && !script.contains("DO "),
+                    "{script}"
+                );
+            }
+            if expected_type == "BIGINT" {
+                assert!(!script.contains("DROP CONSTRAINT"), "{script}");
+            }
+            if keep_auto {
+                assert!(
+                    !script.contains("DEFAULT NULL") && !script.contains("CREATE SEQUENCE"),
+                    "{script}"
+                );
+            }
+        }
+
+        let migration = dialect.diff(calculate("Int", false), calculate("Int", true), &Default::default());
+        let script = dialect.render_script(&migration, &Default::default()).unwrap();
+        assert!(script.contains("BEGIN\nEXECUTE IMMEDIATE 'LOCK TABLE"), "{script}");
+        assert!(script.contains("MODIFY \"id\" DEFAULT nextval("), "{script}");
+        assert!(!script.contains("DO '"), "{script}");
+    }
+
+    #[test]
     fn ddl_layout_preserves_migration_scripts() {
         use psl::parser_database::NoExtensionTypes;
         use schema_connector::SchemaDialect;
@@ -928,9 +911,9 @@ CREATE TYPE "Status" AS ENUM ('READY', 'DONE');
 -- CreateTable
 CREATE SEQUENCE "pa""rent_id_seq_16d279fb84efd911";
 CREATE TABLE "Pa""rent" (
-    "id" NUMBER(10,0) NOT NULL DEFAULT nextval('"pa""rent_id_seq_16d279fb84efd911"'),
-    "na""me" VARCHAR2(4000) NOT NULL DEFAULT 'O''Reilly\path',
-    "state" "Status" NOT NULL DEFAULT 'READY',
+    "id" NUMBER(10,0) DEFAULT nextval('"pa""rent_id_seq_16d279fb84efd911"') NOT NULL,
+    "na""me" VARCHAR2(4000) DEFAULT 'O''Reilly\path' NOT NULL,
+    "state" "Status" DEFAULT 'READY' NOT NULL,
     CONSTRAINT "Pa""rent_pkey" PRIMARY KEY ("id")
 );
 ALTER SEQUENCE "pa""rent_id_seq_16d279fb84efd911" OWNED BY "Pa""rent"."id";
@@ -953,7 +936,7 @@ ALTER TABLE "Child" ADD CONSTRAINT "code""unique" UNIQUE ("code");
 ALTER TABLE "Child" ADD CONSTRAINT "fk""parent" FOREIGN KEY ("parentId") REFERENCES "Pa""rent" ("id") ON DELETE CASCADE ON UPDATE CASCADE;
 
 -- AlterTable
-ALTER TABLE "Pa""rent" ALTER COLUMN "na""me" SET DEFAULT 'changed';
+ALTER TABLE "Pa""rent" MODIFY "na""me" DEFAULT 'changed';
 
 -- AlterTable
 ALTER TABLE "Child" MODIFY ("code" NOT NULL);

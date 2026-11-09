@@ -9,6 +9,175 @@ use std::str::FromStr;
 
 use crate::bigdecimal::BigDecimal;
 
+#[test]
+fn raw_datetime_bindings_preserve_instants_without_changing_session_time_zone() -> crate::Result<()> {
+    use crate::{ast::Value, connector::Queryable, tests::test_api::kingbase_oracle::CONN_STR};
+
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(async {
+            for timezone in ["UTC", "Asia/Shanghai", "America/New_York"] {
+                let mut url = url::Url::parse(CONN_STR.as_str()).unwrap();
+                url.query_pairs_mut()
+                    .append_pair("options", &format!("-ctimezone={timezone}"));
+                let mut setup = KingbaseOracle::new(url.as_str()).await?;
+                let table = setup.create_temp_table("value TIMESTAMP(6) WITH TIME ZONE").await?;
+                let conn = setup.conn();
+                for input in ["2026-01-02T00:00:00.123456Z", "2026-07-02T08:00:00.123456+08:00"] {
+                    let instant = chrono::DateTime::parse_from_rfc3339(input)
+                        .unwrap()
+                        .with_timezone(&chrono::Utc);
+                    let params = [Value::datetime(instant)];
+                    let row = conn
+                        .query_raw_typed("SELECT $1 AS value", &params)
+                        .await?
+                        .into_single()?;
+                    assert_eq!(row["value"], Value::datetime(instant));
+                    // Without a model hint, an explicit SQL cast to a plain
+                    // timestamp follows the database's normal zone conversion.
+                    let plain = conn
+                        .query_raw_typed("SELECT CAST($1 AS TIMESTAMP) AS value", &params)
+                        .await?
+                        .into_single()?;
+                    let literal = conn
+                        .query_raw(
+                            &format!(
+                                "SELECT CAST(CAST('{}' AS TIMESTAMP WITH TIME ZONE) AS TIMESTAMP) AS value",
+                                instant.to_rfc3339()
+                            ),
+                            &[],
+                        )
+                        .await?
+                        .into_single()?;
+                    assert_eq!(plain["value"], literal["value"], "{timezone} / {input}");
+                    for typed in [false, true] {
+                        let params = [Value::datetime(instant)];
+                        let sql = "SELECT CAST($1 AS TIMESTAMP WITH TIME ZONE) AS value";
+                        let row = if typed {
+                            conn.query_raw_typed(sql, &params).await?
+                        } else {
+                            conn.query_raw(sql, &params).await?
+                        }
+                        .into_single()?;
+                        assert_eq!(
+                            row["value"],
+                            Value::datetime(instant),
+                            "{timezone} / {input} / typed={typed}"
+                        );
+                        let sql = format!("INSERT INTO \"{table}\" VALUES($1)");
+                        if typed {
+                            conn.execute_raw_typed(&sql, &params).await?;
+                        } else {
+                            conn.execute_raw(&sql, &params).await?;
+                        }
+                        let row = conn
+                            .query_raw(
+                                &format!(
+                                    "SELECT value, CAST(EXTRACT(EPOCH FROM value) AS TEXT) AS seconds FROM \"{table}\""
+                                ),
+                                &[],
+                            )
+                            .await?
+                            .into_single()?;
+                        assert_eq!(row["value"], Value::datetime(instant));
+                        let seconds: bigdecimal::BigDecimal = row["seconds"].as_str().unwrap().parse().unwrap();
+                        let expected = bigdecimal::BigDecimal::from(instant.timestamp_micros())
+                            / bigdecimal::BigDecimal::from(1_000_000);
+                        assert_eq!(seconds, expected, "{timezone} / {input} / typed={typed}");
+                        conn.raw_cmd(&format!("DELETE FROM \"{table}\"")).await?;
+                    }
+                }
+                let row = conn
+                    .query_raw_typed(
+                        "SELECT CAST($1 AS TIMESTAMP WITH TIME ZONE) AS value",
+                        &[Value::null_datetime()],
+                    )
+                    .await?
+                    .into_single()?;
+                assert!(row["value"].is_null());
+                let row = conn
+                    .query_raw("SELECT current_setting('TimeZone') AS timezone", &[])
+                    .await?
+                    .into_single()?;
+                assert_eq!(row["timezone"], Value::text(timezone));
+            }
+            Ok(())
+        })
+}
+
+#[test]
+fn timestamp_roundtrips_preserve_session_time_zone() -> crate::Result<()> {
+    use crate::{ast::Value, connector::Queryable, tests::test_api::kingbase_oracle::CONN_STR};
+    use chrono::Timelike;
+
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(async {
+            for timezone in ["UTC", "Asia/Shanghai", "America/New_York"] {
+                let mut url = url::Url::parse(CONN_STR.as_str()).unwrap();
+                url.query_pairs_mut()
+                    .append_pair("options", &format!("-ctimezone={timezone}"));
+                let mut setup = KingbaseOracle::new(url.as_str()).await?;
+                let conn = setup.conn();
+                let timezone_sql = "SELECT current_setting('TimeZone') AS timezone";
+                let result = conn.query_raw(timezone_sql, &[]).await?.into_single()?;
+                assert_eq!(result.at(0), Some(&Value::text(timezone)));
+
+                let table = setup
+                    .create_temp_table(
+                        "d DATE, plain TIMESTAMP(6), zoned TIMESTAMP(6) WITH TIME ZONE, localized TIMESTAMP(6) WITH LOCAL TIME ZONE",
+                    )
+                    .await?;
+                let conn = setup.conn();
+                for input in [
+                    "2026-01-02T00:00:00.123456Z",
+                    "2026-01-02T08:00:00.123456+08:00",
+                    "2026-07-02T05:30:00.123456+05:30",
+                    "2026-03-08T02:30:00.123456Z",
+                ] {
+                    let instant = chrono::DateTime::parse_from_rfc3339(input)
+                        .unwrap()
+                        .with_timezone(&chrono::Utc);
+                    let params = ["Date", "Timestamp", "TimestampTz", "TimestampLocalTz"]
+                        .map(|native_type| Value::datetime(instant).with_native_column_type(Some(native_type)));
+                    conn.execute_raw_typed(
+                        &format!("INSERT INTO \"{table}\" VALUES ($1, $2, $3, $4)"),
+                        &params,
+                    )
+                    .await?;
+                    let row = conn
+                        .query_raw(&format!("SELECT * FROM \"{table}\""), &[])
+                        .await?
+                        .into_single()?;
+                    assert_eq!(row.at(0), Some(&Value::datetime(instant.with_nanosecond(0).unwrap())));
+                    for index in 1..4 {
+                        assert_eq!(row.at(index), Some(&Value::datetime(instant)), "{timezone}: {input}");
+                    }
+                    conn.raw_cmd(&format!("DELETE FROM \"{table}\"")).await?;
+                }
+                let result = conn.query_raw(timezone_sql, &[]).await?.into_single()?;
+                assert_eq!(result.at(0), Some(&Value::text(timezone)));
+            }
+            Ok(())
+        })
+}
+
+test_type!(tinyint(
+    kingbase_oracle,
+    "TINYINT",
+    ColumnType::Int32,
+    Value::null_int32(),
+    Value::int32(-128),
+    Value::int32(-1),
+    Value::int32(0),
+    Value::int32(1),
+    Value::int32(127)
+));
+
 test_type!(number_integer(
     kingbase_oracle,
     "NUMBER(10,0)",
@@ -260,11 +429,19 @@ test_type!(date(
     kingbase_oracle,
     "DATE",
     ColumnType::DateTime,
-    Value::null_datetime(),
-    Value::datetime(
-        chrono::DateTime::parse_from_rfc3339("2025-01-02T03:04:05Z")
-            .unwrap()
-            .with_timezone(&chrono::Utc)
+    (Value::null_datetime(), Value::null_datetime()),
+    (
+        Value::datetime(
+            chrono::DateTime::parse_from_rfc3339("2025-01-02T03:04:05Z")
+                .unwrap()
+                .with_timezone(&chrono::Utc)
+        )
+        .with_native_column_type(Some("Date")),
+        Value::datetime(
+            chrono::DateTime::parse_from_rfc3339("2025-01-02T03:04:05Z")
+                .unwrap()
+                .with_timezone(&chrono::Utc)
+        )
     )
 ));
 
@@ -272,11 +449,19 @@ test_type!(timestamp(
     kingbase_oracle,
     "TIMESTAMP(6)",
     ColumnType::DateTime,
-    Value::null_datetime(),
-    Value::datetime(
-        chrono::DateTime::parse_from_rfc3339("2025-01-02T03:04:05.123456Z")
-            .unwrap()
-            .with_timezone(&chrono::Utc)
+    (Value::null_datetime(), Value::null_datetime()),
+    (
+        Value::datetime(
+            chrono::DateTime::parse_from_rfc3339("2025-01-02T03:04:05.123456Z")
+                .unwrap()
+                .with_timezone(&chrono::Utc)
+        )
+        .with_native_column_type(Some("Timestamp")),
+        Value::datetime(
+            chrono::DateTime::parse_from_rfc3339("2025-01-02T03:04:05.123456Z")
+                .unwrap()
+                .with_timezone(&chrono::Utc)
+        )
     )
 ));
 
@@ -284,11 +469,19 @@ test_type!(timestamp_without_precision(
     kingbase_oracle,
     "TIMESTAMP",
     ColumnType::DateTime,
-    Value::null_datetime(),
-    Value::datetime(
-        chrono::DateTime::parse_from_rfc3339("2025-01-02T03:04:05.123456Z")
-            .unwrap()
-            .with_timezone(&chrono::Utc)
+    (Value::null_datetime(), Value::null_datetime()),
+    (
+        Value::datetime(
+            chrono::DateTime::parse_from_rfc3339("2025-01-02T03:04:05.123456Z")
+                .unwrap()
+                .with_timezone(&chrono::Utc)
+        )
+        .with_native_column_type(Some("Timestamp")),
+        Value::datetime(
+            chrono::DateTime::parse_from_rfc3339("2025-01-02T03:04:05.123456Z")
+                .unwrap()
+                .with_timezone(&chrono::Utc)
+        )
     )
 ));
 

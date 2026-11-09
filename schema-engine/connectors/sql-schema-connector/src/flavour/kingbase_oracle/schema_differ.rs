@@ -4,7 +4,10 @@ use crate::{
     sql_schema_differ::{SqlSchemaDifferFlavour, column::ColumnTypeChange, differ_database::DifferDatabase},
 };
 use psl::builtin_connectors::{KingbaseOracleNumberArguments, KingbaseOracleType};
-use sql_schema_describer::walkers::{IndexWalker, TableColumnWalker};
+use sql_schema_describer::{
+    ColumnTypeFamily,
+    walkers::{IndexWalker, TableColumnWalker},
+};
 
 /// Oracle-compatible migration-diff rules for KingbaseES.
 #[derive(Debug, Default)]
@@ -28,6 +31,41 @@ impl SqlSchemaDifferFlavour for KingbaseOracleSchemaDifferFlavour {
         true
     }
 
+    fn primary_key_column_type_change_requires_recreation(
+        &self,
+        columns: MigrationPair<TableColumnWalker<'_>>,
+    ) -> bool {
+        // R2 can widen an existing identity in place, including its key.
+        !uses_native_bigint_for_type_change(columns)
+    }
+
+    fn dbgenerated_defaults_match(
+        &self,
+        columns: MigrationPair<TableColumnWalker<'_>>,
+        previous: &str,
+        next: &str,
+    ) -> bool {
+        // Legacy NUMBER columns outside the model's precision range retain
+        // physical native metadata even though their Prisma type is Unsupported.
+        let known_unsupported_number = matches!(
+            columns.previous.column_native_type::<KingbaseOracleType>(),
+            Some(KingbaseOracleType::Number(_))
+        ) && matches!(
+            (columns.previous.column_type_family(), columns.next.column_type_family()),
+            (ColumnTypeFamily::Unsupported(previous), ColumnTypeFamily::Unsupported(next)) if previous == next
+        );
+        previous.eq_ignore_ascii_case(next)
+            || (known_unsupported_number
+                || matches!(
+                    columns.previous.column_type_family(),
+                    ColumnTypeFamily::Decimal | ColumnTypeFamily::Float
+                ) && matches!(
+                    columns.next.column_type_family(),
+                    ColumnTypeFamily::Decimal | ColumnTypeFamily::Float
+                ))
+                && sql_schema_describer::kingbase_oracle::numeric_default_expressions_match(previous, next)
+    }
+
     fn column_type_change(&self, columns: MigrationPair<TableColumnWalker<'_>>) -> Option<ColumnTypeChange> {
         match (
             columns.previous.column_type_family_as_enum(),
@@ -45,6 +83,16 @@ impl SqlSchemaDifferFlavour for KingbaseOracleSchemaDifferFlavour {
             }
             (Some(_), None) | (None, Some(_)) => return Some(ColumnTypeChange::NotCastable),
             (None, None) => (),
+        }
+
+        // Live Unsupported columns can retain native metadata for a later
+        // conversion to a supported type; model Unsupported fields have none.
+        // Their exact SQL type descriptions still identify the same type.
+        if matches!(
+            (columns.previous.column_type_family(), columns.next.column_type_family()),
+            (ColumnTypeFamily::Unsupported(previous), ColumnTypeFamily::Unsupported(next)) if previous == next
+        ) {
+            return None;
         }
 
         if columns.previous.column_type().native_type == columns.next.column_type().native_type
@@ -155,6 +203,39 @@ fn push_alter_enum_previous_usages_as_default(db: &DifferDatabase<'_>, alter_enu
     alter_enum.previous_usages_as_default = previous_usages_as_default;
 }
 
+/// Keep existing native integers in the integer family when widening to the
+/// default BigInt mapping. R2 requires this for IDENTITY and compatible foreign
+/// keys. Ordinary NUMBER columns and custom precision keep their Oracle types.
+pub(super) fn uses_native_bigint_for_type_change(columns: MigrationPair<TableColumnWalker<'_>>) -> bool {
+    let ext: &sql_schema_describer::kingbase_oracle::KingbaseOracleSchemaExt =
+        columns.previous.schema.downcast_connector_data();
+    let identity = matches!(
+        ext.column_generations.get(&columns.previous.id),
+        Some(sql_schema_describer::kingbase_oracle::ColumnGeneration::Identity)
+    );
+    let native_integer = if identity {
+        // Removing IDENTITY continues to use the ordinary target type.
+        columns.previous.is_autoincrement() && columns.next.is_autoincrement()
+    } else {
+        matches!(
+            columns.previous.column_type().full_data_type.as_str(),
+            "int2" | "int4" | "int8" | "smallint" | "integer" | "bigint"
+        )
+    };
+    native_integer
+        && matches!(
+            columns.previous.column_type_family(),
+            ColumnTypeFamily::Int | ColumnTypeFamily::BigInt
+        )
+        && matches!(columns.next.column_type_family(), ColumnTypeFamily::BigInt)
+        && matches!(
+            columns.next.column_native_type::<KingbaseOracleType>(),
+            Some(KingbaseOracleType::Number(
+                KingbaseOracleNumberArguments::Precision(19) | KingbaseOracleNumberArguments::PrecisionAndScale(19, 0)
+            ))
+        )
+}
+
 fn oracle_type_change(previous: KingbaseOracleType, next: KingbaseOracleType) -> Option<ColumnTypeChange> {
     use ColumnTypeChange::*;
 
@@ -240,12 +321,20 @@ fn catalog_types_are_equivalent(previous: KingbaseOracleType, next: KingbaseOrac
     use KingbaseOracleType::*;
 
     match (previous, next) {
+        (
+            Number(KingbaseOracleNumberArguments::Precision(previous)),
+            Number(KingbaseOracleNumberArguments::PrecisionAndScale(next, 0)),
+        )
+        | (
+            Number(KingbaseOracleNumberArguments::PrecisionAndScale(previous, 0)),
+            Number(KingbaseOracleNumberArguments::Precision(next)),
+        ) => previous == next,
         (Float(None | Some(25..=53)), BinaryDouble) | (BinaryDouble, Float(None | Some(25..=53))) => true,
         (Float(Some(1..=24)), BinaryFloat) | (BinaryFloat, Float(Some(1..=24))) => true,
         (Char(previous), Char(next))
         | (Char(previous), NChar(next))
         | (NChar(previous), Char(next))
-        | (NChar(previous), NChar(next)) => previous == next,
+        | (NChar(previous), NChar(next)) => previous.unwrap_or(1) == next.unwrap_or(1),
         (VarChar2(previous), VarChar2(next))
         | (VarChar2(previous), NVarChar2(next))
         | (NVarChar2(previous), VarChar2(next))
@@ -294,7 +383,8 @@ fn number_can_represent(target: KingbaseOracleNumberArguments, source: KingbaseO
             source_scale == 0 && target_precision >= source_precision
         }
         (PrecisionAndScale(source_precision, source_scale), PrecisionAndScale(target_precision, target_scale)) => {
-            target_precision - target_scale >= source_precision - source_scale && target_scale >= source_scale
+            target_precision.saturating_sub(target_scale) >= source_precision.saturating_sub(source_scale)
+                && target_scale >= source_scale
         }
         (Precision(_), PrecisionAndScale(_, _)) => false,
     }
@@ -330,6 +420,102 @@ fn is_character_or_lob(native_type: KingbaseOracleType) -> bool {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn unsupported_numeric_defaults_require_known_physical_number_metadata() {
+        use psl::datamodel_connector::NativeTypeInstance;
+        use sql_schema_describer::{Column, ColumnArity, ColumnType, SqlSchema};
+
+        let column_schema = |family: ColumnTypeFamily, native: Option<KingbaseOracleType>| {
+            let mut schema = SqlSchema::default();
+            let namespace = schema.push_namespace("public".to_owned());
+            let table = schema.push_table("Product".to_owned(), namespace, None);
+            schema.push_table_column(
+                table,
+                Column {
+                    name: "price".to_owned(),
+                    tpe: ColumnType {
+                        native_type: native.map(NativeTypeInstance::new),
+                        ..ColumnType::pure(family, ColumnArity::Nullable)
+                    },
+                    auto_increment: false,
+                    description: None,
+                },
+            );
+            schema
+        };
+        let number = KingbaseOracleType::Number(KingbaseOracleNumberArguments::PrecisionAndScale(65, 30));
+        let unsupported = ColumnTypeFamily::Unsupported("numeric(65,30)".to_owned());
+        for native in [Some(number), None, Some(KingbaseOracleType::VarChar2(Some(100)))] {
+            let previous = column_schema(unsupported.clone(), native);
+            let next = column_schema(unsupported.clone(), None);
+            let columns = MigrationPair::new(
+                previous.walk_table_columns().next().unwrap(),
+                next.walk_table_columns().next().unwrap(),
+            );
+            assert_eq!(
+                KingbaseOracleSchemaDifferFlavour.dbgenerated_defaults_match(
+                    columns,
+                    "1.25::numeric(10,1)",
+                    "CAST(1.25 AS NUMBER(10,1))"
+                ),
+                native == Some(number)
+            );
+            assert!(!KingbaseOracleSchemaDifferFlavour.dbgenerated_defaults_match(
+                columns,
+                "1.25::numeric(10,1)",
+                "CAST(1.25 AS NUMBER(10,2))"
+            ));
+        }
+        let previous = column_schema(unsupported, Some(number));
+        let next = column_schema(ColumnTypeFamily::Unsupported("custom_domain".to_owned()), None);
+        assert!(!KingbaseOracleSchemaDifferFlavour.dbgenerated_defaults_match(
+            MigrationPair::new(
+                previous.walk_table_columns().next().unwrap(),
+                next.walk_table_columns().next().unwrap()
+            ),
+            "1.25::numeric(10,1)",
+            "CAST(1.25 AS NUMBER(10,1))",
+        ));
+    }
+
+    #[test]
+    fn number_scale_above_precision_can_be_widened_without_underflow() {
+        use KingbaseOracleNumberArguments::PrecisionAndScale;
+        use KingbaseOracleType::Number;
+        assert_eq!(
+            oracle_type_change(Number(PrecisionAndScale(38, 50)), Number(PrecisionAndScale(38, 60))),
+            Some(ColumnTypeChange::SafeCast)
+        );
+        assert_eq!(
+            oracle_type_change(Number(PrecisionAndScale(38, 60)), Number(PrecisionAndScale(38, 50))),
+            Some(ColumnTypeChange::RiskyCast)
+        );
+    }
+
+    #[test]
+    fn omitted_native_arguments_match_only_their_actual_defaults() {
+        use KingbaseOracleNumberArguments::{Precision, PrecisionAndScale, Unspecified};
+        use KingbaseOracleType::*;
+        for (short, explicit) in [
+            (Number(Precision(10)), Number(PrecisionAndScale(10, 0))),
+            (Number(Precision(19)), Number(PrecisionAndScale(19, 0))),
+            (Char(None), Char(Some(1))),
+            (NChar(None), NChar(Some(1))),
+        ] {
+            assert_eq!(oracle_type_change(short, explicit), None);
+            assert_eq!(oracle_type_change(explicit, short), None);
+        }
+        for (previous, next) in [
+            (Number(Precision(10)), Number(PrecisionAndScale(11, 0))),
+            (Number(Precision(10)), Number(PrecisionAndScale(10, 1))),
+            (Number(Unspecified), Number(PrecisionAndScale(10, 0))),
+            (Char(None), Char(Some(2))),
+            (NChar(None), NChar(Some(2))),
+        ] {
+            assert!(oracle_type_change(previous, next).is_some(), "{previous:?} / {next:?}");
+        }
+    }
+
+    #[test]
     fn external_table_schema_aliases_preserve_mixed_case() {
         use crate::sql_schema_differ::SqlSchemaDifferFlavour;
         let flavour = super::KingbaseOracleSchemaDifferFlavour;
@@ -342,6 +528,54 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn numeric_cast_defaults_compare_by_meaning_only_on_oracle_numeric_columns() {
+        use psl::parser_database::NoExtensionTypes;
+        use schema_connector::SchemaDialect;
+
+        for (provider, dialect) in [
+            ("kingbase-oracle", crate::SqlSchemaDialect::kingbase_oracle()),
+            #[cfg(feature = "postgresql")]
+            ("postgresql", crate::SqlSchemaDialect::postgres()),
+            #[cfg(feature = "mysql")]
+            ("mysql", crate::SqlSchemaDialect::mysql()),
+        ] {
+            for scalar in ["Decimal", "Float", "String"] {
+                let calculate = |expression: &str| {
+                    dialect.schema_from_datamodel(
+                        vec![("schema.prisma".into(), format!(
+                            "datasource db {{\n provider = \"{provider}\"\n }}\nmodel Product {{\n id Int @id\n price {scalar} @default(dbgenerated({}))\n }}",
+                            serde_json::to_string(expression).unwrap()
+                        ).into())], None, &NoExtensionTypes,
+                    ).unwrap()
+                };
+                for expression in ["1.25::numeric(10,1)", "(1.25::numeric(3,2))::numeric(10,1)"] {
+                    let migration = dialect.diff(
+                        calculate(expression),
+                        calculate("CAST(1.25 AS NUMBER(10,1))"),
+                        &Default::default(),
+                    );
+                    let sql = dialect.render_script(&migration, &Default::default()).unwrap();
+                    assert_eq!(
+                        sql == "-- This is an empty migration.",
+                        provider == "kingbase-oracle" && scalar != "String",
+                        "{provider}/{scalar}: {sql}",
+                    );
+                }
+                for expression in ["CAST(1.25 AS NUMBER(10,2))", "CAST(1.35 AS NUMBER(10,1))"] {
+                    let migration = dialect.diff(
+                        calculate("1.25::numeric(10,1)"),
+                        calculate(expression),
+                        &Default::default(),
+                    );
+                    let sql = dialect.render_script(&migration, &Default::default()).unwrap();
+                    assert_ne!(sql, "-- This is an empty migration.", "{provider}/{scalar}");
+                    assert!(sql.contains(expression), "{sql}");
+                }
+            }
+        }
+    }
 
     #[test]
     fn unsupported_implicit_conversions_require_column_recreation() {
@@ -422,7 +656,7 @@ mod tests {
                 KingbaseOracleType::Number(KingbaseOracleNumberArguments::PrecisionAndScale(12, 0)),
                 KingbaseOracleType::Number(KingbaseOracleNumberArguments::Precision(12))
             ),
-            Some(ColumnTypeChange::SafeCast)
+            None
         );
     }
 

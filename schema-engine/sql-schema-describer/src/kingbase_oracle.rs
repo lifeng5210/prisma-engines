@@ -13,6 +13,7 @@ use crate::{
     DescriberResult, ForeignKeyAction, IndexColumn, PrismaValue, Procedure, SQLSortOrder, SqlSchema,
     SqlSchemaDescriberBackend, getters::Getter,
 };
+pub use default::numeric_default_expressions_match;
 use psl::{
     builtin_connectors::{KingbaseOracleNumberArguments, KingbaseOracleType},
     datamodel_connector::NativeTypeInstance,
@@ -30,18 +31,13 @@ pub struct KingbaseOracleSchemaExt {
     pub owning_constraint_names: HashMap<crate::IndexId, String>,
     /// Actual generation mechanism; absent entries never authorize deleting a sequence.
     pub column_generations: HashMap<crate::TableColumnId, ColumnGeneration>,
-    /// Server definitions preserve FK properties not represented in PSL.
-    pub foreign_key_definitions: HashMap<crate::ForeignKeyId, String>,
 }
 
 /// Generation metadata read from documented KES ownership interfaces.
 #[derive(Debug, Clone)]
 pub enum ColumnGeneration {
     /// A database identity column, removed with DROP IDENTITY.
-    Identity {
-        /// Identity sequence properties, when exposed.
-        sequence: Option<IdentitySequence>,
-    },
+    Identity,
     /// A referenced sequence owned by this column. Other references prevent cleanup.
     OwnedSequence {
         /// The sequence's physical namespace.
@@ -51,17 +47,6 @@ pub enum ColumnGeneration {
         /// Another object still references this sequence.
         shared: bool,
     },
-}
-
-/// Public KES sequence properties needed to preserve shared identity generation.
-#[derive(Debug, Clone)]
-pub struct IdentitySequence {
-    /// Physical namespace.
-    pub namespace: String,
-    /// Physical name.
-    pub name: String,
-    /// CREATE SEQUENCE options, derived exclusively from typed catalog values.
-    pub options: String,
 }
 
 /// Kingbase Oracle folds an ASCII all-uppercase quoted identifier to lowercase,
@@ -196,41 +181,6 @@ const CHECKS: &str = include_str!("kingbase_oracle/constraints_query.sql");
 // stable namespace key. Use the KES routine decompiler directly, with no PG alias.
 const PROCEDURES: &str = include_str!("kingbase_oracle/procedures_query.sql");
 
-async fn identity_sequence(
-    conn: &dyn Queryable,
-    oid: i64,
-    namespace: String,
-    name: String,
-) -> DescriberResult<IdentitySequence> {
-    let properties = conn
-        .query_raw(
-            include_str!("kingbase_oracle/sequences_query.sql"),
-            &[Value::int64(oid)],
-        )
-        .await?;
-    let p = properties.into_iter().next().expect("identity sequence properties");
-    let data_type = match p.get_expect_string("typname").as_str() {
-        "int2" => "SMALLINT",
-        "int4" => "INTEGER",
-        _ => "BIGINT",
-    };
-    let options = format!(
-        "AS {data_type} INCREMENT BY {} MINVALUE {} MAXVALUE {} START WITH {} CACHE {} {} CYCLE",
-        p.get_expect_i64("seqincrement"),
-        p.get_expect_i64("seqmin"),
-        p.get_expect_i64("seqmax"),
-        p.get_expect_i64("seqstart"),
-        p.get_expect_i64("seqcache"),
-        if p.get_expect_bool("seqcycle") { "" } else { "NO" }
-    );
-
-    Ok(IdentitySequence {
-        namespace,
-        name,
-        options,
-    })
-}
-
 async fn query(conn: &dyn Queryable, sql: &str, schemas: &[&str]) -> DescriberResult<ResultSet> {
     let placeholders = (1..=schemas.len())
         .map(|i| format!("${i}"))
@@ -338,21 +288,7 @@ async fn describe_schema(conn: &dyn Queryable, schemas: &[&str]) -> DescriberRes
         if let Some(&table) = tables.get(&oid) {
             let id = schema.push_table_column(table, column);
             if identity {
-                let sequence = if let Some(sequence_oid) = row.get_i64("owned_sequence_oid") {
-                    Some(
-                        identity_sequence(
-                            conn,
-                            sequence_oid,
-                            row.get_expect_string("owned_sequence_namespace"),
-                            row.get_expect_string("owned_sequence_name"),
-                        )
-                        .await?,
-                    )
-                } else {
-                    None
-                };
-                ext.column_generations
-                    .insert(id, ColumnGeneration::Identity { sequence });
+                ext.column_generations.insert(id, ColumnGeneration::Identity);
             } else if let (Some(owned_oid), Some(reference)) = (
                 row.get_i64("owned_sequence_oid"),
                 default.as_ref().and_then(|d| match d.kind() {
@@ -497,8 +433,6 @@ async fn describe_schema(conn: &dyn Queryable, schemas: &[&str]) -> DescriberRes
                 ],
             )
         });
-        ext.foreign_key_definitions
-            .insert(id, row.get_expect_string("definition"));
         schema.push_foreign_key_column(id, [child, parent]);
     }
     for row in query(conn, PROCEDURES, schemas).await? {
@@ -536,7 +470,9 @@ fn column_type(
     let number = |p: u32| Number(KingbaseOracleNumberArguments::PrecisionAndScale(p, 0));
     let native = match name.to_ascii_lowercase().as_str() {
         "number" | "numeric" | "decimal" => Number(match (positive(precision), positive(scale)) {
-            (Some(p), Some(s)) => KingbaseOracleNumberArguments::PrecisionAndScale(p.max(s), s),
+            (Some(p), Some(s)) => {
+                KingbaseOracleNumberArguments::PrecisionAndScale(if p <= s { p.max(s).min(38) } else { p }, s)
+            }
             (Some(p), None) => KingbaseOracleNumberArguments::Precision(p),
             _ => KingbaseOracleNumberArguments::Unspecified,
         }),
@@ -562,6 +498,18 @@ fn column_type(
         "xml" => Xml,
         _ => return (ColumnTypeFamily::Unsupported(name.to_owned()), None),
     };
+    // Keep the physical type for migrations, but do not emit an invalid
+    // @db.Number annotation for a legacy column outside the model's range.
+    let unsupported_number = match native {
+        Number(KingbaseOracleNumberArguments::Precision(p)) if p > 38 => Some(format!("numeric({p})")),
+        Number(KingbaseOracleNumberArguments::PrecisionAndScale(p, s)) if p > 38 || s > 1000 => {
+            Some(format!("numeric({p},{s})"))
+        }
+        _ => None,
+    };
+    if let Some(name) = unsupported_number {
+        return (ColumnTypeFamily::Unsupported(name), Some(native));
+    }
     let family = match native {
         TinyInt => ColumnTypeFamily::Int,
         Number(
@@ -584,6 +532,33 @@ fn column_type(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn number_introspection_keeps_models_within_declaration_precision() {
+        use KingbaseOracleNumberArguments::*;
+        use KingbaseOracleType::Number;
+        assert_eq!(
+            column_type("numeric", None, None, None, None),
+            (ColumnTypeFamily::Decimal, Some(Number(Unspecified)))
+        );
+        assert_eq!(
+            column_type("numeric", Some(38), Some(18), None, None),
+            (ColumnTypeFamily::Decimal, Some(Number(PrecisionAndScale(38, 18))))
+        );
+        // R2 raises p to s. A legal declaration p=38 has the same physical type.
+        assert_eq!(
+            column_type("numeric", Some(50), Some(50), None, None),
+            (ColumnTypeFamily::Decimal, Some(Number(PrecisionAndScale(38, 50))))
+        );
+        assert_eq!(
+            column_type("numeric", Some(1000), Some(1000), None, None),
+            (ColumnTypeFamily::Decimal, Some(Number(PrecisionAndScale(38, 1000))))
+        );
+        let (family, native) = column_type("numeric", Some(65), Some(30), None, None);
+        assert_eq!(family, ColumnTypeFamily::Unsupported("numeric(65,30)".into()));
+        // Retain the physical native type so a migration to NUMBER can preserve rows.
+        assert_eq!(native, Some(Number(PrecisionAndScale(65, 30))));
+    }
+
     #[test]
     fn identifiers_preserve_mixed_case() {
         for (input, expected) in [("UPPER", "upper"), ("Mixed", "Mixed"), ("lower", "lower")] {

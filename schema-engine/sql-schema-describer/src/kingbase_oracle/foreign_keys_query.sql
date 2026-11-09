@@ -3,7 +3,6 @@ SELECT
     CAST(k.conrelid AS BIGINT) AS object_id,
     CAST(k.confrelid AS BIGINT) AS referenced_id,
     k.conname AS name,
-    sys_catalog.sys_get_constraintdef(k.oid) AS definition,
     a.attname AS column_name,
     ra.attname AS referenced_column,
     rn.nspname AS referenced_namespace,

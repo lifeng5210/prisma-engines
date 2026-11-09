@@ -200,3 +200,74 @@ fn fulltext_indexes_require_connector_support() {
     "#]];
     expect_error(dml, &expected);
 }
+
+fn descending_unique_relation_schema(constraint: &str, extra: &str, relation_mode: &str) -> String {
+    format!(
+        r#"
+        datasource db {{
+            provider = "kingbase-oracle"
+            {relation_mode}
+        }}
+        model Parent {{
+            id Int @id
+            code String
+            label String
+            children Child[]
+            {constraint}
+            {extra}
+        }}
+        model Child {{
+            id Int @id
+            parentCode String
+            parentLabel String
+            parent Parent @relation(fields: [parentLabel, parentCode], references: [label, code])
+        }}
+    "#
+    )
+}
+
+#[test]
+fn descending_unique_index_alone_cannot_back_a_database_foreign_key() {
+    let dml = descending_unique_relation_schema("@@unique([code(sort: Desc), label])", "", "");
+    let schema = psl::validate_without_extensions(dml.into());
+    let errors: Vec<_> = schema
+        .diagnostics
+        .errors()
+        .iter()
+        .map(|error| error.message())
+        .collect();
+    assert_eq!(
+        errors,
+        [
+            "Error parsing attribute \"@relation\": Kingbase Oracle foreign keys must reference a primary key or a unique constraint. A descending unique index alone cannot be referenced; add a non-descending unique constraint on the referenced fields or use relationMode = \"prisma\"."
+        ]
+    );
+}
+
+#[test]
+fn descending_unique_index_does_not_restrict_prisma_relations_or_other_constraints() {
+    let descending = "@@unique([code(sort: Desc), label])";
+    for dml in [
+        descending_unique_relation_schema(descending, "", "relationMode = \"prisma\""),
+        descending_unique_relation_schema(descending, "@@unique([code, label], map: \"parent_constraint\")", ""),
+        descending_unique_relation_schema(descending, "@@unique([label(sort: Asc), code(sort: Asc)])", ""),
+        descending_unique_relation_schema(descending, "", "")
+            .replacen("id Int @id", "id Int", 1)
+            .replace(descending, "@@id([code, label])\n@@unique([code(sort: Desc), label])"),
+        descending_unique_relation_schema(descending, "", "")
+            .replace("provider = \"kingbase-oracle\"", "provider = \"mysql\""),
+    ] {
+        assert_valid(&dml);
+    }
+    assert_valid(
+        r#"
+        datasource db {
+            provider = "kingbase-oracle"
+        }
+        model Standalone {
+            id Int @id
+            code String @unique(sort: Desc)
+        }
+    "#,
+    );
+}

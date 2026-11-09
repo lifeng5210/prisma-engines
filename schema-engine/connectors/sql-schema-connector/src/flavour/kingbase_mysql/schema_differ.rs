@@ -286,7 +286,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn numeric_default_catalog_decoration_only_avoids_migrations_on_kingbase_mysql() {
+    fn numeric_default_catalog_decoration_only_avoids_migrations_on_kingbase_numeric_columns() {
         use psl::parser_database::NoExtensionTypes;
         use schema_connector::SchemaDialect;
 
@@ -318,7 +318,7 @@ mod tests {
                     let migration =
                         dialect.diff(calculate(before, scalar), calculate(after, scalar), &Default::default());
                     let sql = dialect.render_script(&migration, &Default::default()).unwrap();
-                    if provider == "kingbase-mysql" && scalar != "String" {
+                    if matches!(provider, "kingbase-mysql" | "kingbase-oracle") && scalar != "String" {
                         assert_eq!(sql, "-- This is an empty migration.");
                     } else {
                         assert_ne!(sql, "-- This is an empty migration.", "{provider}/{scalar}");

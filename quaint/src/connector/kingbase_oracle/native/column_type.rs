@@ -81,7 +81,7 @@ macro_rules! create_pg_mapping {
 // The mapping drives both result metadata and the exhaustive decoding branches.
 create_pg_mapping! {
     Boolean(Option<bool>) => [BOOL],
-    Int32(Option<i32>) => [INT2, INT4],
+    Int32(Option<i32>) => [INT2, INT4, ORACLE_TINYINT],
     Int64(Option<i64>) => [INT8, OID],
     Float(Option<f32>) => [FLOAT4],
     Double(Option<f64>) => [FLOAT8],
@@ -100,7 +100,6 @@ create_pg_mapping! {
     TextArray(Option<Vec<Value<'static>>>) => [TEXT_ARRAY, NAME_ARRAY, VARCHAR_ARRAY],
 
     // Text-protocol query metadata does not imply native binary codec support.
-    [Int32 => [ORACLE_TINYINT]],
     [Text => [ORACLE_ROWID]],
     [Time => [TIMETZ]],
 }
@@ -137,11 +136,14 @@ mod tests {
 
         let connection = Quaint::new(CONN_STR.as_str()).await.unwrap();
         let sql = "SELECT CAST(-32768 AS SMALLINT) AS \"small\", CAST(42 AS INTEGER) AS \"int\", \
-                   CAST(9223372036854775807 AS BIGINT) AS \"big\", CAST(NULL AS SMALLINT) AS \"null\"";
+                   CAST(9223372036854775807 AS BIGINT) AS \"big\", CAST(-128 AS TINYINT) AS \"tiny\", \
+                   CAST(NULL AS SMALLINT) AS \"null\", CAST(NULL AS TINYINT) AS \"nullTiny\"";
         let expected_types = vec![
             ColumnType::Int32,
             ColumnType::Int32,
             ColumnType::Int64,
+            ColumnType::Int32,
+            ColumnType::Int32,
             ColumnType::Int32,
         ];
 
@@ -151,7 +153,9 @@ mod tests {
         assert_eq!(row.at(0), Some(&Value::int32(-32768)));
         assert_eq!(row.at(1), Some(&Value::int32(42)));
         assert_eq!(row.at(2), Some(&Value::int64(i64::MAX)));
-        assert_eq!(row.at(3), Some(&Value::null_int32()));
+        assert_eq!(row.at(3), Some(&Value::int32(-128)));
+        assert_eq!(row.at(4), Some(&Value::null_int32()));
+        assert_eq!(row.at(5), Some(&Value::null_int32()));
 
         let empty = connection.query_raw(&format!("{sql} WHERE 1 = 0"), &[]).await.unwrap();
         assert!(empty.is_empty());
@@ -183,7 +187,6 @@ mod tests {
     #[test]
     fn metadata_only_types_do_not_enable_binary_decoding() {
         for (typ, expected) in [
-            (Type::ORACLE_TINYINT, ColumnType::Int32),
             (Type::ORACLE_ROWID, ColumnType::Text),
             (Type::TIMETZ, ColumnType::Time),
             (Type::BOOL_ARRAY, ColumnType::Unknown),
