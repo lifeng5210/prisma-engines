@@ -91,7 +91,7 @@ impl<'a, V> SqlQueryBuilder<'a, V> {
             .into_iter()
             .map(|v| {
                 (
-                    convert::quaint_value_to_arg_type(&v),
+                    convert::quaint_value_to_arg_type(&v, self.context.is_kingbase_mysql()),
                     convert::quaint_value_to_prisma_value(v.typed),
                 )
             })
@@ -437,7 +437,7 @@ impl<'a, V: Visitor<'a>> QueryBuilder for SqlQueryBuilder<'a, V> {
                         .exactly_one()
                         .expect("m2m relation should have exactly one scalar field");
                     let opaque_type = convert::type_information_to_opaque_type(&scalar.type_info());
-                    (opaque_type, scalar.native_type().map(|nt| nt.name().into()))
+                    (opaque_type, scalar.native_column_type())
                 })
                 .collect_vec(),
         );

@@ -49,7 +49,7 @@ async fn native_type_columns_are_introspected(api: &mut TestApi) -> TestResult {
 
     for expected in [
         "small_int Int @db.SmallInt",
-        "tiny_bool Boolean",
+        "tiny_bool Int @db.TinyInt",
         "tiny_int Int @db.TinyInt",
         "medium_int Int @db.MediumInt",
         "big_int BigInt",

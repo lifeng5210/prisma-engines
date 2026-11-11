@@ -2983,6 +2983,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "network-interface"
+version = "2.0.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4ddcb8865ad3d9950f22f42ffa0ef0aecbfbf191867b3122413602b0a360b2a6"
+dependencies = [
+ "cc",
+ "libc",
+ "thiserror 2.0.17",
+ "winapi",
+]
+
+[[package]]
 name = "nom"
 version = "7.1.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3477,12 +3489,12 @@ dependencies = [
 [[package]]
 name = "postgres-native-tls"
 version = "0.5.3"
-source = "git+https://github.com/lifeng5210/rust-kingbase?rev=11a0a2ed3286eb791900ff43ea02114a63937e24#11a0a2ed3286eb791900ff43ea02114a63937e24"
+source = "git+https://github.com/lifeng5210/rust-kingbase-prisma?rev=15da36bb3a2bc2b3abffb49efae4163732886dca#15da36bb3a2bc2b3abffb49efae4163732886dca"
 dependencies = [
  "native-tls",
  "tokio",
  "tokio-native-tls",
- "tokio-postgres 0.7.17",
+ "tokio-postgres 0.7.18",
 ]
 
 [[package]]
@@ -3504,8 +3516,8 @@ dependencies = [
 
 [[package]]
 name = "postgres-protocol"
-version = "0.6.11"
-source = "git+https://github.com/lifeng5210/rust-kingbase?rev=11a0a2ed3286eb791900ff43ea02114a63937e24#11a0a2ed3286eb791900ff43ea02114a63937e24"
+version = "0.6.12"
+source = "git+https://github.com/lifeng5210/rust-kingbase-prisma?rev=15da36bb3a2bc2b3abffb49efae4163732886dca#15da36bb3a2bc2b3abffb49efae4163732886dca"
 dependencies = [
  "base64 0.22.1",
  "byteorder",
@@ -3536,15 +3548,15 @@ dependencies = [
 
 [[package]]
 name = "postgres-types"
-version = "0.2.13"
-source = "git+https://github.com/lifeng5210/rust-kingbase?rev=11a0a2ed3286eb791900ff43ea02114a63937e24#11a0a2ed3286eb791900ff43ea02114a63937e24"
+version = "0.2.14"
+source = "git+https://github.com/lifeng5210/rust-kingbase-prisma?rev=15da36bb3a2bc2b3abffb49efae4163732886dca#15da36bb3a2bc2b3abffb49efae4163732886dca"
 dependencies = [
  "bigdecimal 0.4.10",
  "bit-vec",
  "bytes",
  "chrono",
  "fallible-iterator 0.2.0",
- "postgres-protocol 0.6.11",
+ "postgres-protocol 0.6.12",
  "serde_core",
  "serde_json",
  "uuid",
@@ -3812,7 +3824,7 @@ dependencies = [
  "pin-project",
  "postgres-native-tls 0.5.1",
  "postgres-native-tls 0.5.3",
- "postgres-types 0.2.13",
+ "postgres-types 0.2.14",
  "postgres-types 0.2.9",
  "quaint-test-macros",
  "quaint-test-setup",
@@ -3826,7 +3838,7 @@ dependencies = [
  "tiberius",
  "tokio",
  "tokio-postgres 0.7.13",
- "tokio-postgres 0.7.17",
+ "tokio-postgres 0.7.18",
  "tokio-tungstenite",
  "tokio-util",
  "tracing",
@@ -5750,8 +5762,8 @@ dependencies = [
 
 [[package]]
 name = "tokio-postgres"
-version = "0.7.17"
-source = "git+https://github.com/lifeng5210/rust-kingbase?rev=11a0a2ed3286eb791900ff43ea02114a63937e24#11a0a2ed3286eb791900ff43ea02114a63937e24"
+version = "0.7.18"
+source = "git+https://github.com/lifeng5210/rust-kingbase-prisma?rev=15da36bb3a2bc2b3abffb49efae4163732886dca#15da36bb3a2bc2b3abffb49efae4163732886dca"
 dependencies = [
  "async-trait",
  "byteorder",
@@ -5760,12 +5772,13 @@ dependencies = [
  "futures-channel",
  "futures-util",
  "log",
+ "network-interface",
  "parking_lot",
  "percent-encoding",
  "phf 0.13.1",
  "pin-project-lite",
- "postgres-protocol 0.6.11",
- "postgres-types 0.2.13",
+ "postgres-protocol 0.6.12",
+ "postgres-types 0.2.14",
  "rand 0.10.2",
  "socket2 0.6.5",
  "tokio",

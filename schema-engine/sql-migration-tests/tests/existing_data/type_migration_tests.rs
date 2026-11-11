@@ -294,9 +294,16 @@ fn datetime_to_float_conversions_are_impossible(api: TestApi) {
 
     api.schema_push_w_datasource(dm1).send().assert_green();
 
-    api.insert("Cat")
-        .value("birthday", Value::datetime("2018-01-18T08:01:02Z".parse().unwrap()))
-        .result_raw();
+    let birthday = Value::datetime("2018-01-18T08:01:02Z".parse().unwrap());
+    // This helper builds a raw insert without model metadata. Match Oracle's
+    // DateTime field binding so the session time zone does not shift the value.
+    let birthday = if api.is_kingbase_oracle() {
+        birthday.with_native_column_type(Some("Timestamp"))
+    } else {
+        birthday
+    };
+
+    api.insert("Cat").value("birthday", birthday).result_raw();
 
     let dm2 = r#"
         model Cat {

@@ -1478,11 +1478,9 @@ async fn filtering_by_json_values_does_not_work_but_does_not_crash(api: &mut dyn
     let select = Select::from_table(&table).so_that("nested".equals("{\"isTrue\": false}"));
     let result = api.conn().query(select.into()).await?;
 
-    if api.connector_tag().intersects(Tags::KINGBASE_MYSQL) {
-        assert_eq!(result.len(), 1);
-    } else {
-        assert!(result.is_empty());
-    }
+    // A text binding does not request JSON structural equality on either
+    // native MySQL or KES. JSON-valued comparisons have separate coverage.
+    assert!(result.is_empty());
 
     Ok(())
 }
@@ -1523,29 +1521,54 @@ async fn newdecimal_conversion_is_handled_correctly(api: &mut dyn TestApi) -> cr
     assert_eq!(expected, result.into_single().unwrap()[0]);
 
     if api.connector_tag().contains(Tags::KINGBASE_MYSQL) {
-        // Compare AST rendering against a direct server query, with explicit
-        // expected return types independently verified from server metadata.
-        for (parameter, expected) in [
-            (Value::int64(2), Value::numeric("2".parse().unwrap())),
-            (Value::float(1.5), Value::float(1.5)),
-            (Value::double(1.5), Value::double(1.5)),
+        // Typed preparation and AST execution preserve native aggregate types.
+        // Raw untyped SUM(?) independently remains the server's SUM(text).
+        for (parameter, expected_typed, expected_ast, expected_untyped) in [
+            (Value::int32(1), Value::int64(1), Value::int64(1), Value::double(1.0)),
+            (
+                Value::int64(2),
+                Value::numeric("2".parse().unwrap()),
+                Value::numeric("2".parse().unwrap()),
+                Value::double(2.0),
+            ),
+            (
+                Value::float(1.5),
+                Value::float(1.5),
+                Value::double(1.5),
+                Value::double(1.5),
+            ),
+            (
+                Value::double(1.5),
+                Value::double(1.5),
+                Value::double(1.5),
+                Value::double(1.5),
+            ),
             (
                 Value::numeric("1.5".parse().unwrap()),
                 Value::numeric("1.5".parse().unwrap()),
+                Value::numeric("1.5".parse().unwrap()),
+                Value::double(1.5),
             ),
             (
                 Value::numeric("12345678901234567890.1234567890123456789".parse().unwrap()),
                 Value::numeric("12345678901234567890.1234567890123456789".parse().unwrap()),
+                Value::numeric("12345678901234567890.1234567890123456789".parse().unwrap()),
+                Value::double(1.2345678901234567e19),
             ),
         ] {
             let direct = api
                 .conn()
                 .query_raw_typed("SELECT SUM(?)", std::slice::from_ref(&parameter))
                 .await?;
-            assert_eq!(expected, direct.into_single().unwrap()[0]);
+            assert_eq!(expected_typed, direct.into_single().unwrap()[0]);
+            let direct_untyped = api
+                .conn()
+                .query_raw("SELECT SUM(?)", std::slice::from_ref(&parameter))
+                .await?;
+            assert_eq!(expected_untyped, direct_untyped.into_single().unwrap()[0]);
             let select = Select::default().value(sum(parameter).alias("total"));
             let actual = api.conn().select(select).await?;
-            assert_eq!(expected, actual.into_single().unwrap()[0]);
+            assert_eq!(expected_ast, actual.into_single().unwrap()[0]);
         }
     }
     Ok(())
@@ -2368,9 +2391,13 @@ async fn json_numeric_comparisons_text_parameters(api: &mut dyn TestApi) -> crat
     // Keep MySQL's comparison contract visible. Kingbase executes the same
     // SQL and scalar bindings; database result differences are not compensated.
     let source = Table::from(Select::default().value(1)).alias("source");
-    for document in ["{\"a\":2}", "{\"a\":1.25}"] {
+    for (document, threshold) in [
+        ("{\"a\":2}", serde_json::json!(1)),
+        ("{\"a\":1.25}", serde_json::json!(1)),
+        ("{\"a\":2}", serde_json::json!(1.5)),
+    ] {
         let extracted: Expression = json_extract(Value::text(document), JsonPath::string("$.a"), false).into();
-        let scalar: Expression = Value::json(serde_json::json!(1)).into();
+        let scalar: Expression = Value::json(threshold).into();
         for (predicate, matches) in [
             (extracted.clone().greater_than(scalar.clone()), true),
             (extracted.clone().greater_than_or_equals(scalar.clone()), true),
@@ -2387,6 +2414,31 @@ async fn json_numeric_comparisons_text_parameters(api: &mut dyn TestApi) -> crat
         }
     }
 
+    Ok(())
+}
+
+#[cfg(feature = "mysql")]
+#[test_each_connector(tags("mysql"))]
+async fn json_numeric_update_and_delete_predicates(api: &mut dyn TestApi) -> crate::Result<()> {
+    let table = api
+        .create_temp_table("id int4 auto_increment primary key, nested json not null, flag int not null")
+        .await?;
+    let insert = Insert::multi_into(&table, ["nested", "flag"])
+        .values((serde_json::json!({ "a": 2 }), 0))
+        .values((serde_json::json!({ "a": 0.5 }), 0));
+    api.conn().insert(insert.into()).await?;
+
+    let extracted: Expression = json_extract(col!("nested"), JsonPath::string("$.a"), false).into();
+    let update = Update::table(&table)
+        .set("flag", 1)
+        .so_that(extracted.clone().greater_than(Value::json(serde_json::json!(1))));
+    assert_eq!(api.conn().execute(update.into()).await?, 1);
+    let delete = Delete::from_table(&table).so_that(extracted.less_than(Value::json(serde_json::json!(1.5))));
+    assert_eq!(api.conn().execute(delete.into()).await?, 1);
+
+    let row = api.conn().select(Select::from_table(&table)).await?.into_single()?;
+    assert_eq!(row["flag"].as_integer(), Some(1));
+    assert_eq!(value_into_json(&row["nested"]), Some(serde_json::json!({ "a": 2 })));
     Ok(())
 }
 
@@ -3613,6 +3665,24 @@ async fn sum_numeric_parameters(api: &mut dyn TestApi) -> crate::Result<()> {
     ] {
         let query = Select::default().value(sum(parameter.clone()).alias("total"));
         let result = api.conn().select(query).await?;
+        if api.connector_tag().contains(Tags::KINGBASE_MYSQL) {
+            use crate::connector::ColumnType;
+            let (expected_type, expected_value) = match &parameter.typed {
+                ValueType::Int32(Some(value)) => (ColumnType::Int64, Value::int64(i64::from(*value))),
+                ValueType::Int64(Some(value)) => (
+                    ColumnType::Numeric,
+                    Value::numeric(bigdecimal::BigDecimal::from(*value)),
+                ),
+                ValueType::Numeric(Some(value)) => (ColumnType::Numeric, Value::numeric(value.clone())),
+                _ => (
+                    ColumnType::Double,
+                    expected.map_or_else(Value::null_double, Value::double),
+                ),
+            };
+            assert_eq!(result.types[0], expected_type, "{parameter:?}");
+            assert_eq!(result.into_single()?["total"], expected_value, "{parameter:?}");
+            continue;
+        }
         assert_eq!(result.types[0], crate::connector::ColumnType::Double, "{parameter:?}");
         let row = result.into_single()?;
         assert_eq!(row["total"].as_f64(), expected, "{parameter:?}");
@@ -3871,8 +3941,8 @@ async fn oracle_numeric_parameters_follow_inferred_and_explicit_types(api: &mut 
 #[cfg(feature = "mysql")]
 #[test_each_connector(tags("mysql"))]
 async fn sum_float_parameter_precision(api: &mut dyn TestApi) -> crate::Result<()> {
-    // Keep the native MySQL precision contract separate from basic binding:
-    // R3 currently rounds this SUM result even with the full input wire text.
+    // Preserve the exact f64 expansion used by native MySQL. Accidentally
+    // binding this numeric AST parameter as TEXT makes R3 round the SUM.
     let query = Select::default().value(sum(Value::float(0.1)).alias("total"));
     let result = api.conn().select(query).await?;
     assert_eq!(result.types[0], crate::connector::ColumnType::Double);

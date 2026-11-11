@@ -107,7 +107,7 @@ async fn simple_view_from_two_tables(api: &mut TestApi) -> TestResult {
 
         view Schwuser {
           id           Int?
-          name         String? @db.Text
+          name         String? @db.VarChar(511)
           introduction String? @db.Text
         }
     "#]];
@@ -117,7 +117,7 @@ async fn simple_view_from_two_tables(api: &mut TestApi) -> TestResult {
     let expected = expect![[r#"
         SELECT
           u.id,
-          concat_text(
+          concat_varchar(
             VARIADIC ARRAY [(u.first_name)::text, ' '::text, (u.last_name)::text]
           ) AS name,
           p.introduction
@@ -240,12 +240,12 @@ async fn views_are_rendered_with_enums(api: &mut TestApi) -> TestResult {
           val B_val?
         }
 
-        enum B_val {
+        enum A_val {
           a
           b
         }
 
-        enum A_val {
+        enum B_val {
           a
           b
         }

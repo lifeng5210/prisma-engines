@@ -44,9 +44,9 @@ enum Status {
 // CREATE TABLE "Post" (
 //     "id" NUMBER(10,0) NOT NULL,
 //     "accountId" NUMBER(10,0) NOT NULL,
-//     "status" "Status" NOT NULL DEFAULT 'DRAFT',
+//     "status" "Status" DEFAULT 'DRAFT' NOT NULL,
 //     "amount" NUMBER(12,4) NOT NULL,
-//     "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+//     "createdAt" TIMESTAMP(3) DEFAULT CURRENT_TIMESTAMP NOT NULL,
 //     CONSTRAINT "Post_pkey" PRIMARY KEY ("id")
 // );
 //

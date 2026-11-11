@@ -848,8 +848,8 @@ fn run_native_temporal_cast(
     buffers: &mut CastBuffers<'_>,
 ) {
     let sql_type = match target {
-        "UnsignedInt" => "sys.uint4".to_owned(),
-        "UnsignedBigInt" => "sys.uint8".to_owned(),
+        "UnsignedInt" => "INTEGER UNSIGNED".to_owned(),
+        "UnsignedBigInt" => "BIGINT UNSIGNED".to_owned(),
         _ => target.to_ascii_uppercase(),
     };
     let insert = expand_cases(

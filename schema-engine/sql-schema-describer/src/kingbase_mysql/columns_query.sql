@@ -49,4 +49,5 @@ FROM
 WHERE
     table_schema = ?
 ORDER BY
+    BINARY table_name,
     ordinal_position

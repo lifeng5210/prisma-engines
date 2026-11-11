@@ -385,7 +385,7 @@ fn all_kingbase_mysql_column_types_must_work(api: TestApi) {
             Some(KingbaseMySqlType::SmallInt),
         ),
         ("tinyint_value", ColumnTypeFamily::Int, Some(KingbaseMySqlType::TinyInt)),
-        ("tinyint_bool", ColumnTypeFamily::Boolean, None),
+        ("tinyint_bool", ColumnTypeFamily::Int, Some(KingbaseMySqlType::TinyInt)),
         (
             "mediumint_value",
             ColumnTypeFamily::Int,

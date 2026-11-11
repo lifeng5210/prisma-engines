@@ -465,12 +465,6 @@ fn fulltext_index_length_attribute() {
 
         let expectation = match provider {
             Provider::KingbaseMysql => expect![[r#"
-                [1;91merror[0m: [1mError parsing attribute "@@fulltext": The length argument is not supported in an index definition with the current connector[0m
-                  [1;94m-->[0m  [4mschema.prisma:15[0m
-                [1;94m   | [0m
-                [1;94m14 | [0m
-                [1;94m15 | [0m  [1;91m@@fulltext([a(length: 30), b])[0m
-                [1;94m   | [0m
                 [1;91merror[0m: [1mError parsing attribute "@@fulltext": The length argument is not supported in a @@fulltext attribute.[0m
                   [1;94m-->[0m  [4mschema.prisma:15[0m
                 [1;94m   | [0m

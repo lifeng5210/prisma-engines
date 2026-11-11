@@ -15,7 +15,7 @@ async fn regression_expression_and_escaped_defaults_are_introspected(api: &mut T
     let expected = expect![[r#"
         model repaired_defaults {
           id      Int     @id
-          derived String  @default(dbgenerated("upper('abc'::text)")) @db.VarChar(50)
+          derived String  @default(dbgenerated("upper_varchar('abc'::varchar)")) @db.VarChar(50)
           missing String? @default(dbgenerated("NULLIF('a'::text, 'a'::text)")) @db.VarChar(50)
           quoted  String  @default("a''b") @db.VarChar(50)
           slashes String  @default("C:\\\\path") @db.VarChar(50)

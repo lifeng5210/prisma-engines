@@ -44,7 +44,7 @@ use super::{
     url::{SslAcceptMode, SslParams},
 };
 use kingbase_postgres_native_tls::MakeTlsConnector;
-use kingbase_tokio_postgres::{Client, types::Type};
+use kingbase_tokio_postgres::{Client, Statement, types::Type};
 
 const DB_SYSTEM_NAME: &str = "kingbase";
 
@@ -315,11 +315,39 @@ impl KingbaseMysql {
         }
     }
 
-    async fn query_raw_impl(&self, sql: &str, params: &[Value<'_>], types: &[Type]) -> crate::Result<ResultSet> {
-        self.check_bind_variables_len(params)?;
-        let params = conversion::conv_params(params)?;
-
-        let statement = self.perform_io(self.client.prepare_typed(sql, types)).await?;
+    async fn prepare_statement(
+        &self,
+        sql: &str,
+        params: &[Value<'_>],
+        types: Option<&[Type]>,
+    ) -> crate::Result<Statement> {
+        let mut statement = self
+            .perform_io(self.client.prepare_typed(sql, types.unwrap_or_default()))
+            .await?;
+        if types.is_none() {
+            // AST numbers must not become text operands in JSON comparisons or
+            // SUM. Preserve concrete column types (BIT and temporal types in
+            // particular), and refine only numeric parameters inferred as TEXT.
+            let mut refined = statement.params().to_vec();
+            let mut changed = false;
+            for (parameter, typ) in params.iter().zip(&mut refined) {
+                if *typ != Type::TEXT || parameter.is_null() {
+                    continue;
+                }
+                *typ = match &parameter.typed {
+                    crate::ast::ValueType::Int32(_) => Type::INT4,
+                    crate::ast::ValueType::Int64(_) => Type::INT8,
+                    // MySQL evaluates FLOAT query parameters as doubles.
+                    crate::ast::ValueType::Float(_) | crate::ast::ValueType::Double(_) => Type::FLOAT8,
+                    crate::ast::ValueType::Numeric(_) => Type::NUMERIC,
+                    _ => continue,
+                };
+                changed = true;
+            }
+            if changed {
+                statement = self.perform_io(self.client.prepare_typed(sql, &refined)).await?;
+            }
+        }
         for typ in statement
             .params()
             .iter()
@@ -336,7 +364,22 @@ impl KingbaseMysql {
             .build());
         }
 
-        let mut rows = Box::pin(self.perform_io(self.client.query_raw(&statement, params)).await?);
+        Ok(statement)
+    }
+
+    async fn query_raw_impl(
+        &self,
+        sql: &str,
+        params: &[Value<'_>],
+        types: Option<&[Type]>,
+    ) -> crate::Result<ResultSet> {
+        self.check_bind_variables_len(params)?;
+        let converted_params = conversion::conv_params(params)?;
+        let statement = self.prepare_statement(sql, params, types).await?;
+        let mut rows = Box::pin(
+            self.perform_io(self.client.query_raw(&statement, converted_params))
+                .await?,
+        );
 
         let names = statement
             .columns()
@@ -423,6 +466,40 @@ mod tests {
     use crate::{connector::Queryable, single::Quaint, tests::test_api::kingbase_mysql::CONN_STR};
 
     #[tokio::test]
+    async fn r3_tinyint_parameters_reject_overflow_without_inserting_rows() {
+        let connection = Quaint::new(CONN_STR.as_str()).await.unwrap();
+        let table = format!("r3_tinyint_{}", uuid::Uuid::new_v4().simple());
+        connection
+            .raw_cmd(&format!("CREATE TEMPORARY TABLE `{table}` (value TINYINT)"))
+            .await
+            .unwrap();
+        let insert = format!("INSERT INTO `{table}` VALUES (?)");
+        let select = format!("SELECT value FROM `{table}`");
+
+        for integer in [i32::MIN, -129, 128, 255, 256, i32::MAX] {
+            assert!(
+                connection.execute_raw(&insert, &[Value::int32(integer)]).await.is_err(),
+                "out-of-range value {integer} was accepted"
+            );
+            let result = connection.query_raw(&select, &[]).await.unwrap();
+            assert!(result.is_empty(), "out-of-range value {integer} inserted a row");
+        }
+
+        for integer in [-128, -1, 0, 1, 127] {
+            connection.execute_raw(&insert, &[Value::int32(integer)]).await.unwrap();
+            let result = connection.query_raw(&select, &[]).await.unwrap();
+            assert_eq!(result.len(), 1);
+            assert_eq!(result.first().unwrap()[0].as_i32(), Some(integer));
+            connection.raw_cmd(&format!("DELETE FROM `{table}`")).await.unwrap();
+        }
+
+        connection.execute_raw(&insert, &[Value::null_int32()]).await.unwrap();
+        let result = connection.query_raw(&select, &[]).await.unwrap();
+        assert_eq!(result.len(), 1);
+        assert!(result.first().unwrap()[0].is_null());
+    }
+
+    #[tokio::test]
     async fn r3_bit_byte_parameters_preserve_non_byte_aligned_values() {
         let connection = Quaint::new(CONN_STR.as_str()).await.unwrap();
         connection.raw_cmd("BEGIN").await.unwrap();
@@ -463,6 +540,96 @@ mod tests {
         .await;
         connection.raw_cmd("ROLLBACK").await.unwrap();
         outcome.unwrap();
+    }
+
+    #[tokio::test]
+    async fn r3_untyped_single_byte_bit_parameters_preserve_boolean_compatibility() {
+        let connection = Quaint::new(CONN_STR.as_str()).await.unwrap();
+        for width in [1, 7, 8] {
+            let table = format!("r3_bit_boolean_{}", uuid::Uuid::new_v4().simple());
+            connection
+                .raw_cmd(&format!("CREATE TEMPORARY TABLE `{table}` (value BIT({width}))"))
+                .await
+                .unwrap();
+            for byte in [0, 1] {
+                connection
+                    .execute_raw(
+                        &format!("INSERT INTO `{table}` VALUES (?)"),
+                        &[Value::bytes(vec![byte])],
+                    )
+                    .await
+                    .unwrap();
+                let result = connection
+                    .query_raw(&format!("SELECT value FROM `{table}`"), &[])
+                    .await
+                    .unwrap();
+                let value = &result.first().unwrap()[0];
+                if width == 1 {
+                    assert_eq!(value.as_bool(), Some(byte == 1));
+                } else {
+                    assert_eq!(value.as_bytes(), Some([byte].as_slice()));
+                }
+                connection.raw_cmd(&format!("DELETE FROM `{table}`")).await.unwrap();
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn r3_bit_parameters_use_native_width_for_zero_and_boundary_values() {
+        use crate::ast::{Insert, TypeDataLength};
+
+        let connection = Quaint::new(CONN_STR.as_str()).await.unwrap();
+        for width in [7_u16, 8, 9, 17, 64] {
+            let table = format!("r3_bit_width_{}", uuid::Uuid::new_v4().simple());
+            connection
+                .raw_cmd(&format!("CREATE TEMPORARY TABLE `{table}` (value BIT({width}))"))
+                .await
+                .unwrap();
+            let max = if width == 64 { u64::MAX } else { (1_u64 << width) - 1 };
+            let mut values = vec![None, Some(0), Some(1), Some(max)];
+            if width == 64 {
+                values.push(Some(420666));
+            }
+            for number in values {
+                let expected = number.map(|number| number.to_be_bytes()[8 - usize::from(width.div_ceil(8))..].to_vec());
+                let parameter = match &expected {
+                    Some(bytes) => Value::bytes(bytes.clone()),
+                    None => Value::null_bytes(),
+                }
+                .with_native_column_type(Some(("BIT", Some(TypeDataLength::Constant(width)))));
+
+                for path in ["query", "execute", "raw", "typed_raw"] {
+                    let insert = Insert::single_into(table.as_str()).value("value", parameter.clone());
+                    let sql = format!("INSERT INTO `{table}` (value) VALUES (?)");
+                    match path {
+                        "query" => {
+                            connection.query(insert.into()).await.unwrap();
+                        }
+                        "execute" => {
+                            connection.execute(insert.into()).await.unwrap();
+                        }
+                        "raw" => {
+                            connection.execute_raw(&sql, &[parameter.clone()]).await.unwrap();
+                        }
+                        "typed_raw" => {
+                            connection.execute_raw_typed(&sql, &[parameter.clone()]).await.unwrap();
+                        }
+                        _ => unreachable!(),
+                    }
+                    let result = connection
+                        .query_raw(&format!("SELECT value FROM `{table}`"), &[])
+                        .await
+                        .unwrap();
+                    assert_eq!(result.types(), &[ColumnType::Bytes]);
+                    assert_eq!(
+                        result.first().unwrap()[0].as_bytes(),
+                        expected.as_deref(),
+                        "BIT({width}), {number:?}, {path}"
+                    );
+                    connection.raw_cmd(&format!("DELETE FROM `{table}`")).await.unwrap();
+                }
+            }
+        }
     }
 
     #[tokio::test]
@@ -695,8 +862,7 @@ mod tests {
             (Value::numeric("1E-31".parse().unwrap()), Some(1e-31)),
             (Value::null_numeric(), None),
         ] {
-            let query = crate::ast::Select::default().value(crate::ast::sum(parameter));
-            let result = connection.query(query.into()).await.unwrap();
+            let result = connection.query_raw("SELECT SUM(?)", &[parameter]).await.unwrap();
             assert_eq!(result.types(), &[ColumnType::Double]);
             let row = result.first().unwrap();
             assert_eq!(row[0].as_f64(), expected);
@@ -705,7 +871,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn describe_query_reports_text_for_a_double_parameter() {
+    async fn describe_query_infers_a_double_parameter_from_the_column() {
         let connection = Quaint::new(CONN_STR.as_str()).await.unwrap();
 
         connection
@@ -719,10 +885,9 @@ mod tests {
             .unwrap();
 
         assert_eq!(described.parameters.len(), 1);
-        // Kingbase MySQL reports `?` as text in prepared-statement metadata even
-        // when it is compared to a DOUBLE column. Typed SQL callers can declare
-        // the intended parameter type explicitly with `@param {Float}`.
-        assert_eq!(described.parameters[0].typ, ColumnType::Text);
+        // Unlike an unconstrained `SELECT ?`, the comparison supplies enough
+        // context for R3 to infer DOUBLE in prepared-statement metadata.
+        assert_eq!(described.parameters[0].typ, ColumnType::Double);
     }
 }
 
@@ -732,19 +897,22 @@ impl_default_TransactionCapable!(KingbaseMysql);
 impl Queryable for KingbaseMysql {
     async fn query(&self, query: Query<'_>) -> crate::Result<ResultSet> {
         let (sql, params) = KingbaseMysqlVisitor::build(query)?;
-        self.query_raw(sql.as_str(), &params).await
+        trace::query(DB_SYSTEM_NAME, &sql, &params, || async {
+            self.query_raw_impl(&sql, &params, None).await
+        })
+        .await
     }
 
     async fn query_raw(&self, sql: &str, params: &[Value<'_>]) -> crate::Result<ResultSet> {
         trace::query(DB_SYSTEM_NAME, sql, params, move || async move {
-            self.query_raw_impl(sql, params, &[]).await
+            self.query_raw_impl(sql, params, Some(&[])).await
         })
         .await
     }
 
     async fn query_raw_typed(&self, sql: &str, params: &[Value<'_>]) -> crate::Result<ResultSet> {
         trace::query(DB_SYSTEM_NAME, sql, params, move || async move {
-            self.query_raw_impl(sql, params, &conversion::params_to_types(params))
+            self.query_raw_impl(sql, params, Some(&conversion::params_to_types(params)))
                 .await
         })
         .await
@@ -752,19 +920,22 @@ impl Queryable for KingbaseMysql {
 
     async fn execute(&self, query: Query<'_>) -> crate::Result<u64> {
         let (sql, params) = KingbaseMysqlVisitor::build(query)?;
-        self.execute_raw(sql.as_str(), &params).await
+        trace::query(DB_SYSTEM_NAME, &sql, &params, || async {
+            self.execute_raw_with_types(&sql, &params, None).await
+        })
+        .await
     }
 
     async fn execute_raw(&self, sql: &str, params: &[Value<'_>]) -> crate::Result<u64> {
         trace::query(DB_SYSTEM_NAME, sql, params, move || async move {
-            self.execute_raw_with_types(sql, params, &[]).await
+            self.execute_raw_with_types(sql, params, Some(&[])).await
         })
         .await
     }
 
     async fn execute_raw_typed(&self, sql: &str, params: &[Value<'_>]) -> crate::Result<u64> {
         trace::query(DB_SYSTEM_NAME, sql, params, move || async move {
-            self.execute_raw_with_types(sql, params, &conversion::params_to_types(params))
+            self.execute_raw_with_types(sql, params, Some(&conversion::params_to_types(params)))
                 .await
         })
         .await
@@ -874,27 +1045,17 @@ impl Queryable for KingbaseMysql {
 }
 
 impl KingbaseMysql {
-    async fn execute_raw_with_types(&self, sql: &str, params: &[Value<'_>], types: &[Type]) -> crate::Result<u64> {
+    async fn execute_raw_with_types(
+        &self,
+        sql: &str,
+        params: &[Value<'_>],
+        types: Option<&[Type]>,
+    ) -> crate::Result<u64> {
         self.check_bind_variables_len(params)?;
-        let params = conversion::conv_params(params)?;
-        let statement = self.perform_io(self.client.prepare_typed(sql, types)).await?;
-        for typ in statement
-            .params()
-            .iter()
-            .chain(statement.columns().iter().map(|column| column.type_()))
-        {
-            column_type::ensure_supported_type(typ)?;
-        }
+        let converted_params = conversion::conv_params(params)?;
+        let statement = self.prepare_statement(sql, params, types).await?;
 
-        if statement.params().len() != params.len() {
-            return Err(Error::builder(ErrorKind::IncorrectNumberOfParameters {
-                expected: statement.params().len(),
-                actual: params.len(),
-            })
-            .build());
-        }
-
-        self.perform_io(self.client.execute(&statement, params.as_slice()))
+        self.perform_io(self.client.execute(&statement, converted_params.as_slice()))
             .await
     }
 }

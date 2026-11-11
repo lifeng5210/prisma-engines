@@ -792,8 +792,8 @@ fn temporal_values_use_native_numeric_conversion(mut api: TestApi) {
     for (native, precision, input, expected) in [
         ("Date", 10, "2026-10-24", "20261024.00"),
         ("Time(3)", 8, "12:34:56.789", "123456.79"),
-        ("DateTime(3)", 16, "2026-10-24 12:34:56.789", "20261024123456.00"),
-        ("Timestamp(3)", 16, "2026-10-24 12:34:56.789", "20261024123456.80"),
+        ("DateTime(3)", 16, "2026-10-24 12:34:56.789", "20261024123456.79"),
+        ("Timestamp(3)", 16, "2026-10-24 12:34:56.789", "20261024123456.79"),
     ] {
         let source = format!("model TemporalDecimal {{\n id Int @id\n value DateTime? @db.{native}\n }}");
         let target = format!("model TemporalDecimal {{\n id Int @id\n value Decimal? @db.Decimal({precision},2)\n }}");

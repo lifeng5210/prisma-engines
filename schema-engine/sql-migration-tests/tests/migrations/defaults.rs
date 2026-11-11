@@ -28,7 +28,7 @@ fn datetime_defaults_work(api: TestApi) {
     } else if api.is_mysql_8() || api.is_mysql_5_6() {
         DefaultValue::db_generated("'2018-01-27 08:00:00.000'")
     } else if api.tags().contains(Tags::KingbaseMysql) {
-        DefaultValue::db_generated("'2018-01-27 16:00:00'::datetime")
+        DefaultValue::db_generated("'2018-01-27 16:00:00'")
     } else {
         DefaultValue::db_generated("'2018-01-27 08:00:00 +00:00'")
     };

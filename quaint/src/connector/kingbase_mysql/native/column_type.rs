@@ -37,7 +37,9 @@ pub(crate) fn ensure_supported_type(typ: &KingbaseType) -> crate::Result<()> {
 /// Kingbase's MySQL-compatible BIT type stores the declared bit width directly
 /// in typmod. A negative typmod means that no fixed length was declared.
 pub(crate) fn mysql_bit_length_from_type_modifier(type_modifier: i32) -> Option<u64> {
-    u64::try_from(type_modifier).ok().filter(|length| *length > 0)
+    u64::try_from(type_modifier)
+        .ok()
+        .filter(|length| (1..=64).contains(length))
 }
 
 pub(crate) fn is_mysql_bit_one(column: &KingbaseColumn) -> bool {
@@ -114,10 +116,10 @@ macro_rules! create_pg_mapping {
                       )*
                   )*
                   ref x => match x.kind() {
-                      KingbaseKind::Enum(_) | KingbaseKind::MySqlEnum(_) => {
+                      KingbaseKind::Enum(_) => {
                           KingbaseColumnType::Enum(KingbaseColumnValidatorText)
                       }
-                      KingbaseKind::MySqlSet => KingbaseColumnType::Set(KingbaseColumnValidatorText),
+                      KingbaseKind::Set => KingbaseColumnType::Set(KingbaseColumnValidatorText),
                       _ => KingbaseColumnType::Unknown(KingbaseColumnValidatorText),
                   },
               }
@@ -139,9 +141,9 @@ macro_rules! create_pg_mapping {
 
       impl From<&KingbaseType> for ColumnType {
           fn from(ty: &KingbaseType) -> ColumnType {
-              // MySQL ENUMs are exposed as a first-class enum by the MySQL
-              // connector. Keep PostgreSQL enums on their existing Text path.
-              if matches!(ty.kind(), KingbaseKind::MySqlEnum(_)) {
+              // The driver uses Kind::Enum for both PostgreSQL enums and KES
+              // MySQL enums. KES names its generated MySQL types Enum_*.
+              if matches!(ty.kind(), KingbaseKind::Enum(_)) && ty.name().starts_with("Enum_") {
                   ColumnType::Enum
               } else {
                   KingbaseColumnType::from_pg_type(&ty).into()
@@ -226,6 +228,8 @@ mod tests {
     fn mysql_bit_typmod_is_the_declared_bit_width() {
         assert_eq!(mysql_bit_length_from_type_modifier(1), Some(1));
         assert_eq!(mysql_bit_length_from_type_modifier(8), Some(8));
+        assert_eq!(mysql_bit_length_from_type_modifier(64), Some(64));
+        assert_eq!(mysql_bit_length_from_type_modifier(65), None);
         assert_eq!(mysql_bit_length_from_type_modifier(-1), None);
     }
 
@@ -242,11 +246,11 @@ mod tests {
 
     #[test]
     fn mysql_set_is_text_and_mysql_enum_is_enum() {
-        let set_type = Type::new("set_type".to_owned(), 100_001, Kind::MySqlSet, "sys".to_owned());
+        let set_type = Type::new("set_type".to_owned(), 100_001, Kind::Set, "sys".to_owned());
         let enum_type = Type::new(
-            "enum_type".to_owned(),
+            "Enum_status".to_owned(),
             100_002,
-            Kind::MySqlEnum(vec!["draft".to_owned(), "published".to_owned()]),
+            Kind::Enum(vec!["draft".to_owned(), "published".to_owned()]),
             "sys".to_owned(),
         );
 
@@ -260,5 +264,19 @@ mod tests {
             KingbaseColumnType::from_pg_type(&enum_type),
             KingbaseColumnType::Enum(_)
         ));
+        let public_enum = Type::new(
+            "Enum_status".to_owned(),
+            100_003,
+            Kind::Enum(vec!["draft".to_owned()]),
+            "public".to_owned(),
+        );
+        assert_eq!(ColumnType::from(&public_enum), ColumnType::Enum);
+        let pg_enum = Type::new(
+            "status".to_owned(),
+            100_004,
+            Kind::Enum(vec!["draft".to_owned()]),
+            "public".to_owned(),
+        );
+        assert_eq!(ColumnType::from(&pg_enum), ColumnType::Text);
     }
 }

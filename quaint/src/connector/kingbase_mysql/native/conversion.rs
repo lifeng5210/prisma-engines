@@ -1,7 +1,7 @@
 mod decimal;
 
 use crate::{
-    ast::{OpaqueType, Value, ValueType},
+    ast::{NativeColumnType, OpaqueType, TypeDataLength, Value, ValueType},
     connector::queryable::{GetRow, ToColumnNames},
     error::{Error, ErrorKind},
     prelude::EnumVariant,
@@ -12,10 +12,10 @@ use super::column_type::*;
 use bigdecimal::{BigDecimal, FromPrimitive, ToPrimitive, num_bigint::BigInt};
 use bit_vec::BitVec;
 use bytes::BytesMut;
-use chrono::{DateTime, NaiveDateTime, Utc};
+use chrono::{DateTime, Datelike, NaiveDate, NaiveDateTime, NaiveTime, Timelike, Utc};
 
 pub(crate) use decimal::DecimalWrapper;
-use kingbase_postgres_types::kingbase::{MySqlBit, MySqlJsonPath};
+use kingbase_postgres_types::kingbase::{MySqlBit, MySqlBitError, MySqlDate, MySqlJsonPath, MySqlTime};
 use kingbase_postgres_types::{FromSql, ToSql, WrongType};
 use kingbase_tokio_postgres::{
     Row as KingbaseRow, Statement as KingbaseStatement,
@@ -65,6 +65,7 @@ pub(crate) fn params_to_types(params: &[Value<'_>]) -> Vec<KingbaseType> {
                 ValueType::Text(_) => KingbaseType::TEXT,
                 // Enums are user-defined types, we can't statically infer them, so we let PG infer it
                 ValueType::Enum(_, _) => KingbaseType::UNKNOWN,
+                ValueType::Bytes(_) if p.native_column_type_name() == Some("BIT") => KingbaseType::MYSQL_SYS_BIT,
                 ValueType::Bytes(_) => KingbaseType::MYSQL_LONGBLOB,
                 ValueType::Boolean(_) => KingbaseType::MYSQL_TINYINT,
                 ValueType::Char(_) => KingbaseType::CHAR,
@@ -275,7 +276,8 @@ impl GetRow for KingbaseRow {
                     }
                     KingbaseColumnTypeBytes::MYSQL_SYS_BIT => {
                         let val: Option<MySqlBit> = row.try_get(i)?;
-                        ValueType::Bytes(v.read(val.map(|value| Cow::Owned(mysql_bit_to_bytes(&value)))))
+                        let bit_width = mysql_bit_length_from_type_modifier(column.type_modifier());
+                        ValueType::Bytes(v.read(val.map(|value| Cow::Owned(mysql_bit_to_bytes(&value, bit_width)))))
                     }
                     KingbaseColumnTypeBytes::MYSQL_BLOB
                     | KingbaseColumnTypeBytes::MYSQL_LONGBLOB
@@ -346,13 +348,17 @@ impl GetRow for KingbaseRow {
                     }
                 },
                 KingbaseColumnType::Date(ty, v) => match ty {
-                    KingbaseColumnTypeDate::DATE | KingbaseColumnTypeDate::MYSQL_SYS_DATE => {
-                        ValueType::Date(v.read(row.try_get(i)?))
+                    KingbaseColumnTypeDate::DATE => ValueType::Date(v.read(row.try_get(i)?)),
+                    KingbaseColumnTypeDate::MYSQL_SYS_DATE => {
+                        let date: Option<MySqlDate> = row.try_get(i)?;
+                        ValueType::Date(v.read(date.map(mysql_date_to_naive).transpose()?))
                     }
                 },
                 KingbaseColumnType::Time(ty, v) => match ty {
-                    KingbaseColumnTypeTime::TIME | KingbaseColumnTypeTime::MYSQL_SYS_TIME => {
-                        ValueType::Time(v.read(row.try_get(i)?))
+                    KingbaseColumnTypeTime::TIME => ValueType::Time(v.read(row.try_get(i)?)),
+                    KingbaseColumnTypeTime::MYSQL_SYS_TIME => {
+                        let time: Option<MySqlTime> = row.try_get(i)?;
+                        ValueType::Time(v.read(time.map(mysql_time_to_naive).transpose()?))
                     }
                     KingbaseColumnTypeTime::TIMETZ => {
                         let val: Option<TimeTz> = row.try_get(i)?;
@@ -460,9 +466,20 @@ impl ToSql for Value<'_> {
                 }
                 _ => None,
             },
-            (ValueType::Int32(integer), &KingbaseType::MYSQL_TINYINT) => {
-                integer.map(|integer| (integer as i8).to_sql(ty, out))
-            }
+            (ValueType::Int32(integer), &KingbaseType::MYSQL_TINYINT) => match integer {
+                Some(i) => {
+                    let integer = i8::try_from(*i).map_err(|_| {
+                        let kind = ErrorKind::conversion(format!(
+                            "Unable to fit integer value '{i}' into a TINYINT (8-bit signed integer)."
+                        ));
+
+                        Error::builder(kind).build()
+                    })?;
+
+                    Some(integer.to_sql(ty, out))
+                }
+                _ => None,
+            },
             // Kingbase may infer a MySQL `tinyint(1)` parameter as BOOL. Encode
             // the integer value using BOOL's one-byte wire representation in
             // that case instead of sending an i32 payload.
@@ -670,7 +687,7 @@ impl ToSql for Value<'_> {
                 Ok(IsNull::No)
             }),
             (ValueType::Bytes(bytes), &KingbaseType::MYSQL_SYS_BIT) => bytes.as_ref().map(|bytes| {
-                let bit = mysql_bit_from_bytes(bytes)?;
+                let bit = mysql_bit_from_bytes(bytes, self.native_column_type.as_ref())?;
                 bit.to_sql(ty, out)
             }),
             (ValueType::Bytes(bytes), _) => bytes.as_ref().map(|bytes| bytes.as_ref().to_sql(ty, out)),
@@ -689,11 +706,21 @@ impl ToSql for Value<'_> {
             (ValueType::Json(value), _) => value.as_ref().map(|value| value.to_sql(ty, out)),
             (ValueType::Xml(value), _) => value.as_ref().map(|value| value.to_sql(ty, out)),
             (ValueType::Uuid(value), _) => value.map(|value| value.to_sql(ty, out)),
-            (ValueType::DateTime(value), &KingbaseType::DATE | &KingbaseType::MYSQL_SYS_DATE) => {
-                value.map(|value| value.date_naive().to_sql(ty, out))
+            (ValueType::DateTime(value), &KingbaseType::MYSQL_SYS_DATE) => {
+                value.map(|value| mysql_date_from_naive(value.date_naive())?.to_sql(ty, out))
             }
+            (ValueType::Date(value), &KingbaseType::MYSQL_SYS_DATE) => {
+                value.map(|value| mysql_date_from_naive(value)?.to_sql(ty, out))
+            }
+            (ValueType::DateTime(value), &KingbaseType::DATE) => value.map(|value| value.date_naive().to_sql(ty, out)),
             (ValueType::Date(value), _) => value.map(|value| value.to_sql(ty, out)),
+            (ValueType::Time(value), &KingbaseType::MYSQL_SYS_TIME) => {
+                value.map(|value| mysql_time_from_naive(value)?.to_sql(ty, out))
+            }
             (ValueType::Time(value), _) => value.map(|value| value.to_sql(ty, out)),
+            (ValueType::DateTime(value), &KingbaseType::MYSQL_SYS_TIME) => {
+                value.map(|value| mysql_time_from_naive(value.time())?.to_sql(ty, out))
+            }
             (ValueType::DateTime(value), &KingbaseType::TIME) => value.map(|value| value.time().to_sql(ty, out)),
             (ValueType::DateTime(value), &KingbaseType::TIMETZ) => value.map(|value| {
                 let result = value.time().to_sql(ty, out)?;
@@ -730,37 +757,92 @@ impl ToSql for Value<'_> {
     kingbase_tokio_postgres::types::to_sql_checked!();
 }
 
-// Prisma/MySQL Bytes are a big-endian numeric value; the BIT wire payload
-// instead aligns its significant bits to the most significant bit of a byte.
-fn mysql_bit_from_bytes(bytes: &[u8]) -> Result<MySqlBit, Box<dyn StdError + Send + Sync>> {
-    let Some(first) = bytes.iter().position(|byte| *byte != 0) else {
-        return Ok(MySqlBit::from_bool(false));
-    };
-    let bytes = &bytes[first..];
-    let leading = bytes[0].leading_zeros();
-    let payload = bytes
-        .iter()
-        .enumerate()
-        .map(|(index, byte)| {
-            ((u16::from(*byte) << leading) | (u16::from(bytes.get(index + 1).copied().unwrap_or(0)) >> (8 - leading)))
-                as u8
-        })
-        .collect::<Vec<_>>();
-    Ok(MySqlBit::new((bytes.len() * 8) as u64 - u64::from(leading), payload)?)
+fn mysql_date_from_naive(date: NaiveDate) -> Result<MySqlDate, Box<dyn StdError + Send + Sync>> {
+    Ok(MySqlDate::from_ymd(date.year(), date.month(), date.day())?)
 }
 
-fn mysql_bit_to_bytes(value: &MySqlBit) -> Vec<u8> {
-    let padding = (8 - value.bit_len() % 8) % 8;
-    value
-        .payload()
-        .iter()
-        .enumerate()
-        .map(|(index, byte)| {
-            ((u16::from(*byte) >> padding)
-                | (u16::from(index.checked_sub(1).map_or(0, |previous| value.payload()[previous])) << (8 - padding)))
-                as u8
+fn mysql_date_to_naive(date: MySqlDate) -> crate::Result<NaiveDate> {
+    let (year, month, day) = date.year_month_day();
+    NaiveDate::from_ymd_opt(year, month, day).ok_or_else(|| {
+        Error::builder(ErrorKind::value_out_of_range(format!(
+            "Kingbase MySQL date {date} is outside the supported date range."
+        )))
+        .build()
+    })
+}
+
+fn mysql_time_from_naive(time: NaiveTime) -> Result<MySqlTime, Box<dyn StdError + Send + Sync>> {
+    Ok(MySqlTime::from_parts(
+        false,
+        time.hour(),
+        time.minute() as u8,
+        time.second() as u8,
+        time.nanosecond() / 1_000,
+    )?)
+}
+
+fn mysql_time_to_naive(time: MySqlTime) -> crate::Result<NaiveTime> {
+    if time.is_valid_time_of_day()
+        && let Some(value) = NaiveTime::from_hms_micro_opt(
+            time.hours(),
+            u32::from(time.minutes()),
+            u32::from(time.seconds()),
+            time.microseconds(),
+        )
+    {
+        return Ok(value);
+    }
+    Err(Error::builder(ErrorKind::value_out_of_range(format!(
+        "Kingbase MySQL TIME duration {} microseconds cannot be represented as a time of day.",
+        time.micros()
+    )))
+    .build())
+}
+
+// Prisma/MySQL Bytes represent a big-endian integer. Keep the native BIT(n)
+// width when available, otherwise preserve the input byte width. Reducing the
+// width to significant bits makes R3 return a header shorter than its payload.
+fn mysql_bit_from_bytes(
+    bytes: &[u8],
+    native_type: Option<&NativeColumnType<'_>>,
+) -> Result<MySqlBit, Box<dyn StdError + Send + Sync>> {
+    if bytes.len() > 8 {
+        return Err(MySqlBitError::TooLong {
+            bit_len: bytes.len() as u64 * 8,
+        }
+        .into());
+    }
+
+    let bit_width = native_type
+        .filter(|native_type| native_type.name == "BIT")
+        .and_then(|native_type| match native_type.length {
+            Some(TypeDataLength::Constant(width)) => Some(u64::from(width)),
+            _ => None,
         })
-        .collect()
+        .unwrap_or_else(|| match bytes {
+            // Untyped 0/1 byte parameters can target BIT(1). Keep their
+            // single-bit representation; explicit BIT(n) always wins.
+            [] | [0] | [1] => 1,
+            _ => bytes.len() as u64 * 8,
+        });
+    let value = bytes.iter().fold(0_u64, |value, byte| (value << 8) | u64::from(*byte));
+
+    MySqlBit::from_u64(bit_width, value).map_err(Into::into)
+}
+
+fn mysql_bit_to_bytes(value: &MySqlBit, column_bit_width: Option<u64>) -> Vec<u8> {
+    let padding = (8 - value.bit_len() % 8) % 8;
+    // A parameter-bound value can retain its significant bit count in R3's
+    // header. MySQL fixed-width BIT results still include leading zero bytes.
+    let bit_width = column_bit_width.unwrap_or(value.bit_len()).max(value.bit_len());
+    let mut bytes = vec![0; bit_width.div_ceil(8) as usize];
+    let offset = bytes.len() - value.payload().len();
+    for (index, byte) in value.payload().iter().enumerate() {
+        bytes[offset + index] = ((u16::from(*byte) >> padding)
+            | (u16::from(index.checked_sub(1).map_or(0, |previous| value.payload()[previous])) << (8 - padding)))
+            as u8;
+    }
+    bytes
 }
 
 fn string_to_bits(s: &str) -> crate::Result<BitVec> {
@@ -803,27 +885,161 @@ mod tests {
     use super::*;
 
     #[test]
-    fn mysql_bit_bytes_encode_significant_bits_without_byte_padding() {
-        for (input, length, payload) in [
-            (vec![], 1, vec![0]),
-            (vec![0, 0], 1, vec![0]),
-            (vec![1], 1, vec![0x80]),
-            (vec![0, 1], 1, vec![0x80]),
-            (vec![0x7f], 7, vec![0xfe]),
-            (vec![0xaa], 8, vec![0xaa]),
-            (vec![1, 1], 9, vec![0x80, 0x80]),
-            (vec![1, 0xff], 9, vec![0xff, 0x80]),
-            (vec![1, 1, 1], 17, vec![0x80, 0x80, 0x80]),
-            (vec![0xff; 8], 64, vec![0xff; 8]),
+    fn mysql_tinyint_parameters_preserve_values_and_null() {
+        for integer in [-128, -1, 0, 1, 127] {
+            let mut buffer = BytesMut::new();
+            assert!(matches!(
+                Value::int32(integer)
+                    .to_sql_checked(&KingbaseType::MYSQL_TINYINT, &mut buffer)
+                    .unwrap(),
+                IsNull::No
+            ));
+            let decoded = i8::from_sql(&KingbaseType::MYSQL_TINYINT, &buffer).unwrap();
+            assert_eq!(i32::from(decoded), integer);
+        }
+
+        let mut buffer = BytesMut::new();
+        assert!(matches!(
+            Value::null_int32()
+                .to_sql_checked(&KingbaseType::MYSQL_TINYINT, &mut buffer)
+                .unwrap(),
+            IsNull::Yes
+        ));
+        assert!(buffer.is_empty());
+    }
+
+    #[test]
+    fn mysql_tinyint_parameters_reject_out_of_range_values() {
+        for integer in [i32::MIN, -129, 128, 255, 256, i32::MAX] {
+            let mut buffer = BytesMut::new();
+            let error = Value::int32(integer)
+                .to_sql_checked(&KingbaseType::MYSQL_TINYINT, &mut buffer)
+                .err()
+                .expect("out-of-range TINYINT parameter must be rejected");
+            let error = error.downcast_ref::<Error>().unwrap();
+            assert!(matches!(error.kind(), ErrorKind::ConversionError(_)));
+            assert!(buffer.is_empty(), "out-of-range value {integer} wrote a payload");
+        }
+    }
+
+    #[test]
+    fn mysql_date_parameters_use_the_driver_date_codec() {
+        for date in [
+            NaiveDate::from_ymd_opt(1970, 1, 1).unwrap(),
+            NaiveDate::from_ymd_opt(2000, 2, 29).unwrap(),
+            NaiveDate::from_ymd_opt(2026, 11, 11).unwrap(),
+            NaiveDate::from_ymd_opt(-4713, 11, 24).unwrap(),
+            NaiveDate::MAX,
+        ] {
+            let mut buffer = BytesMut::new();
+            Value::date(date)
+                .to_sql_checked(&KingbaseType::MYSQL_SYS_DATE, &mut buffer)
+                .unwrap();
+            let decoded = MySqlDate::from_sql(&KingbaseType::MYSQL_SYS_DATE, &buffer).unwrap();
+            assert_eq!(mysql_date_to_naive(decoded).unwrap(), date);
+        }
+        let instant = DateTime::parse_from_rfc3339("2026-11-11T12:34:56Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let mut buffer = BytesMut::new();
+        Value::datetime(instant)
+            .to_sql_checked(&KingbaseType::MYSQL_SYS_DATE, &mut buffer)
+            .unwrap();
+        let decoded = MySqlDate::from_sql(&KingbaseType::MYSQL_SYS_DATE, &buffer).unwrap();
+        assert_eq!(mysql_date_to_naive(decoded).unwrap(), instant.date_naive());
+        buffer.clear();
+        assert!(matches!(
+            Value::null_date()
+                .to_sql_checked(&KingbaseType::MYSQL_SYS_DATE, &mut buffer)
+                .unwrap(),
+            IsNull::Yes
+        ));
+        assert!(buffer.is_empty());
+    }
+
+    #[test]
+    fn mysql_dates_outside_chrono_range_report_an_error() {
+        let date = MySqlDate::from_ymd(300_000, 1, 1).unwrap();
+        assert!(matches!(
+            mysql_date_to_naive(date).unwrap_err().kind(),
+            ErrorKind::ValueOutOfRange { .. }
+        ));
+        let mut buffer = BytesMut::new();
+        assert!(
+            Value::date(NaiveDate::MIN)
+                .to_sql_checked(&KingbaseType::MYSQL_SYS_DATE, &mut buffer)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn mysql_time_parameters_use_the_driver_duration_codec() {
+        for time in [
+            NaiveTime::MIN,
+            NaiveTime::from_hms_micro_opt(12, 34, 56, 123_456).unwrap(),
+            NaiveTime::from_hms_micro_opt(23, 59, 59, 999_999).unwrap(),
+        ] {
+            let mut buffer = BytesMut::new();
+            Value::time(time)
+                .to_sql_checked(&KingbaseType::MYSQL_SYS_TIME, &mut buffer)
+                .unwrap();
+            let decoded = MySqlTime::from_sql(&KingbaseType::MYSQL_SYS_TIME, &buffer).unwrap();
+            assert_eq!(mysql_time_to_naive(decoded).unwrap(), time);
+        }
+        let instant = DateTime::parse_from_rfc3339("2026-11-11T12:34:56.123456Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let mut buffer = BytesMut::new();
+        Value::datetime(instant)
+            .to_sql_checked(&KingbaseType::MYSQL_SYS_TIME, &mut buffer)
+            .unwrap();
+        let decoded = MySqlTime::from_sql(&KingbaseType::MYSQL_SYS_TIME, &buffer).unwrap();
+        assert_eq!(mysql_time_to_naive(decoded).unwrap(), instant.time());
+        buffer.clear();
+        assert!(matches!(
+            Value::null_time()
+                .to_sql_checked(&KingbaseType::MYSQL_SYS_TIME, &mut buffer)
+                .unwrap(),
+            IsNull::Yes
+        ));
+        assert!(buffer.is_empty());
+    }
+
+    #[test]
+    fn mysql_time_durations_do_not_wrap_to_a_time_of_day() {
+        for micros in [-1, 86_400_000_000, MySqlTime::MAX_MICROS] {
+            assert!(matches!(
+                mysql_time_to_naive(MySqlTime::new(micros).unwrap()).unwrap_err().kind(),
+                ErrorKind::ValueOutOfRange { .. }
+            ));
+        }
+    }
+
+    #[test]
+    fn mysql_bit_parameters_preserve_byte_width_without_native_metadata() {
+        for (input, width, expected) in [
+            (vec![], 1, 0),
+            (vec![0], 1, 0),
+            (vec![0, 0], 16, 0),
+            (vec![1], 1, 1),
+            (vec![0, 1], 16, 1),
+            (vec![0x7f], 8, 0x7f),
+            (vec![0xaa], 8, 0xaa),
+            (vec![1, 1], 16, 0x101),
+            (vec![1, 0xff], 16, 0x1ff),
+            (vec![1, 1, 1], 24, 0x10101),
+            (vec![0, 0, 0, 0, 0, 6, 107, 58], 64, 420666),
+            (vec![0xff; 8], 64, u64::MAX),
         ] {
             let mut buffer = BytesMut::new();
             Value::bytes(input)
                 .to_sql(&KingbaseType::MYSQL_SYS_BIT, &mut buffer)
                 .unwrap();
-            assert_eq!(&buffer[..8], &u64::to_be_bytes(length));
-            assert_eq!(&buffer[8..], payload);
+            let decoded = MySqlBit::from_sql(&KingbaseType::MYSQL_SYS_BIT, &buffer).unwrap();
+            assert_eq!(decoded.bit_len(), width);
+            assert_eq!(decoded.to_u64(), expected);
         }
-        assert!(mysql_bit_from_bytes(&[1; 9]).is_err());
+        assert!(mysql_bit_from_bytes(&[1; 9], None).is_err());
         let mut buffer = BytesMut::new();
         assert!(matches!(
             Value::null_bytes()
@@ -832,6 +1048,31 @@ mod tests {
             IsNull::Yes
         ));
         assert!(buffer.is_empty());
+    }
+
+    #[test]
+    fn mysql_bit_parameters_use_native_width_and_reject_overflow() {
+        for width in [1, 7, 9, 17, 64] {
+            for expected in [0, 1] {
+                let parameter = Value::bytes(vec![expected as u8])
+                    .with_native_column_type(Some(("BIT", Some(TypeDataLength::Constant(width)))));
+                assert_eq!(params_to_types(&[parameter.clone()]), [KingbaseType::MYSQL_SYS_BIT]);
+                let mut buffer = BytesMut::new();
+                parameter.to_sql(&KingbaseType::MYSQL_SYS_BIT, &mut buffer).unwrap();
+                let decoded = MySqlBit::from_sql(&KingbaseType::MYSQL_SYS_BIT, &buffer).unwrap();
+                assert_eq!(decoded.bit_len(), u64::from(width));
+                assert_eq!(decoded.to_u64(), expected);
+            }
+        }
+        for (width, input) in [(7, vec![0x80]), (9, vec![2, 0]), (0, vec![0]), (65, vec![0])] {
+            let parameter =
+                Value::bytes(input).with_native_column_type(Some(("BIT", Some(TypeDataLength::Constant(width)))));
+            assert!(
+                parameter
+                    .to_sql(&KingbaseType::MYSQL_SYS_BIT, &mut BytesMut::new())
+                    .is_err()
+            );
+        }
     }
 
     #[test]
@@ -844,8 +1085,16 @@ mod tests {
             (17, vec![0x80, 0x80, 0x80], vec![1, 1, 1]),
             (64, vec![0xff; 8], vec![0xff; 8]),
         ] {
-            assert_eq!(mysql_bit_to_bytes(&MySqlBit::new(length, payload).unwrap()), expected);
+            assert_eq!(
+                mysql_bit_to_bytes(&MySqlBit::new(length, payload).unwrap(), None),
+                expected
+            );
         }
+        let significant = MySqlBit::from_u64(19, 0x066b3a).unwrap();
+        assert_eq!(
+            mysql_bit_to_bytes(&significant, Some(64)),
+            vec![0, 0, 0, 0, 0, 6, 0x6b, 0x3a]
+        );
         for value in [false, true] {
             let bit = MySqlBit::from_bool(value);
             assert_eq!(bit.as_bool(), Some(value));
