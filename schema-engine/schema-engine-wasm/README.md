@@ -18,9 +18,9 @@ rustup target add wasm32-unknown-unknown
 ```
 
 Install `wasm-bindgen-cli` at the version matching the resolved `wasm-bindgen`
-dependency in `Cargo.lock`, for example
-`cargo install --locked wasm-bindgen-cli --version <matching-version>`.
-The `wasm-bindgen` crate itself is a library, not the CLI package.
+dependency in `Cargo.lock`, using
+`cargo install --locked wasm-bindgen-cli --version <matching-version>`
+with `<matching-version>` replaced by that dependency version.
 Release/profiling optimization also requires the Binaryen `wasm-opt` used by
 `build.sh`; check that script before selecting the build profile.
 
@@ -36,8 +36,8 @@ From the root of the repository:
 
 - `SCHEMA_ENGINE_WASM_VERSION="$OUT_NPM_VERSION" make build-se-wasm`
 
-`SCHEMA_WASM_VERSION` instead configures `make build-schema-wasm`, the separate
-PSL/schema-tools package. It does not set the version for this Schema Engine package.
+For the separate PSL/schema-tools package, use
+`SCHEMA_WASM_VERSION="$OUT_NPM_VERSION" make build-schema-wasm`.
 
 By default, the build profile is `dev` in local builds, and `release` in CI builds.
 You can override this by setting the `WASM_BUILD_PROFILE` environment variable.
@@ -47,11 +47,10 @@ See [`./build.sh`](./build.sh) for more details.
 
 ## Example
 
-Using Node.js 20.9.0:
-
 ```bash
-❯ node --experimental-wasm-modules -e "const { version } = await import('@prisma/schema-engine-wasm'); console.log(version())" 
-(node:4977) ExperimentalWarning: Importing WebAssembly modules is an experimental feature and might change at any time
-(Use `node --trace-warnings ...` to show where the warning was created)
-4411ab2a4b97a8109bf19c2678742abde9ed60a4
+node --experimental-wasm-modules --input-type=module -e "const { version } = await import('@prisma/schema-engine-wasm'); console.log(version())"
 ```
+
+The command prints the revision of the installed Wasm build. This package's
+build script currently enables SQLite and PostgreSQL connectors; it is separate
+from the KES-enabled native Schema Engine and the schema-tools Wasm package.

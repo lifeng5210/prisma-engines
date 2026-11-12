@@ -26,12 +26,10 @@ SUBCOMMANDS:
     help    Prints this message or the help of the given subcommand(s)
 ```
 
-This is an interface summary. Current Prisma Config supplies `datasource.url`
-and, when configured, `datasource.shadowDatabaseUrl`; it has no
-`engine: 'classic'` or `engines: 'classic'` option. The native CLI's older help
-comment may still mention that removed configuration. JSON passed through
-`--datasource` uses `url` and `shadowDatabaseUrl` keys; it does not put URLs
-back into the PSL datasource block.
+Prisma Config supplies `datasource.url` and, when configured,
+`datasource.shadowDatabaseUrl`. JSON passed through `--datasource` uses `url`
+and `shadowDatabaseUrl` keys. Keep database URLs in `prisma.config.ts`; the
+PSL datasource block selects the provider.
 
 ### `cli` subcommand
 

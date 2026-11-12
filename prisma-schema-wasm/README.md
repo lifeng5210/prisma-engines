@@ -28,27 +28,29 @@ Source code and Kingbase-specific changes are maintained at
 <https://github.com/lifeng5210/prisma-engines>. The package is distributed
 under the Apache-2.0 license, consistent with its Prisma Engines source base.
 
-## Local Dev with Language-Tools
-When implementing features for `language-tools` in `prisma-engines`, to sync with your local dev environment for the `language-server`, one can do the following:
+## Local build
 
-### On first setup
-```
-# Install the latest Rust version with `rustup`
-# or update the latest Rust version with `rustup`
-rustup update
+Use the Rust toolchain pinned in `rust-toolchain.toml`. From the repository root:
+
+```sh
 rustup target add wasm32-unknown-unknown
-cargo update -p wasm-bindgen
-# Check the version defined in `prisma-schema-wasm/cargo.toml` for `wasm-bindgen` and replace `version` below:
-cargo install -f wasm-bindgen-cli@version
 ```
 
-### On Changes
+Install `wasm-bindgen-cli` at the version of `wasm-bindgen` resolved in
+`Cargo.lock`, using `cargo install --locked wasm-bindgen-cli --version <matching-version>`
+with `<matching-version>` replaced by that version. The packaging step also
+requires `jq`.
 
-```bash
-./prisma-schema-wasm/scripts/update-schema-wasm.sh
+Build the Node.js package from the repository root:
+
+```sh
+make build-schema-wasm
 ```
 
-This script has the following expectations:
-- `language-tools` is in the same dir as `prisma-engines`
-  - i.e. `dir/{prisma-engines,language-tools}`
-- it's run in the `prisma-engines` root folder
+The package is written to `target/prisma-schema-wasm`. `PROFILE` selects the
+Cargo build profile (default: `dev`), and `SCHEMA_WASM_VERSION` sets the package
+version (default: `0.0.0`).
+
+For language-server development, install this built package into the
+language-server project that consumes the schema APIs. The installation path
+and dependency name must match that project's package configuration.
