@@ -100,25 +100,20 @@ fn rewrite_full_text_search(sql: String, parameters: &[Value<'_>]) -> crate::Res
         let query_parameter_index = fulltext_query_parameter_index(query, &sql)?;
         // Validate the parameter shape without interpreting its search language.
         // Concrete and Query Compiler parameters both reach to_tsquery unchanged.
-        fulltext_query_parameter(parameters, query_parameter_index)?;
-        let tsquery_function = "to_tsquery";
+        validate_fulltext_query_parameter(parameters, query_parameter_index)?;
 
         output.push_str(&sql[cursor..match_start]);
 
         if is_fulltext_relevance_expression(&sql, match_start, against_end) {
             output.push_str("ts_rank(to_tsvector('simple', ");
             output.push_str(&document);
-            output.push_str("), ");
-            output.push_str(tsquery_function);
-            output.push_str("('simple', ");
+            output.push_str("), to_tsquery('simple', ");
             output.push_str(query);
             output.push_str("))");
         } else {
             output.push_str("to_tsvector('simple', ");
             output.push_str(&document);
-            output.push_str(") @@ ");
-            output.push_str(tsquery_function);
-            output.push_str("('simple', ");
+            output.push_str(") @@ to_tsquery('simple', ");
             output.push_str(query);
             output.push(')');
         }
@@ -144,10 +139,10 @@ fn fulltext_query_parameter_index(query: &str, sql: &str) -> crate::Result<usize
         .map_err(|_| fulltext_conversion_error("Kingbase MySQL full-text search parameter could not be located"))
 }
 
-fn fulltext_query_parameter<'a>(parameters: &'a [Value<'_>], index: usize) -> crate::Result<Option<&'a str>> {
+fn validate_fulltext_query_parameter(parameters: &[Value<'_>], index: usize) -> crate::Result<()> {
     match parameters.get(index).map(|parameter| &parameter.typed) {
-        Some(ValueType::Text(Some(query))) => Ok(Some(query)),
-        Some(ValueType::Opaque(opaque)) if opaque.typ() == &OpaqueType::Text => Ok(None),
+        Some(ValueType::Text(Some(_))) => Ok(()),
+        Some(ValueType::Opaque(opaque)) if opaque.typ() == &OpaqueType::Text => Ok(()),
         _ => Err(fulltext_conversion_error(
             "Kingbase MySQL full-text search requires a non-null string search value",
         )),

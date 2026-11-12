@@ -220,7 +220,7 @@ fn is_blob(native_type: &KingbaseMySqlType) -> bool {
     )
 }
 
-fn is_binary(native_type: &KingbaseMySqlType) -> bool {
+pub(super) fn is_binary(native_type: &KingbaseMySqlType) -> bool {
     matches!(
         native_type,
         KingbaseMySqlType::Bit(_) | KingbaseMySqlType::Binary(_) | KingbaseMySqlType::VarBinary(_)
@@ -231,7 +231,7 @@ fn is_bit(native_type: &KingbaseMySqlType) -> bool {
     matches!(native_type, KingbaseMySqlType::Bit(_))
 }
 
-fn is_string(native_type: &KingbaseMySqlType) -> bool {
+pub(super) fn is_string(native_type: &KingbaseMySqlType) -> bool {
     matches!(
         native_type,
         KingbaseMySqlType::Char(_)
@@ -243,7 +243,7 @@ fn is_string(native_type: &KingbaseMySqlType) -> bool {
     )
 }
 
-fn is_numeric(native_type: &KingbaseMySqlType) -> bool {
+pub(super) fn is_numeric(native_type: &KingbaseMySqlType) -> bool {
     matches!(
         native_type,
         KingbaseMySqlType::Int
@@ -277,7 +277,7 @@ fn native_conversion_attempt(previous: &KingbaseMySqlType, next: &KingbaseMySqlT
     (is_blob(previous) && is_bit(next)) || (is_datetime(previous) && is_numeric(next))
 }
 
-fn is_json(native_type: &KingbaseMySqlType) -> bool {
+pub(super) fn is_json(native_type: &KingbaseMySqlType) -> bool {
     matches!(native_type, KingbaseMySqlType::Json)
 }
 

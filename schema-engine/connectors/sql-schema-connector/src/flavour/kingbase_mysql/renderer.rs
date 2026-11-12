@@ -1,4 +1,4 @@
-use super::schema_differ::explicit_cast_supported;
+use super::schema_differ::{explicit_cast_supported, is_binary, is_json, is_numeric, is_string};
 use crate::{
     flavour::MysqlRenderer,
     migration_pair::MigrationPair,
@@ -160,7 +160,7 @@ impl SqlRenderer for KingbaseMysqlRenderer {
                         {
                             lines.extend(render_alter_column_with_using(changes, new_default.as_ref(), columns));
                         } else {
-                            lines.push(render_modify_column(changes, new_default.as_ref(), columns.next));
+                            lines.push(render_modify_column(new_default.as_ref(), columns.next));
                         }
                     }
                 }
@@ -509,19 +509,11 @@ fn render_column_type(column: TableColumnWalker<'_>) -> Cow<'static, str> {
     }
 }
 
-fn render_modify_column(
-    changes: &ColumnChanges,
-    new_default: Option<&DefaultValue>,
-    next_column: TableColumnWalker<'_>,
-) -> String {
-    let column_type = if changes.type_changed() {
-        Some(next_column.column_type().full_data_type.clone())
-            .filter(|type_name| !type_name.is_empty() || type_name.to_ascii_lowercase().contains("datetime"))
-    } else {
-        Some(next_column.column_type().full_data_type.clone()).filter(|type_name| !type_name.is_empty())
-    }
-    .map(Cow::Owned)
-    .unwrap_or_else(|| render_column_type(next_column));
+fn render_modify_column(new_default: Option<&DefaultValue>, next_column: TableColumnWalker<'_>) -> String {
+    let column_type = Some(next_column.column_type().full_data_type.clone())
+        .filter(|type_name| !type_name.is_empty())
+        .map(Cow::Owned)
+        .unwrap_or_else(|| render_column_type(next_column));
 
     let default = new_default
         .filter(|default| !default.is_empty_dbgenerated())
@@ -644,55 +636,6 @@ fn render_using_expression_for_types(
     };
 
     Some(expression)
-}
-
-fn is_binary(native_type: &KingbaseMySqlType) -> bool {
-    matches!(
-        native_type,
-        KingbaseMySqlType::Bit(_)
-            | KingbaseMySqlType::Binary(_)
-            | KingbaseMySqlType::VarBinary(_)
-            | KingbaseMySqlType::TinyBlob
-            | KingbaseMySqlType::Blob
-            | KingbaseMySqlType::MediumBlob
-            | KingbaseMySqlType::LongBlob
-    )
-}
-
-fn is_string(native_type: &KingbaseMySqlType) -> bool {
-    matches!(
-        native_type,
-        KingbaseMySqlType::Char(_)
-            | KingbaseMySqlType::VarChar(_)
-            | KingbaseMySqlType::TinyText
-            | KingbaseMySqlType::Text
-            | KingbaseMySqlType::MediumText
-            | KingbaseMySqlType::LongText
-    )
-}
-
-fn is_numeric(native_type: &KingbaseMySqlType) -> bool {
-    matches!(
-        native_type,
-        KingbaseMySqlType::Int
-            | KingbaseMySqlType::UnsignedInt
-            | KingbaseMySqlType::SmallInt
-            | KingbaseMySqlType::UnsignedSmallInt
-            | KingbaseMySqlType::TinyInt
-            | KingbaseMySqlType::UnsignedTinyInt
-            | KingbaseMySqlType::MediumInt
-            | KingbaseMySqlType::UnsignedMediumInt
-            | KingbaseMySqlType::BigInt
-            | KingbaseMySqlType::UnsignedBigInt
-            | KingbaseMySqlType::Decimal(_)
-            | KingbaseMySqlType::Float
-            | KingbaseMySqlType::Double
-            | KingbaseMySqlType::Year
-    )
-}
-
-fn is_json(native_type: &KingbaseMySqlType) -> bool {
-    matches!(native_type, KingbaseMySqlType::Json)
 }
 
 fn escape_string_literal(s: &str) -> Cow<'_, str> {
