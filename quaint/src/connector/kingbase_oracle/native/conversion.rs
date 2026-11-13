@@ -7,7 +7,7 @@ use crate::{
 use bigdecimal::{BigDecimal, FromPrimitive, ToPrimitive};
 use bytes::BytesMut;
 use chrono::{DateTime, NaiveDateTime, Utc};
-use kingbase_postgres_types::{FromSql, IsNull, ToSql};
+use kingbase_postgres_types::{FromSql, IsNull, ToSql, kingbase::OracleRowId};
 use kingbase_tokio_postgres::{
     Row,
     types::{Kind, Type},
@@ -58,6 +58,14 @@ pub(super) fn convert_row(row: &Row) -> crate::Result<Vec<Value<'static>>> {
                 }
             },
             KingbaseColumnType::Text(ty, v) => match ty {
+                KingbaseColumnTypeText::ORACLE_ROWID => {
+                    let value: Option<OracleRowId> = driver_result(row.try_get(index))?;
+                    let value = value
+                        .map(|value| value.to_text())
+                        .transpose()
+                        .map_err(|error| Error::builder(ErrorKind::conversion(error.to_string())).build())?;
+                    ValueType::Text(v.read(value.map(Cow::Owned)))
+                }
                 KingbaseColumnTypeText::TEXT
                 | KingbaseColumnTypeText::VARCHAR
                 | KingbaseColumnTypeText::BPCHAR
@@ -214,6 +222,11 @@ pub(crate) fn params_to_types(params: &[Value<'_>]) -> Vec<Type> {
                 Some("NCLOB") => return Type::ORACLE_NCLOB,
                 Some("JSON") => return Type::JSONB,
                 Some("UUID") => return Type::UUID,
+                Some("ROWID") => return Type::ORACLE_ROWID,
+                Some("UROWID") => return Type::ORACLE_UROWID,
+                Some("CHARBYTE") => return Type::ORACLE_BPCHARBYTE,
+                Some("VARCHAR2BYTE") => return Type::ORACLE_VARCHARBYTE,
+                Some("BINARYINTEGER") => return Type::INT4,
                 _ => {}
             }
 
@@ -351,6 +364,9 @@ impl ToSql for OracleParam<'_, '_> {
             }),
             ValueType::Float(value) => value.map(f64::from).map(|value| value.to_sql(ty, out)),
             ValueType::Double(value) => value.map(|value| value.to_sql(ty, out)),
+            ValueType::Text(value) if ty == &Type::ORACLE_ROWID => value
+                .as_ref()
+                .map(|value| OracleRowId::from_text(value)?.to_sql(ty, out)),
             ValueType::Text(value) if ty == &Type::UUID => value.as_ref().map(|value| {
                 let uuid = uuid::Uuid::parse_str(value)
                     .map_err(|error| -> Box<dyn std::error::Error + Sync + Send> { Box::new(error) })?;

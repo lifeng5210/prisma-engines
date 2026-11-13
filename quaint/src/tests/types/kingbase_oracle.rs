@@ -564,3 +564,70 @@ test_type!(timestamp_local_tz_without_precision(
         )
     )
 ));
+
+test_type!(char_byte(
+    kingbase_oracle,
+    "CHAR(8 BYTE)",
+    ColumnType::Text,
+    (Value::null_text(), Value::null_text()),
+    (Value::text("abc"), Value::text("abc     ")),
+    (Value::text("中文ab"), Value::text("中文ab"))
+));
+
+test_type!(varchar2_byte(
+    kingbase_oracle,
+    "VARCHAR2(8 BYTE)",
+    ColumnType::Text,
+    Value::null_text(),
+    Value::text("中文ab")
+));
+
+test_type!(binary_integer(
+    kingbase_oracle,
+    "BINARY_INTEGER",
+    ColumnType::Int32,
+    Value::null_int32(),
+    Value::int32(i32::MIN),
+    Value::int32(0),
+    Value::int32(i32::MAX)
+));
+
+test_type!(urowid(
+    kingbase_oracle,
+    "UROWID(4000)",
+    ColumnType::Text,
+    Value::null_text(),
+    Value::text("AAAAAAAAAAABAAAAAAAAAAA")
+));
+
+#[tokio::test]
+async fn rowid_native_parameters_roundtrip_with_server_generated_identifiers() -> crate::Result<()> {
+    use crate::{Value, prelude::Queryable, single::Quaint, tests::test_api::kingbase_oracle::CONN_STR};
+    let conn = Quaint::new(CONN_STR.as_str()).await?;
+    conn.raw_cmd("CREATE TEMPORARY TABLE rowid_codec_source (id INTEGER) WITH ROWID;\nINSERT INTO rowid_codec_source VALUES (1), (2);\nCREATE TEMPORARY TABLE rowid_codec_target (value ROWID UNIQUE)").await?;
+    let generated = conn
+        .query_raw("SELECT rowid, rowid::text AS expected FROM rowid_codec_source", &[])
+        .await?;
+    assert_eq!(generated.len(), 2);
+    for row in generated {
+        let expected = row["expected"].as_str().unwrap();
+        assert_eq!(row["rowid"].as_str(), Some(expected));
+        let value = Value::text(expected.to_owned()).with_native_column_type(Some("RowId"));
+        for typed in [false, true] {
+            let params = [value.clone()];
+            let sql = "INSERT INTO rowid_codec_target VALUES ($1) RETURNING value";
+            let result = if typed {
+                conn.query_raw_typed(sql, &params).await?
+            } else {
+                conn.query_raw(sql, &params).await?
+            };
+            assert_eq!(result.into_single()?["value"].as_str(), Some(expected));
+            conn.raw_cmd("DELETE FROM rowid_codec_target").await?;
+        }
+    }
+    let null = conn.query_raw("SELECT CAST(NULL AS ROWID) AS value", &[]).await?;
+    assert_eq!(null.into_single()?["value"], Value::null_text());
+    let invalid = [Value::text("invalid-rowid").with_native_column_type(Some("RowId"))];
+    assert!(conn.query_raw_typed("SELECT $1 AS value", &invalid).await.is_err());
+    Ok(())
+}

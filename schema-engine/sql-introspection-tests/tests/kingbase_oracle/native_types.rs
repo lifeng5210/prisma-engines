@@ -171,3 +171,22 @@ async fn oracle_number_precision_policy_introspects_valid_models(api: &mut TestA
     .unwrap();
     Ok(())
 }
+
+#[test_connector(tags(KingbaseOracle))]
+async fn oracle_additional_native_types_render_schema_annotations(api: &mut TestApi) -> TestResult {
+    api.raw_cmd("CREATE TABLE oracle_additional_types (id INTEGER PRIMARY KEY, fixed_value CHAR(8 BYTE), variable_value VARCHAR2(8 BYTE), row_value ROWID, universal_value UROWID(4000), integer_value BINARY_INTEGER)").await;
+    let schema = api.introspect_dml().await?;
+    for expected in [
+        "@db.CharByte(8)",
+        "@db.VarChar2Byte(8)",
+        "@db.RowId",
+        "@db.URowId(4000)",
+        "@db.BinaryInteger",
+    ] {
+        assert!(schema.contains(expected), "missing {expected}: {schema}");
+    }
+    assert!(!schema.contains("Unsupported"), "{schema}");
+    let full = format!("datasource db {{\n provider = \"kingbase-oracle\"\n}}\n{schema}");
+    psl::parse_schema_without_extensions(full).unwrap();
+    Ok(())
+}

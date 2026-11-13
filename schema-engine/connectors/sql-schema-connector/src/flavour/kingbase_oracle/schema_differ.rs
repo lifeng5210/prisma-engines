@@ -304,6 +304,17 @@ fn oracle_type_change(previous: KingbaseOracleType, next: KingbaseOracleType) ->
         } else {
             RiskyCast
         }),
+        (KingbaseOracleType::CharByte(previous), KingbaseOracleType::CharByte(next))
+        | (KingbaseOracleType::VarChar2Byte(previous), KingbaseOracleType::VarChar2Byte(next)) => {
+            Some(if next >= previous { SafeCast } else { RiskyCast })
+        }
+        (KingbaseOracleType::URowId(previous), KingbaseOracleType::URowId(next)) => {
+            Some(if length_can_represent(next, previous) {
+                SafeCast
+            } else {
+                RiskyCast
+            })
+        }
         (KingbaseOracleType::Date, KingbaseOracleType::Timestamp(_) | KingbaseOracleType::TimestampTz(_)) => {
             Some(SafeCast)
         }
@@ -412,6 +423,9 @@ fn is_character_or_lob(native_type: KingbaseOracleType) -> bool {
             | KingbaseOracleType::VarChar2(_)
             | KingbaseOracleType::NChar(_)
             | KingbaseOracleType::NVarChar2(_)
+            | KingbaseOracleType::CharByte(_)
+            | KingbaseOracleType::VarChar2Byte(_)
+            | KingbaseOracleType::URowId(_)
             | KingbaseOracleType::Clob
             | KingbaseOracleType::NClob
     )

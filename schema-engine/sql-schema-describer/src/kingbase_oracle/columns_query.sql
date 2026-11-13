@@ -5,6 +5,7 @@ SELECT
     t.typname AS type_name,
     tn.nspname AS type_namespace,
     t.typtype :: text AS type_kind,
+    bt.typname AS base_type_name,
     (
         t.typelem <> 0
         AND t.typlen = -1
@@ -13,7 +14,11 @@ SELECT
     a.attidentity :: text AS identity,
     i.numeric_precision,
     i.numeric_scale,
-    i.character_maximum_length AS length,
+    CASE
+        WHEN t.typname IN ('bpcharbyte', 'varcharbyte', 'urowid') AND a.atttypmod >= 4
+            THEN a.atttypmod - 4
+        ELSE i.character_maximum_length
+    END AS length,
     i.datetime_precision AS time_precision,
     sys_catalog.sys_get_expr(d.adbin, d.adrelid) AS default_expression,
     col_description(c.oid, a.attnum) AS description,
@@ -49,6 +54,7 @@ FROM
     AND NOT a.attisdropped
     JOIN sys_catalog.sys_type t ON t.oid = a.atttypid
     JOIN sys_catalog.sys_namespace tn ON tn.oid = t.typnamespace
+    LEFT JOIN sys_catalog.sys_type bt ON bt.oid = t.typbasetype
     LEFT JOIN sys_catalog.sys_attrdef d ON d.adrelid = c.oid
     AND d.adnum = a.attnum
     LEFT JOIN sys_catalog.sys_class seq ON seq.oid = CAST(

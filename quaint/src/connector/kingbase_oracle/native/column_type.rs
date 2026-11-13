@@ -86,7 +86,7 @@ create_pg_mapping! {
     Float(Option<f32>) => [FLOAT4],
     Double(Option<f64>) => [FLOAT8],
     Numeric(Option<bigdecimal::BigDecimal>) => [NUMERIC],
-    Text(Option<Cow<'a, str>>) => [TEXT, VARCHAR, BPCHAR, NAME, UNKNOWN, ORACLE_UROWID, ORACLE_CLOB, ORACLE_NCLOB, ORACLE_BPCHARBYTE, ORACLE_VARCHARBYTE, ORACLE_BFILE],
+    Text(Option<Cow<'a, str>>) => [TEXT, VARCHAR, BPCHAR, NAME, UNKNOWN, ORACLE_ROWID, ORACLE_UROWID, ORACLE_CLOB, ORACLE_NCLOB, ORACLE_BPCHARBYTE, ORACLE_VARCHARBYTE, ORACLE_BFILE],
     Bytes(Option<Cow<'a, [u8]>>) => [BYTEA, ORACLE_BLOB],
     Json(Option<serde_json::Value>) => [JSON, JSONB],
     Xml(Option<Cow<'a, str>>) => [XML],
@@ -100,7 +100,6 @@ create_pg_mapping! {
     TextArray(Option<Vec<Value<'static>>>) => [TEXT_ARRAY, NAME_ARRAY, VARCHAR_ARRAY],
 
     // Text-protocol query metadata does not imply native binary codec support.
-    [Text => [ORACLE_ROWID]],
     [Time => [TIMETZ]],
 }
 
@@ -187,7 +186,6 @@ mod tests {
     #[test]
     fn metadata_only_types_do_not_enable_binary_decoding() {
         for (typ, expected) in [
-            (Type::ORACLE_ROWID, ColumnType::Text),
             (Type::TIMETZ, ColumnType::Time),
             (Type::BOOL_ARRAY, ColumnType::Unknown),
         ] {

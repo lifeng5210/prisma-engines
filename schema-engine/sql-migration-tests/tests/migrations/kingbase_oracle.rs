@@ -2521,3 +2521,66 @@ fn oracle_number_high_scale_remains_idempotent(mut api: TestApi) {
         Some(&"1.2345e-40".parse().unwrap())
     );
 }
+
+#[test_connector(tags(KingbaseOracle))]
+fn oracle_additional_native_types_roundtrip_without_repeated_migrations(mut api: TestApi) {
+    let schema = api.datamodel_with_provider(
+        r#"
+        model AdditionalNativeTypes {
+            id Int @id
+            fixed String? @db.CharByte(8) @default("abc")
+            variable String? @db.VarChar2Byte(8) @default("abc")
+            row String? @db.RowId @default("AAAAAAAAAAABAAAAAAAAAAA")
+            universal String? @db.URowId(4000) @default("AAAAAAAAAAABAAAAAAAAAAA")
+            integer Int? @db.BinaryInteger @default(7)
+        }
+    "#,
+    );
+    api.schema_push(&schema)
+        .send()
+        .assert_green()
+        .assert_has_executed_steps();
+    api.schema_push(&schema).send().assert_green().assert_no_steps();
+    api.raw_cmd(r#"INSERT INTO "AdditionalNativeTypes" (id, fixed, variable, "row", universal, integer) VALUES (1, '中文ab', '中文ab', nextrowid(), 'AAAAAAAAAAABAAAAAAAAAAA', -2147483648)"#);
+    let row = api
+        .query_raw(
+            r#"SELECT fixed, variable, "row", universal, integer FROM "AdditionalNativeTypes" WHERE id = 1"#,
+            &[],
+        )
+        .into_single()
+        .unwrap();
+    assert_eq!(row["fixed"].as_str(), Some("中文ab"));
+    assert_eq!(row["variable"].as_str(), Some("中文ab"));
+    assert_eq!(row["integer"].as_integer(), Some(i64::from(i32::MIN)));
+    let widened = schema
+        .replace("CharByte(8)", "CharByte(12)")
+        .replace("VarChar2Byte(8)", "VarChar2Byte(12)")
+        .replace("URowId(4000)", "URowId(5000)");
+    api.schema_push(&widened)
+        .send()
+        .assert_green()
+        .assert_has_executed_steps();
+    api.schema_push(&widened).send().assert_green().assert_no_steps();
+    let row = api
+        .query_raw(
+            r#"SELECT fixed, integer FROM "AdditionalNativeTypes" WHERE id = 1"#,
+            &[],
+        )
+        .into_single()
+        .unwrap();
+    assert_eq!(row["fixed"].as_str(), Some("中文ab    "));
+    assert_eq!(row["integer"].as_integer(), Some(i64::from(i32::MIN)));
+    api.raw_cmd(r#"INSERT INTO "AdditionalNativeTypes" (id) VALUES (2)"#);
+    let row = api
+        .query_raw(
+            r#"SELECT fixed, variable, "row", universal, integer FROM "AdditionalNativeTypes" WHERE id = 2"#,
+            &[],
+        )
+        .into_single()
+        .unwrap();
+    assert_eq!(row["fixed"].as_str(), Some("abc         "));
+    assert_eq!(row["variable"].as_str(), Some("abc"));
+    assert_eq!(row["row"].as_str(), Some("AAAAAAAAAAABAAAAAAAAAAA"));
+    assert_eq!(row["universal"].as_str(), Some("AAAAAAAAAAABAAAAAAAAAAA"));
+    assert_eq!(row["integer"].as_integer(), Some(7));
+}

@@ -820,3 +820,28 @@ fn oracle_include_keys_cast_defaults_and_generation_ownership(api: TestApi) {
         Some(ColumnGeneration::Identity)
     ));
 }
+
+#[test_connector(tags(KingbaseOracle))]
+fn oracle_additional_native_types_preserve_names_and_lengths(api: TestApi) {
+    api.raw_cmd("CREATE TABLE oracle_additional_types (id INTEGER PRIMARY KEY, fixed_value CHAR(8 BYTE), variable_value VARCHAR2(8 BYTE), row_value ROWID, universal_value UROWID(4000), integer_value BINARY_INTEGER)");
+    let schema = api.describe();
+    let table = schema.table_walker("oracle_additional_types").unwrap();
+    for (name, native) in [
+        ("fixed_value", KingbaseOracleType::CharByte(8)),
+        ("variable_value", KingbaseOracleType::VarChar2Byte(8)),
+        ("row_value", KingbaseOracleType::RowId),
+        ("universal_value", KingbaseOracleType::URowId(Some(4000))),
+        ("integer_value", KingbaseOracleType::BinaryInteger),
+    ] {
+        let column = table.column(name).unwrap();
+        assert_eq!(column.column_native_type::<KingbaseOracleType>(), Some(&native));
+        assert_eq!(
+            column.column_type_family(),
+            &if native == KingbaseOracleType::BinaryInteger {
+                ColumnTypeFamily::Int
+            } else {
+                ColumnTypeFamily::String
+            }
+        );
+    }
+}

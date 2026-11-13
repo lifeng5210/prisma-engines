@@ -447,3 +447,46 @@ fn number_precision_bounds_do_not_restrict_supported_scale() {
     );
     assert!(error.contains("Scale must be between 0 and 1000."), "{error}");
 }
+
+#[test]
+fn oracle_additional_native_types_validate_arguments_and_scalar_mappings() {
+    let fields = [
+        ("fixed String @db.CharByte(8)", CharByte(8)),
+        ("variable String @db.VarChar2Byte(8)", VarChar2Byte(8)),
+        ("row String @db.RowId", RowId),
+        ("universal String @db.URowId(4000)", URowId(Some(4000))),
+        ("unbounded String @db.URowId", URowId(None)),
+        ("integer Int @db.BinaryInteger", BinaryInteger),
+    ];
+    for (field, native) in fields {
+        let schema =
+            format!("datasource db {{\n provider = \"kingbase-oracle\"\n}}\nmodel Item {{\n id Int @id\n {field}\n}}");
+        assert_valid(&schema);
+        let instance = NativeTypeInstance::new(native);
+        let scalar = KINGBASE_ORACLE
+            .scalar_type_for_native_type(&instance, &psl::parser_database::NoExtensionTypes)
+            .unwrap();
+        assert_eq!(
+            scalar,
+            ScalarFieldType::BuiltInScalar(if native == BinaryInteger {
+                ScalarType::Int
+            } else {
+                ScalarType::String
+            })
+        );
+    }
+    for field in [
+        "value String @db.CharByte",
+        "value String @db.VarChar2Byte",
+        "value String @db.CharByte(0)",
+        "value String @db.VarChar2Byte(10485761)",
+        "value String @db.URowId(0)",
+        "value String @db.URowId(10485761)",
+        "value Int @db.RowId",
+        "value String @db.BinaryInteger",
+    ] {
+        let schema =
+            format!("datasource db {{\n provider = \"kingbase-oracle\"\n}}\nmodel Item {{\n id Int @id\n {field}\n}}");
+        assert!(psl::parse_schema_without_extensions(schema).is_err(), "{field}");
+    }
+}

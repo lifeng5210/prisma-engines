@@ -678,11 +678,16 @@ fn optional_argument_type(native_type: &KingbaseOracleType) -> Cow<'static, str>
             format!("NUMBER({precision},{scale})").into()
         }
         KingbaseOracleType::TinyInt => "TINYINT".into(),
+        KingbaseOracleType::BinaryInteger => "sys.binary_integer".into(),
         KingbaseOracleType::Float(precision) => optional_argument("FLOAT", *precision),
         KingbaseOracleType::BinaryFloat => "BINARY_FLOAT".into(),
         KingbaseOracleType::BinaryDouble => "BINARY_DOUBLE".into(),
         KingbaseOracleType::Char(length) => optional_argument("CHAR", *length),
         KingbaseOracleType::VarChar2(length) => optional_argument("VARCHAR2", *length),
+        KingbaseOracleType::CharByte(length) => format!("CHAR({length} BYTE)").into(),
+        KingbaseOracleType::VarChar2Byte(length) => format!("VARCHAR2({length} BYTE)").into(),
+        KingbaseOracleType::RowId => "ROWID".into(),
+        KingbaseOracleType::URowId(length) => optional_argument("UROWID", *length),
         KingbaseOracleType::NChar(length) => optional_argument("NCHAR", *length),
         KingbaseOracleType::NVarChar2(length) => optional_argument("NVARCHAR2", *length),
         KingbaseOracleType::Clob => "CLOB".into(),

@@ -156,10 +156,17 @@ pub(super) fn parse_native(
         }
         _ => None,
     };
-    let fixed_character = matches!(native, Some(KingbaseOracleType::Char(_) | KingbaseOracleType::NChar(_)));
+    let fixed_character = matches!(
+        native,
+        Some(KingbaseOracleType::Char(_) | KingbaseOracleType::NChar(_) | KingbaseOracleType::CharByte(_))
+    );
     let native_string_cast = match native {
         Some(KingbaseOracleType::Uuid) => Some("uuid"),
         Some(KingbaseOracleType::Xml) => Some("xml"),
+        Some(KingbaseOracleType::CharByte(_)) => Some("bpcharbyte"),
+        Some(KingbaseOracleType::VarChar2Byte(_)) => Some("varcharbyte"),
+        Some(KingbaseOracleType::RowId) => Some("rowid"),
+        Some(KingbaseOracleType::URowId(_)) => Some("urowid"),
         _ => None,
     };
     parse_inner(input, family, None, floating_cast, fixed_character, native_string_cast)
@@ -296,6 +303,14 @@ fn harmless_casts(
             ]
         })
         .collect();
+    if let Some(name @ ("bpcharbyte" | "varcharbyte" | "rowid" | "urowid")) = native_string_cast {
+        names.extend([
+            quote(name),
+            format!("sys.{name}"),
+            format!("sys.{}", quote(name)),
+            format!("pg_catalog.{}", quote(name)),
+        ]);
+    }
     if let Some((namespace, name)) = enm {
         names.push(quote(name));
         names.push(format!("{}.{}", quote(namespace), quote(name)));
@@ -320,7 +335,10 @@ fn harmless_casts(
         }) else {
             return false;
         };
-        let is_fixed = matches!(name.rsplit('.').next(), Some("bpchar" | "character"));
+        let is_fixed = matches!(
+            name.rsplit('.').next().map(|name| name.trim_matches('"')),
+            Some("bpchar" | "character" | "bpcharbyte")
+        );
         // A later bpchar-to-text/varchar cast removes trailing spaces even
         // when the destination column is CHAR. Keep that whole expression.
         if fixed_cast && !is_fixed {
@@ -887,6 +905,38 @@ mod tests {
                 parse(expression, &family).unwrap().kind(),
                 &DefaultKind::DbGenerated(Some(expression.into()))
             );
+        }
+    }
+}
+
+#[cfg(test)]
+mod added_native_type_defaults {
+    use super::*;
+
+    #[test]
+    fn recognizes_matching_native_casts_without_losing_fixed_width_semantics() {
+        for (native, cast) in [
+            (KingbaseOracleType::CharByte(8), "bpcharbyte"),
+            (KingbaseOracleType::VarChar2Byte(8), "varcharbyte"),
+            (KingbaseOracleType::RowId, "\"rowid\""),
+            (KingbaseOracleType::URowId(Some(4000)), "urowid"),
+        ] {
+            let expression = format!("'value'::{cast}");
+            let parsed = parse_native(&expression, &ColumnTypeFamily::String, Some(&native)).unwrap();
+            assert_eq!(
+                parsed.kind(),
+                &crate::DefaultKind::Value(PrismaValue::String("value".into()))
+            );
+        }
+        for cast in ["bpcharbyte", "\"bpcharbyte\"", "sys.bpcharbyte"] {
+            let expression = format!("'abc '::{cast}::text");
+            let parsed = parse_native(
+                &expression,
+                &ColumnTypeFamily::String,
+                Some(&KingbaseOracleType::CharByte(8)),
+            )
+            .unwrap();
+            assert!(matches!(parsed.kind(), crate::DefaultKind::DbGenerated(Some(value)) if value == &expression));
         }
     }
 }

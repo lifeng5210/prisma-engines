@@ -253,6 +253,12 @@ async fn describe_schema(conn: &dyn Queryable, schemas: &[&str]) -> DescriberRes
             (ColumnTypeFamily::Unsupported(name.clone()), None)
         } else if let Some(id) = enum_id {
             (ColumnTypeFamily::Enum(id), None)
+        } else if name == "binary_integer"
+            && (row.get_expect_string("type_namespace") != "sys"
+                || row.get_expect_string("type_kind") != "d"
+                || row.get_string("base_type_name").as_deref() != Some("int4"))
+        {
+            (ColumnTypeFamily::Unsupported(name.clone()), None)
         } else {
             column_type(
                 &name,
@@ -479,6 +485,14 @@ fn column_type(
         "int2" | "int4" | "integer" | "smallint" => number(10),
         "int8" | "bigint" => number(19),
         "tinyint" => TinyInt,
+        "binary_integer" => BinaryInteger,
+        "bpcharbyte" => CharByte(positive(length).unwrap_or(1)),
+        "varcharbyte" => match positive(length) {
+            Some(length) => VarChar2Byte(length),
+            None => return (ColumnTypeFamily::Unsupported(name.to_owned()), None),
+        },
+        "rowid" => RowId,
+        "urowid" => URowId(positive(length)),
         "float4" | "binary_float" => BinaryFloat,
         "float8" | "binary_double" => BinaryDouble,
         "bool" | "boolean" => Boolean,
@@ -511,7 +525,7 @@ fn column_type(
         return (ColumnTypeFamily::Unsupported(name), Some(native));
     }
     let family = match native {
-        TinyInt => ColumnTypeFamily::Int,
+        TinyInt | BinaryInteger => ColumnTypeFamily::Int,
         Number(
             KingbaseOracleNumberArguments::Precision(p) | KingbaseOracleNumberArguments::PrecisionAndScale(p, 0),
         ) if p <= 10 => ColumnTypeFamily::Int,
